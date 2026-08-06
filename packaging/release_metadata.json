@@ -2,6 +2,6 @@
   "godot_compatibility": "4.7",
   "minimum_bootstrap": 1,
   "network_protocol": 4,
-  "notes": "Joining a server on a different version now triggers the signed auto-updater immediately: the update downloads, stages, and the menu restarts itself onto the matching version.",
+  "notes": "The startup update check now always runs (the six-hour throttle applies only to the periodic and menu checks), so a release published minutes ago is picked up on the very next launch.",
   "requires_installer": false
 }
