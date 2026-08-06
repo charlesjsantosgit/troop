@@ -1,0 +1,14 @@
+.godot/
+.DS_Store
+__pycache__/
+*.pyc
+artifacts/*
+!artifacts/.gdignore
+build/*
+!build/.gdignore
+dist/*
+!dist/.gdignore
+packaging/private/
+*.p12
+*.pfx
+*.mobileprovision

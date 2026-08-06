@@ -1,0 +1,7 @@
+{
+  "godot_compatibility": "4.7",
+  "minimum_bootstrap": 1,
+  "network_protocol": 3,
+  "notes": "Worldwide dedicated multiplayer, proximity push-to-talk voice chat, and signed automatic content updates.",
+  "requires_installer": true
+}

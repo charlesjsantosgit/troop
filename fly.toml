@@ -1,0 +1,36 @@
+# The Fly application name is intentionally omitted. CI supplies it from the
+# FLY_APP_NAME GitHub Actions secret with `flyctl deploy --app ...`.
+primary_region = "sjc"
+kill_signal = "SIGTERM"
+kill_timeout = 30
+
+[build]
+  dockerfile = "Dockerfile"
+
+[deploy]
+  strategy = "rolling"
+  wait_timeout = "10m"
+
+[env]
+  # Fly requires public UDP services to bind to the resolved address behind
+  # `fly-global-services`, not the wildcard interface. The server startup code
+  # must consume these values before calling ENetMultiplayerPeer.create_server.
+  TROOP_BIND_IP = "fly-global-services"
+  TROOP_SERVER_PORT = "30623"
+
+[[services]]
+  protocol = "udp"
+  internal_port = 30623
+  auto_stop_machines = "off"
+  auto_start_machines = false
+  min_machines_running = 1
+
+  [[services.ports]]
+    port = 30623
+
+[[restart]]
+  policy = "always"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "1gb"

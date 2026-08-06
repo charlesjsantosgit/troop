@@ -1,0 +1,253 @@
+# 🐒 TROOP
+
+Multiplayer monkey movement game in an **infinite procedurally generated jungle**,
+styled after Meccha Chameleon's cute low-poly party-game look. Godot 4.x, zero
+asset files — every mesh, sound and animation is generated in code.
+
+## Play
+
+```bash
+godot --path .                         # source menu: solo + configured online service
+TROOP_SERVER_HOST=game.example.com \
+  godot --path . -- online             # development override for the public server
+godot --headless --path . -- server    # dedicated authority used by managed hosting
+```
+
+Player releases expose **PLAY ONLINE · PUBLIC CANOPY**, which connects straight
+to the managed worldwide server embedded by the release workflow. Players do
+not host matches, forward router ports, or expose a home computer. Source builds
+deliberately keep the endpoint blank; see `hosting/README.md` for the one-time
+Fly and GitHub setup.
+
+## Player installers
+
+Versioned Windows and macOS player packages are written to `dist/`. On a Mac
+with Godot 4.7 export templates and NSIS installed, rebuild both with:
+
+```bash
+./packaging/build_installers.sh
+```
+
+See `packaging/README.md` for signing, notarization, and release notes.
+
+Release builds check a small RSA-signed manifest on GitHub Releases. Ordinary
+script, scene, shader, and generated-content updates download as a compact Godot
+resource pack, are re-verified on every boot, and take effect on the next
+launch. Updates that change Godot itself, the updater bootstrap, native code, or
+project settings instead offer the full Windows installer or macOS disk image.
+The game remains fully playable when GitHub is offline.
+
+Worldwide multiplayer uses a headless ENet authority on UDP **30623**. Clients
+rebuild identical jungle geometry from its seed while the server validates and
+relays players, projectiles, collectibles, supply-chest claims, and proximity
+voice. Hold **T** for low-latency positional push-to-talk; microphone capture is
+off whenever T is released. Voice volume and the PTT binding are configurable.
+
+## Day, night, seasons, and weather
+
+A complete 24-hour day/night cycle lasts 60 real minutes. Its shared clock stays
+in sync in multiplayer, including for players who join a match already in
+progress.
+
+The local calendar selects Northern Hemisphere seasons. Spring brings rain,
+summer favors clear skies and nighttime fireflies, fall turns the leaves and
+sends loose leaves through the air, and winter covers the jungle in falling snow
+and gives every monkey a scarf.
+
+## Controls
+
+| input | action |
+|---|---|
+| WASD + mouse | run / look |
+| SHIFT | sprint on all fours with a gorilla-style quadrupedal gallop |
+| SPACE | jump — double jump, wall-jump, and **jump off** a vine mid-swing |
+| CTRL | slide on ground (keeps momentum, accelerates downhill) / **dive** in air |
+| E | open a nearby supply chest; hold to grab the vine you're **looking at** when it's within realistic arm range (~1-3m) — a ring circles the targeted grab point; works mid-flight as you pass a strand |
+| LMB | fire (hold for full-auto with the SMG) |
+| RMB (hold) | aim in first person; the sniper enters its magnified optic |
+| Z | cycle the sniper optic through 2.5× / 5× / 10× |
+| Q | toggle melee mode — stow the weapon on the back; LMB chains a straight, hook, and two-paw hammer strike |
+| C | toggle first person / collision-safe right-shoulder camera |
+| 1 / 2 / 3 / 4 | switch between the banana gun, six-shell pump shotgun, 20-round SMG, and five-round sniper rifle |
+| R | reload with a weapon-specific trick animation |
+| H | use a bandage while grounded to restore 42 health; taking damage interrupts the wrap |
+| W / S while swinging | pump the swing |
+| A / D while swinging | steer the swing plane |
+| scroll wheel | reel rope in / out — scroll up to shorten, down to lengthen |
+| V | ook (everyone hears it) |
+| T (hold) | push-to-talk proximity voice chat in online multiplayer |
+| ESC | release mouse |
+
+The banana gun and SMG use a compact center-dot precision reticle. It stays exact
+while stationary, opens slightly while moving, and blooms substantially during
+one-handed vine fire. The shotgun ring includes both its pellet cone and the
+same movement/swing error, with the current cone diameter and aim distance shown
+below the crosshair.
+
+Every firearm has a staged, sound-synchronized reload. The banana gun ejects a
+curved banana magazine, flips a fresh one from the left paw, catches it, and
+snaps it home. The SMG performs the same drop/flip/catch sequence before a
+charging-handle rack; the sniper adds a heavy bolt flourish. The shotgun flips
+each individual shell into the loading paw, inserts it through the port, then
+finishes with an exaggerated pump. Fired SMG brass, shotgun hulls, sniper
+casings, and discarded magazines become lightweight physical debris with
+bounded impact sounds and automatic cleanup. Shared choreography and debris
+helpers give future weapons the same event-timed reload foundation. Reload and
+bandage presentation is replicated too, so other players see the prop handling
+and healing pose.
+
+Supply huts appear as moderately common clearings in the rainforest, bamboo,
+and highland biomes. Their openable, host-authoritative chest contains ammo for
+one weapon type and can also contain bandages. Chest contents and claimed state
+are deterministic, persist through chunk streaming, and synchronize for late
+joiners.
+
+The sniper fires a 215 m/s physically falling projectile zeroed at 75 m. Body
+hits remove 85 health and any head hit is lethal. Its scope supplies a live
+range and holdover readout; the center dot turns red over an enemy and pulses
+smaller over the head. Hip-fire spread is represented by the reticle exactly.
+The rifle report includes a long spatial reverb tail and two restrained echoes.
+
+Deep water automatically switches to freestyle swimming; steer with WASD and
+hold SHIFT for a stronger stroke. Flow loop: sprint → jump → dive → grab low → pump + reel → SPACE-fling at the
+bottom of the arc → soar over the canopy → landing roll → slide → repeat.
+Bananas float along swing arcs; collect them for score (synced).
+
+## Movement internals
+
+- Momentum-first: overspeed from flings bleeds off gently instead of clamping.
+- Coyote time (0.12s), jump buffering (0.14s), variable jump height.
+- Swing is a verlet pendulum: constraint only applies when the rope is taut, so
+  slack rope = free fall. Reeling in at the arc bottom does real work → speed.
+- Grabbing never snap-flings: the rope starts at your current distance and the
+  hands slide smoothly to the grabbed point; overstretch closes at a capped
+  rate (9 m/s) instead of in a single frame.
+- Vines collide with the world: the rope raycasts each tick and bends around
+  trunks, branches, canopies and rocks via wrap pivots, shortening the swing
+  radius — then unwinds when the arc opens back up. Wrap points replicate.
+- The rope radius is where you grabbed the vine; the vine never shortens — the
+  remainder trails below your grip as a physically simulated segment chain.
+- Releasing a vine preserves its exact bent shape and momentum. The anchored
+  strand keeps swinging under gravity, can be grabbed again while moving, and
+  only returns to the static jungle mesh after it naturally settles.
+- Grabs carry momentum: attaching redirects your full speed onto the new swing
+  tangent, so chained vine-to-vine swings never dead-stop.
+- Release gives ×1.12 when taut plus an upward pop on SPACE jump-off.
+- The rig has articulated elbows and knees with visible joint caps. A swinging
+  monkey holds the vine with its left paw and keeps its weapon raised in the
+  right in both first and third person; unarmed swing poses can still use both
+  paws. With the heavier sniper equipped, the tail coils around the rope and
+  both legs brace against it while pumping/steering speed is reduced.
+- Holding sprint transitions into a low, gorilla-style quadrupedal gallop. The
+  procedural pose drives head stabilization, spine compression/extension,
+  shoulder and hip roll, all four planted/recovery limbs, paw/foot alignment,
+  and a full-width furred tail with a delayed counterbalancing wave. Fast vine
+  landings flow into the same gait without a bipedal pop.
+- Deep water uses a full-body freestyle cycle: alternating underwater pulls and
+  high-elbow recoveries, breathing head turn, axial torso roll, six-beat flutter
+  kick, articulated feet, and a trailing tail. Stroke power produces two small
+  propulsion surges per cycle while buoyancy follows the rendered wave surface.
+- Sprinting and swimming automatically stow the equipped weapon on the back. Q
+  uses the same mount for a timed three-hit melee mode with first- and
+  third-person attack animation.
+- Grabbing hides the static vine and draws a live rope anchor→hand (replicated).
+- The camera layers speed-scaled stride bob, lateral weight shift, acceleration
+  inertia, airborne lag, vine pendulum banking, freestyle stroke heave, and a
+  damped landing dip. Every component is bounded; sniper ADS hard-suppresses
+  locomotion sway and projection shake so its center dot remains ballistic-exact.
+
+## Rendering and performance
+
+- A collision-free 192 m macro-sector HLOD ring extends the generated horizon
+  to 672 m (5.6× the old near edge). Its indexed terrain, clipped coarse water,
+  and combined tree silhouettes use cheap dedicated shaders with no gameplay
+  nodes or shadows; canonical tree positions match the full chunks that replace
+  them as the player approaches.
+- Four low-frequency biomes—Emerald Rainforest, Bamboo Grove, Flooded Wetland,
+  and Cloud Highland—vary tree anatomy, trunk/canopy palette, undergrowth,
+  rocks, fog, and ambience across coherent regions rather than per-tile patches.
+- Warped macro basins make irregular lakes hundreds of metres across. Near
+  shores retain the animated/refraction water and pooled ripple/splash system,
+  while distant submerged cells use a much cheaper wave shader.
+- Trees are submitted as four batched surfaces per chunk: cross-faded high and
+  low trunk/canopy LODs replace thousands of individual tree draw calls.
+- Ferns, broadleaf plants, wetland reeds, grass, vines, rocks, water and
+  collectibles use batched meshes, distance ranges, and soft fades; distant LOD
+  canopies stop casting shadows.
+- Water combines layered directional waves, animated micro-normal detail,
+  refraction, depth/Fresnel tinting, shore and crest foam, and pooled interactive
+  ripple deformation. Entry, exit, paw-stroke, kick, wake, foam, and spray
+  effects share the same CPU wave-height function as the shader and use
+  synthesized spatial SFX.
+- Only the two chunk rings around the player remain in the physics broadphase;
+  the outer streamed ring is visual scenery until the player approaches.
+- Near terrain shares an indexed 17×17 vertex lattice instead of emitting six
+  duplicate vertices per cell, cutting each full chunk from 1,536 terrain
+  vertices/height calls to 289 without changing collision boundaries.
+- 3D resolution adapts gradually after sustained low frame rate, independently
+  of the full-resolution HUD. At the lower tier it also disables SSIL and
+  volumetric fog, shortens shadow distance, and reduces ambient particles.
+- Shader materials are cached and shared, bananas are single batched meshes,
+  water tessellation is distance-capped, and 3D uses lightweight FXAA.
+- Seasonal color and snow coverage are shared shader parameters rather than
+  rebuilt terrain or per-tree materials. Rain, leaves, and snow use bounded GPU
+  particle fields whose density follows the same adaptive performance tiers.
+
+## Tests
+
+```bash
+godot --headless --path . res://scenes/main.tscn -- movetest
+godot --headless --path . res://scenes/main.tscn --quit-after 6000 -- generationtest
+godot --headless --path . res://scenes/main.tscn --quit-after 6000 -- seasontest
+godot --headless --path . res://scenes/main.tscn --quit-after 6000 -- combattest
+godot --headless --path . res://scenes/main.tscn --quit-after 6000 -- pausetest
+godot --headless --path . res://scenes/main.tscn --quit-after 6000 -- aitest
+godot --headless --path . --script res://tests/voicetest.gd
+godot --headless --path . --script res://tests/netsecuritytest.gd
+godot --headless --path . --script res://tests/updatetest.gd
+godot --resolution 1600x900 --max-fps 0 --path . res://scenes/main.tscn -- perftest
+godot --resolution 1600x900 --max-fps 0 --path . res://scenes/main.tscn -- perftest spring
+godot --resolution 1600x900 --max-fps 0 --path . res://scenes/main.tscn -- perftest summer
+godot --resolution 1600x900 --max-fps 0 --path . res://scenes/main.tscn -- perftest winter
+# two-terminal multiplayer check:
+godot --headless --path . res://scenes/main.tscn --quit-after 4000 -- nettest-host
+godot --headless --path . res://scenes/main.tscn --quit-after 4000 -- nettest-join 127.0.0.1
+# dedicated-server startup check:
+TROOP_BIND_IP=127.0.0.1 godot --headless --path . \
+  res://scenes/main.tscn --quit-after 30 -- server
+# three-terminal dedicated voice relay check (use the same free port):
+godot --headless --path . --script res://tests/voice_relay_fixture.gd -- server 30626
+godot --headless --path . --script res://tests/voice_relay_fixture.gd -- receiver 30626
+godot --headless --path . --script res://tests/voice_relay_fixture.gd -- sender 30626
+# screenshots (needs a window):
+godot --path . res://scenes/main.tscn -- shot vista /tmp/vista.png
+godot --path . res://scenes/main.tscn -- shot swing /tmp/swing.png
+godot --path . res://scenes/main.tscn -- shot pause-menu /tmp/pause-menu.png
+godot --path . res://scenes/main.tscn -- shot pause-settings /tmp/pause-settings.png
+godot --path . res://scenes/main.tscn -- shot pause-controls /tmp/pause-controls.png
+# forced seasonal and lighting fixtures (independent of the current month/time):
+godot --path . res://scenes/main.tscn -- shot season-autumn /tmp/autumn.png
+godot --path . res://scenes/main.tscn -- shot season-winter /tmp/winter.png
+godot --path . res://scenes/main.tscn -- shot winter-scarf /tmp/scarf.png
+godot --path . res://scenes/main.tscn -- shot lighting-night /tmp/night.png
+# reload/healing/hut visual fixtures:
+godot --path . res://scenes/main.tscn -- shot reload-banana /tmp/reload.png
+godot --path . res://scenes/main.tscn -- shot bandage /tmp/bandage.png
+godot --path . res://scenes/main.tscn -- shot supply-hut /tmp/supply-hut.png
+# deterministic two-second locomotion frame review (play, first, side, or front):
+godot --resolution 960x540 --path . res://scenes/main.tscn -- shot clip-sprint-first /tmp/sprint.png
+godot --resolution 960x540 --path . res://scenes/main.tscn -- shot clip-swim-first /tmp/swim.png
+ffmpeg -framerate 15 -i /tmp/sprint_%02d.png -c:v libx264 -pix_fmt yuv420p /tmp/sprint.mp4
+ffmpeg -framerate 15 -i /tmp/swim_%02d.png -c:v libx264 -pix_fmt yuv420p /tmp/swim.mp4
+# sniper optic/fire, hip-spread/fire, plus side/front rope-handling review:
+godot --path . --write-movie /tmp/sniper-scope.ogv --fixed-fps 15 res://scenes/main.tscn -- shot clip-sniper-scope /tmp/sniper-scope.png
+godot --path . --write-movie /tmp/sniper-hip.ogv --fixed-fps 15 res://scenes/main.tscn -- shot clip-sniper-hip /tmp/sniper-hip.png
+godot --path . --write-movie /tmp/sniper-rope-side.ogv --fixed-fps 15 res://scenes/main.tscn -- shot clip-sniper-rope-side /tmp/sniper-rope-side.png
+godot --path . --write-movie /tmp/sniper-rope-front.ogv --fixed-fps 15 res://scenes/main.tscn -- shot clip-sniper-rope-front /tmp/sniper-rope-front.png
+```
+
+The rendered benchmark keeps an eight-second shader/streaming warmup, measures
+eight seconds of active sprinting and solo combat, then measures a bounded
+two-second live summer-to-spring weather transition. It exits nonzero unless
+both samples sustain at least 60 average FPS, keep p95 at or below 25 ms, keep
+the worst frame below 100 ms, and produce no frame above 100 ms.

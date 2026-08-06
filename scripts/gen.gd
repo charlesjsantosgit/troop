@@ -1,0 +1,915 @@
+extends Node
+## Gen (autoload) — deterministic infinite-jungle generation.
+## Pure layout math lives here so movetest can verify determinism and both
+## network peers can rebuild the identical world from just a seed.
+
+signal vine_visual_changed(chunk_key: Vector2i)
+
+const CHUNK := 48.0
+const CELLS := 16                # terrain quads per chunk side
+const WATER_Y := 0.55
+const VIEW_R := 2                # 5x5 visible grid; fog hides the streamed edge
+const DROP_R := 2                # immediately retire chunks outside that grid
+const HORIZON_SECTOR_CHUNKS := 4 # 192 m coarse sectors, rendered without physics
+const HORIZON_VIEW_R := 3        # 7x7 sectors: about a 672 m visible radius
+const HORIZON_DROP_R := 3
+const HORIZON_NEAR_FADE := 108.0
+const HORIZON_DISTANCE := CHUNK * HORIZON_SECTOR_CHUNKS \
+	* (HORIZON_VIEW_R + 0.5)
+const REACH := 2.2               # blind arm's-reach fallback grab distance
+const TARGET_DIST := 3.0         # realistic grab reach from the hand (1-3m)
+const TARGET_COS := 0.82         # ~35° aim cone around the crosshair
+
+# Supply loot uses the same integer contract as Net.WEAPON_* without making the
+# pure generation autoload depend on the multiplayer autoload. Keeping these
+# values beside the deterministic layout also makes future loot generation safe
+# to run in headless tests before a session has been created.
+const SUPPLY_AMMO_REVOLVER := 0
+const SUPPLY_AMMO_SHOTGUN := 1
+const SUPPLY_AMMO_SMG := 2
+const SUPPLY_AMMO_SNIPER := 3
+const SUPPLY_HUT_CLEARANCE := 5.4
+
+# The origin meadow is an authored duel bowl inside the otherwise procedural
+# world. Its gameplay data is kept here, beside height and chunk layout math, so
+# players, bots, tests and streamed visuals all consume the exact same geometry.
+const ARENA_ID := "origin_duel_arena_v2"
+const ARENA_RADIUS := 31.5
+const ARENA_SOFT_BOUNDARY_RADIUS := 28.0
+
+enum Biome { RAINFOREST, BAMBOO_GROVE, WETLAND, HIGHLAND }
+
+const BIOME_NAMES := {
+	Biome.RAINFOREST: "Emerald Rainforest",
+	Biome.BAMBOO_GROVE: "Bamboo Grove",
+	Biome.WETLAND: "Flooded Wetland",
+	Biome.HIGHLAND: "Cloud Highland",
+}
+
+var world_seed: int = 1337
+var _n_base := FastNoiseLite.new()
+var _n_detail := FastNoiseLite.new()
+var _n_color := FastNoiseLite.new()
+var _n_lake := FastNoiseLite.new()
+var _n_lake_warp := FastNoiseLite.new()
+var _n_biome := FastNoiseLite.new()
+var _n_moisture := FastNoiseLite.new()
+
+# vine registry: id -> {anchor, len, chunk, hidden, simulated, points}
+# `hidden` means a monkey currently owns the visual. `simulated` means a
+# released VinePhysics owns it while the strand is still moving.
+var vines: Dictionary = {}
+var _vines_by_chunk: Dictionary = {}
+var _debug_count := 0
+
+
+func setup(seed_v: int) -> void:
+	world_seed = seed_v
+	vines.clear()
+	_vines_by_chunk.clear()
+	_debug_count = 0
+	_n_base.seed = seed_v
+	_n_base.noise_type = FastNoiseLite.TYPE_SIMPLEX_SMOOTH
+	_n_base.frequency = 0.007
+	_n_detail.seed = seed_v + 101
+	_n_detail.noise_type = FastNoiseLite.TYPE_SIMPLEX_SMOOTH
+	_n_detail.frequency = 0.05
+	_n_color.seed = seed_v + 202
+	_n_color.frequency = 0.11
+	# Macro-scale climate fields change over hundreds of metres. Keeping them
+	# much lower-frequency than the terrain makes coherent biomes and broad lake
+	# basins instead of a different look in every 48 m tile.
+	_n_lake.seed = seed_v + 303
+	_n_lake.noise_type = FastNoiseLite.TYPE_SIMPLEX_SMOOTH
+	_n_lake.frequency = 0.00165
+	_n_lake_warp.seed = seed_v + 404
+	_n_lake_warp.noise_type = FastNoiseLite.TYPE_SIMPLEX_SMOOTH
+	_n_lake_warp.frequency = 0.0042
+	_n_biome.seed = seed_v + 505
+	_n_biome.noise_type = FastNoiseLite.TYPE_SIMPLEX_SMOOTH
+	_n_biome.frequency = 0.0019
+	_n_moisture.seed = seed_v + 606
+	_n_moisture.noise_type = FastNoiseLite.TYPE_SIMPLEX_SMOOTH
+	_n_moisture.frequency = 0.0026
+
+
+func height(x: float, z: float) -> float:
+	return _height_with_lake(x, z, lake_influence(x, z))
+
+
+func _height_with_lake(x: float, z: float, lake: float) -> float:
+	var h := _n_base.get_noise_2d(x, z) * 9.0 \
+		+ _n_detail.get_noise_2d(x, z) * 1.3 + 3.2
+	# Blend terrain into a deep, gently uneven lake floor. The warped 600 m-ish
+	# field produces 120–350 m connected water bodies: roughly an order of
+	# magnitude wider than the old noise pockets, without hard circular shores.
+	var lake_floor := WATER_Y - 2.4 - lake * 3.8 \
+		+ _n_detail.get_noise_2d(x * 0.55, z * 0.55) * 0.32
+	h = lerpf(h, lake_floor, lake)
+	# spawn meadow: smoothly guarantee dry, gentle ground near the world origin
+	var blend := exp(-(x * x + z * z) / 650.0)
+	h = lerpf(h, maxf(h, 2.4), blend)
+	# Grade the authored duel bowl and every arena prop footprint onto one gentle
+	# fighting surface. Outside 35 m it blends back into the exact procedural
+	# terrain over 11 m, so there is no hard rim or visible chunk seam.
+	var arena_distance := Vector2(x, z).length()
+	var arena_grade := 1.0 - smoothstep(35.0, 46.0, arena_distance)
+	if arena_grade > 0.0:
+		var arena_floor := 3.25 + _n_detail.get_noise_2d(
+			x * 0.62, z * 0.62) * 0.10
+		h = lerpf(h, arena_floor, arena_grade)
+	return h
+
+
+func lake_influence(x: float, z: float) -> float:
+	var warp := _n_lake_warp.get_noise_2d(x, z) * 92.0
+	var basin := _n_lake.get_noise_2d(x + warp, z - warp * 0.72)
+	return smoothstep(0.16, 0.46, basin)
+
+
+func biome_at(x: float, z: float) -> int:
+	var lake := lake_influence(x, z)
+	return _biome_from_samples(x, z, lake, _height_with_lake(x, z, lake))
+
+
+## Terrain and decoration builders already have the exact elevation sample.
+## Reusing it avoids a full duplicate terrain/noise evaluation per vertex while
+## preserving the same deterministic biome thresholds.
+func biome_at_height(x: float, z: float, elevation: float) -> int:
+	return _biome_from_samples(x, z, lake_influence(x, z), elevation)
+
+
+func _biome_from_samples(x: float, z: float, lake: float,
+		elevation: float) -> int:
+	# The graded origin is an authored rainforest arena even if the macro lake
+	# field happens to pass beneath it for a particular match seed.
+	if Vector2(x, z).length() <= 35.0:
+		return Biome.RAINFOREST
+	if lake > 0.22 or elevation < WATER_Y + 1.15:
+		return Biome.WETLAND
+	var climate := _n_biome.get_noise_2d(x, z)
+	var moisture := _n_moisture.get_noise_2d(x, z)
+	if elevation > 8.7 or climate > 0.34:
+		return Biome.HIGHLAND
+	if climate < -0.16 and moisture < 0.34:
+		return Biome.BAMBOO_GROVE
+	return Biome.RAINFOREST
+
+
+func biome_name(biome: int) -> String:
+	return BIOME_NAMES.get(biome, "Jungle")
+
+
+func ground_color(h: float, x: float, z: float) -> Color:
+	var jit := _n_color.get_noise_2d(x, z)
+	if h < WATER_Y + 0.4:
+		return Color(0.62 + jit * 0.045, 0.54, 0.31)
+	var t := clampf((h - 1.0) / 11.0, 0.0, 1.0)
+	var biome := biome_at_height(x, z, h)
+	var low := Color(0.24, 0.60, 0.18)
+	var high := Color(0.08, 0.38, 0.13)
+	match biome:
+		Biome.BAMBOO_GROVE:
+			low = Color(0.34, 0.61, 0.15)
+			high = Color(0.16, 0.42, 0.10)
+		Biome.WETLAND:
+			low = Color(0.25, 0.47, 0.18)
+			high = Color(0.11, 0.31, 0.17)
+		Biome.HIGHLAND:
+			low = Color(0.20, 0.48, 0.22)
+			high = Color(0.075, 0.29, 0.18)
+	var c := low.lerp(high, t)
+	if jit > 0.42:
+		c = c.darkened(0.22)
+	return Color(c.r + jit * 0.04, c.g + jit * 0.04, c.b)
+
+
+func _chunk_rng(cx: int, cz: int, salt: int = 0) -> RandomNumberGenerator:
+	var r := RandomNumberGenerator.new()
+	r.seed = world_seed * 73856093 + cx * 19349663 + cz * 83492791 + salt * 7919
+	return r
+
+
+## Fixed "hero grove" ring around world origin so every match spawns somewhere good.
+func _hero_positions() -> Array:
+	var out: Array = []
+	for i in range(6):
+		var a := TAU * float(i) / 6.0
+		out.append(Vector3(cos(a) * 15.0, 0.0, sin(a) * 15.0))
+	return out
+
+
+## Complete deterministic arena contract. The origin remains open enough for
+## high-speed movement, but staggered cover, elevated side decks and a broken
+## perimeter create deliberate duel lanes instead of one uninterrupted meadow.
+func arena_layout() -> Dictionary:
+	var pieces: Array = [
+		_arena_piece("north_gate", "palisade", 0.0, 27.5,
+			Vector3(8.4, 1.52, 0.62), 0.0, "soft_boundary"),
+		_arena_piece("south_gate", "palisade", 0.0, -27.5,
+			Vector3(8.4, 1.52, 0.62), 0.0, "soft_boundary"),
+		_arena_piece("west_gate", "palisade", -27.5, 0.0,
+			Vector3(8.4, 1.52, 0.62), PI * 0.5, "soft_boundary"),
+		_arena_piece("east_gate", "palisade", 27.5, 0.0,
+			Vector3(8.4, 1.52, 0.62), PI * 0.5, "soft_boundary"),
+		_arena_piece("center_west", "barricade", -5.0, -3.0,
+			Vector3(4.8, 1.24, 0.72), 0.34, "center_cover"),
+		_arena_piece("center_east", "barricade", 5.0, 3.0,
+			Vector3(4.8, 1.24, 0.72), 0.34, "center_cover"),
+		_arena_piece("west_screen", "barricade", -10.8, 1.2,
+			Vector3(4.4, 1.30, 0.74), -0.50, "side_cover"),
+		_arena_piece("east_screen", "barricade", 10.8, -1.2,
+			Vector3(4.4, 1.30, 0.74), -0.50, "side_cover"),
+		_arena_piece("southwest_screen", "barricade", -9.0, -9.0,
+			Vector3(4.6, 1.20, 0.70), 0.76, "crossfire_cover"),
+		_arena_piece("northeast_screen", "barricade", 9.0, 9.0,
+			Vector3(4.6, 1.20, 0.70), 0.76, "crossfire_cover"),
+		_arena_piece("west_flank_deck", "platform", -13.0, 5.0,
+			Vector3(5.4, 0.72, 3.6), PI * 0.5, "elevated_flank"),
+		_arena_piece("east_flank_deck", "platform", 13.0, -5.0,
+			Vector3(5.4, 0.72, 3.6), -PI * 0.5, "elevated_flank"),
+	]
+	var huts: Array = [
+		_arena_hut("northwest", -22.0, 20.0, SUPPLY_AMMO_REVOLVER,
+			18, 1),
+		_arena_hut("northeast", 22.0, 20.0, SUPPLY_AMMO_SHOTGUN,
+			10, 1),
+		_arena_hut("southwest", -22.0, -20.0, SUPPLY_AMMO_SMG,
+			40, 2),
+		_arena_hut("southeast", 22.0, -20.0, SUPPLY_AMMO_SNIPER,
+			10, 2),
+	]
+	return {
+		"id": ARENA_ID,
+		"version": 2,
+		"center": _arena_ground_point(0.0, 0.0),
+		"radius": ARENA_RADIUS,
+		"soft_boundary_radius": ARENA_SOFT_BOUNDARY_RADIUS,
+		"gate_count": 4,
+		"pieces": pieces,
+		"supply_huts": huts,
+		"cover_points": arena_cover_points(),
+		"flank_points": arena_flank_points(),
+		"spawn_points": arena_spawn_points(),
+		"lanes": [
+			{"id": "direct_duel", "width": 5.5,
+				"points": [_arena_ground_point(0.0, 0.0),
+					_arena_ground_point(12.0, -14.0)]},
+			{"id": "west_flank", "width": 4.0,
+				"points": [_arena_ground_point(-4.0, -1.0),
+					_arena_ground_point(-15.5, 4.0),
+					_arena_ground_point(-17.0, -9.0)]},
+			{"id": "east_flank", "width": 4.0,
+				"points": [_arena_ground_point(4.0, 1.0),
+					_arena_ground_point(15.5, -4.0),
+					_arena_ground_point(17.0, 9.0)]},
+		],
+	}
+
+
+## Positions immediately beside authored cover. AI uses these as destinations,
+## not the prop centres, so it can strafe and peek without walking into a wall.
+func arena_cover_points() -> Array[Vector3]:
+	var flat := [
+		Vector2(-6.2, -5.0), Vector2(-3.4, -0.8),
+		Vector2(3.4, 0.8), Vector2(6.2, 5.0),
+		Vector2(-12.5, -1.0), Vector2(-8.8, 3.5),
+		Vector2(8.8, -3.5), Vector2(12.5, 1.0),
+		Vector2(-11.3, -10.6), Vector2(-6.8, -7.4),
+		Vector2(6.8, 7.4), Vector2(11.3, 10.6),
+	]
+	var points: Array[Vector3] = []
+	for point in flat:
+		points.append(_arena_ground_point(point.x, point.y, 0.12))
+	return points
+
+
+## Longer tactical arcs through the two raised decks and open perimeter gates.
+## These are deliberately offset from the origin-to-rival line at (12,-14).
+func arena_flank_points() -> Array[Vector3]:
+	var flat := [
+		Vector2(-13.0, 5.0), Vector2(-17.0, 9.5),
+		Vector2(-19.0, -5.5), Vector2(13.0, -5.0),
+		Vector2(17.0, -9.5), Vector2(19.0, 5.5),
+		Vector2(0.0, 23.0), Vector2(0.0, -23.0),
+	]
+	var points: Array[Vector3] = []
+	for point in flat:
+		points.append(_arena_ground_point(point.x, point.y, 0.14))
+	return points
+
+
+func arena_spawn_points() -> Array[Vector3]:
+	return [
+		_arena_ground_point(0.0, 0.0, 2.5),
+		_arena_ground_point(12.0, -14.0, 2.2),
+	]
+
+
+## Chunk-scoped slice consumed by Chunk without putting arena cover in the
+## generic `structures` array (which intentionally remains supply-hut-only).
+func arena_chunk_layout(cx: int, cz: int) -> Dictionary:
+	if not _is_origin_arena_chunk(cx, cz):
+		return {"id": "", "pieces": [], "supply_huts": []}
+	var blueprint := arena_layout()
+	var pieces: Array = []
+	var huts: Array = []
+	for piece in blueprint.pieces:
+		if _world_point_chunk(piece.pos) == Vector2i(cx, cz):
+			pieces.append(piece)
+	for hut in blueprint.supply_huts:
+		if _world_point_chunk(hut.pos) == Vector2i(cx, cz):
+			huts.append(hut)
+	return {
+		"id": ARENA_ID,
+		"pieces": pieces,
+		"supply_huts": huts,
+		"soft_boundary_radius": ARENA_SOFT_BOUNDARY_RADIUS,
+	}
+
+
+func _arena_piece(piece_id: String, kind: String, x: float, z: float,
+		size: Vector3, yaw: float, role: String) -> Dictionary:
+	return {
+		"id": piece_id,
+		"kind": kind,
+		"role": role,
+		"pos": _arena_ground_point(x, z, 0.025),
+		"yaw": yaw,
+		"size": size,
+		"clearance": maxf(size.x, size.z) * 0.5 + 0.65,
+	}
+
+
+func _arena_hut(label: String, x: float, z: float, ammo_kind: int,
+		ammo_amount: int, bandages: int) -> Dictionary:
+	var sample_radius := 3.15
+	var platform_y := height(x, z)
+	for offset in [
+		Vector2(-sample_radius, -sample_radius),
+		Vector2(sample_radius, -sample_radius),
+		Vector2(-sample_radius, sample_radius),
+		Vector2(sample_radius, sample_radius),
+	]:
+		platform_y = maxf(platform_y, height(x + offset.x, z + offset.y))
+	var toward_center := Vector2(-x, -z).normalized()
+	return {
+		"kind": "supply_hut",
+		"id": "s:arena#%s" % label,
+		"pos": Vector3(x, platform_y + 0.04, z),
+		# SupplyHut's open front points down its local -Z axis.
+		"yaw": atan2(-toward_center.x, -toward_center.y),
+		"clearance": SUPPLY_HUT_CLEARANCE,
+		"ammo_kind": ammo_kind,
+		"ammo_amount": ammo_amount,
+		"bandages": bandages,
+		"biome": Biome.RAINFOREST,
+		"arena": true,
+	}
+
+
+func _arena_ground_point(x: float, z: float, lift := 0.0) -> Vector3:
+	return Vector3(x, height(x, z) + lift, z)
+
+
+func _world_point_chunk(point: Vector3) -> Vector2i:
+	return Vector2i(floori(point.x / CHUNK), floori(point.z / CHUNK))
+
+
+func _is_origin_arena_chunk(cx: int, cz: int) -> bool:
+	return cx >= -1 and cx <= 0 and cz >= -1 and cz <= 0
+
+
+func chunk_layout(cx: int, cz: int, include_decorations := true) -> Dictionary:
+	var rng := _chunk_rng(cx, cz)
+	var trees: Array = []
+	var bananas: Array = []
+	var rocks: Array = []
+	var foliage: Array = []
+	var structures: Array = []
+	var arena_chunk := arena_chunk_layout(cx, cz)
+	var arena_pieces: Array = arena_chunk.get("pieces", [])
+	var tree_points: Array[Vector2] = []
+	var x0 := cx * CHUNK
+	var z0 := cz * CHUNK
+	var center_biome := biome_at(x0 + CHUNK * 0.5, z0 + CHUNK * 0.5)
+	# Structures use their own salted RNG so adding them does not reshuffle the
+	# established tree/banana/rock layout. Compute them before trees even for the
+	# horizon-only path: the same empty clearing must exist in canonical far trees
+	# or a tree would visibly disappear when the gameplay chunk promotes.
+	var supply_hut := _supply_hut_layout(cx, cz)
+	if not supply_hut.is_empty():
+		structures.append(supply_hut)
+	structures.append_array(arena_chunk.get("supply_huts", []))
+	var occupied_clearances := structures.duplicate()
+	occupied_clearances.append_array(arena_pieces)
+
+	# hero grove trees that land inside this chunk
+	if cx >= -1 and cx <= 0 and cz >= -1 and cz <= 0:
+		var hi := 0
+		for hp in _hero_positions():
+			if hp.x >= x0 and hp.x < x0 + CHUNK and hp.z >= z0 and hp.z < z0 + CHUNK:
+				var hr := _chunk_rng(cx, cz, 500 + hi)
+				trees.append(_make_tree(hr, hp,
+					19.0 + float(hi % 3) * 2.0, Biome.RAINFOREST,
+					include_decorations))
+				tree_points.append(Vector2(hp.x, hp.z))
+			hi += 1
+
+	# Dart-thrown trunks avoid visible plantation rows while retaining a small
+	# minimum spacing. Individual samples use their local biome, so transition
+	# zones contain a believable mix rather than changing at chunk seams.
+	const TREE_CANDIDATES := 30
+	for attempt in range(TREE_CANDIDATES):
+		var px := x0 + rng.randf_range(1.1, CHUNK - 1.1)
+		var pz := z0 + rng.randf_range(1.1, CHUNK - 1.1)
+		var point := Vector2(px, pz)
+		var inside_structure := _point_in_structure_clearance(point,
+			occupied_clearances)
+		var too_close := false
+		for existing in tree_points:
+			if point.distance_squared_to(existing) < 15.2:
+				too_close = true
+				break
+		if too_close:
+			continue
+		var local_height := height(px, pz)
+		var local_biome := biome_at_height(px, pz, local_height)
+		if rng.randf() > _tree_density(local_biome):
+			continue
+		if point.length() < 26.0:
+			continue  # keep the spawn meadow clear (hero grove owns it)
+		if local_height < WATER_Y + 0.5:
+			continue
+		tree_points.append(point)
+		var generated_tree := _make_tree(rng, Vector3(px, 0, pz), 0.0,
+			local_biome, include_decorations)
+		if not inside_structure:
+			trees.append(generated_tree)
+
+	# The horizon renderer consumes this canonical tree placement too. Returning
+	# before pickups/rocks/undergrowth keeps that visual-only generation lean,
+	# while the shared tree RNG prevents silhouettes popping at the near handoff.
+	if not include_decorations:
+		return {"trees": trees, "bananas": [], "rocks": [], "foliage": [],
+			"structures": structures, "arena_pieces": arena_pieces,
+			"arena_id": str(arena_chunk.get("id", "")), "biome": center_biome}
+
+	# bananas: canopy-top rewards plus arcs floating between trees to guide swings
+	var nb := rng.randi_range(2, 4)
+	for i in range(nb):
+		if trees.is_empty():
+			break
+		var t: Dictionary = trees[rng.randi_range(0, trees.size() - 1)]
+		if i % 2 == 0 and not t.blobs.is_empty():
+			var bl: Dictionary = t.blobs[0]
+			bananas.append(t.pos + bl.off + Vector3(0, bl.r * 0.85 + 0.6, 0))
+		else:
+			var t2: Dictionary = trees[rng.randi_range(0, trees.size() - 1)]
+			var mid: Vector3 = (t.pos + t2.pos) * 0.5
+			bananas.append(Vector3(mid.x, height(mid.x, mid.z) + rng.randf_range(7.0, 13.0), mid.z))
+
+	var rock_count := rng.randi_range(2, 5) \
+		if center_biome == Biome.HIGHLAND else rng.randi_range(0, 2)
+	for i in range(rock_count):
+		var rx := x0 + rng.randf() * CHUNK
+		var rz := z0 + rng.randf() * CHUNK
+		if height(rx, rz) > WATER_Y + 0.4 and Vector2(rx, rz).length() > 12.0:
+			var rock_radius := rng.randf_range(0.8, 1.9)
+			if not _point_in_structure_clearance(Vector2(rx, rz),
+					occupied_clearances):
+				rocks.append({"pos": Vector3(rx, height(rx, rz), rz), "r": rock_radius})
+
+	# Dense, collision-free understory is cheap to draw as three MultiMeshes.
+	# Ferns dominate rainforest/highland floors, bamboo gets broad leaves, and
+	# reed clusters continue a short distance into wetland shallows.
+	var foliage_rng := _chunk_rng(cx, cz, 733)
+	var foliage_goal := 82
+	match center_biome:
+		Biome.RAINFOREST:
+			foliage_goal = 100
+		Biome.BAMBOO_GROVE:
+			foliage_goal = 88
+		Biome.WETLAND:
+			foliage_goal = 70
+		Biome.HIGHLAND:
+			foliage_goal = 82
+	for i in range(foliage_goal):
+		var fx := x0 + foliage_rng.randf() * CHUNK
+		var fz := z0 + foliage_rng.randf() * CHUNK
+		if Vector2(fx, fz).length() < 11.0:
+			continue
+		var inside_structure := _point_in_structure_clearance(
+			Vector2(fx, fz), occupied_clearances)
+		var fh := height(fx, fz)
+		var fb := biome_at_height(fx, fz, fh)
+		if fh < WATER_Y - 0.24 or (fh < WATER_Y + 0.08 \
+				and fb != Biome.WETLAND):
+			continue
+		var kind := 0
+		if fb == Biome.WETLAND:
+			kind = 2 if foliage_rng.randf() < 0.72 else 0
+		elif fb == Biome.BAMBOO_GROVE:
+			kind = 1 if foliage_rng.randf() < 0.68 else 0
+		else:
+			kind = 0 if foliage_rng.randf() < 0.62 else 1
+		var size := foliage_rng.randf_range(0.72, 1.48)
+		if kind == 2:
+			size *= foliage_rng.randf_range(1.05, 1.55)
+		var shade := foliage_rng.randf()
+		var yaw := foliage_rng.randf() * TAU
+		if not inside_structure:
+			foliage.append({
+				"pos": Vector3(fx, maxf(fh, WATER_Y - 0.03), fz),
+				"kind": kind,
+				"scale": size,
+				"yaw": yaw,
+				"color": biome_foliage_color(fb, shade).lightened(0.04),
+			})
+
+	return {"trees": trees, "bananas": bananas, "rocks": rocks,
+		"foliage": foliage, "structures": structures,
+		"arena_pieces": arena_pieces,
+		"arena_id": str(arena_chunk.get("id", "")), "biome": center_biome}
+
+
+## Deterministic supply shelter for this chunk, or an empty dictionary. Huts are
+## common enough to find while travelling but restricted to dry, buildable
+## rainforest, bamboo and highland ground. The broad corner sample prevents a
+## platform from bridging a ravine or clipping through a steep ridge.
+func _supply_hut_layout(cx: int, cz: int) -> Dictionary:
+	# Four authored, mirrored shelters serve the origin duel arena. Only these
+	# four chunks opt out of the random roll; biome huts everywhere else retain
+	# the exact same probability and salted RNG sequence.
+	if _is_origin_arena_chunk(cx, cz):
+		return {}
+	var rng := _chunk_rng(cx, cz, 1201)
+	var x0 := cx * CHUNK
+	var z0 := cz * CHUNK
+	var px := x0 + rng.randf_range(7.0, CHUNK - 7.0)
+	var pz := z0 + rng.randf_range(7.0, CHUNK - 7.0)
+	var center_height := height(px, pz)
+	var local_biome := biome_at_height(px, pz, center_height)
+	var chance := 0.0
+	match local_biome:
+		Biome.RAINFOREST:
+			chance = 0.16
+		Biome.BAMBOO_GROVE:
+			chance = 0.23
+		Biome.HIGHLAND:
+			chance = 0.12
+		_:
+			return {}
+	if rng.randf() > chance:
+		return {}
+	# Keep the authored spawn grove uncluttered and make every shelter a small
+	# traversal discovery rather than something placed on the starting player.
+	if Vector2(px, pz).length() < 34.0:
+		return {}
+	var sample_radius := 3.15
+	var samples := [
+		center_height,
+		height(px - sample_radius, pz - sample_radius),
+		height(px + sample_radius, pz - sample_radius),
+		height(px - sample_radius, pz + sample_radius),
+		height(px + sample_radius, pz + sample_radius),
+	]
+	var minimum_height: float = samples[0]
+	var maximum_height: float = samples[0]
+	for sample in samples:
+		minimum_height = minf(minimum_height, float(sample))
+		maximum_height = maxf(maximum_height, float(sample))
+	if minimum_height < WATER_Y + 0.72 or maximum_height - minimum_height > 1.05:
+		return {}
+
+	var ammo_kind := rng.randi_range(SUPPLY_AMMO_REVOLVER, SUPPLY_AMMO_SNIPER)
+	var ammo_amount := 6
+	match ammo_kind:
+		SUPPLY_AMMO_REVOLVER:
+			ammo_amount = 6 * rng.randi_range(1, 3)
+		SUPPLY_AMMO_SHOTGUN:
+			ammo_amount = rng.randi_range(6, 12)
+		SUPPLY_AMMO_SMG:
+			ammo_amount = 20 * rng.randi_range(1, 2)
+		SUPPLY_AMMO_SNIPER:
+			ammo_amount = 5 * rng.randi_range(1, 2)
+	var bandage_count := 0
+	if rng.randf() < 0.38:
+		bandage_count = 2 if rng.randf() < 0.16 else 1
+	return {
+		"kind": "supply_hut",
+		"id": "s:%d,%d#0" % [cx, cz],
+		"pos": Vector3(px, maximum_height + 0.04, pz),
+		"yaw": rng.randf() * TAU,
+		"clearance": SUPPLY_HUT_CLEARANCE,
+		"ammo_kind": ammo_kind,
+		"ammo_amount": ammo_amount,
+		"bandages": bandage_count,
+		"biome": local_biome,
+	}
+
+
+func _point_in_structure_clearance(point: Vector2, structures: Array) -> bool:
+	for structure in structures:
+		var structure_pos: Vector3 = structure.get("pos", Vector3.ZERO)
+		var radius := float(structure.get("clearance", SUPPLY_HUT_CLEARANCE))
+		if point.distance_squared_to(Vector2(structure_pos.x, structure_pos.z)) \
+				< radius * radius:
+			return true
+	return false
+
+
+func _tree_density(biome: int) -> float:
+	match biome:
+		Biome.RAINFOREST:
+			return 0.95
+		Biome.BAMBOO_GROVE:
+			return 0.90
+		Biome.WETLAND:
+			return 0.72
+		Biome.HIGHLAND:
+			return 0.82
+	return 0.8
+
+
+func biome_foliage_color(biome: int, shade: float) -> Color:
+	match biome:
+		Biome.BAMBOO_GROVE:
+			return Color.from_hsv(0.20 + shade * 0.055, 0.62,
+				0.42 + shade * 0.27)
+		Biome.WETLAND:
+			return Color.from_hsv(0.30 + shade * 0.055, 0.48,
+				0.32 + shade * 0.23)
+		Biome.HIGHLAND:
+			return Color.from_hsv(0.37 + shade * 0.055, 0.48,
+				0.32 + shade * 0.25)
+	return Color.from_hsv(0.27 + shade * 0.07, 0.62,
+		0.40 + shade * 0.31)
+
+
+func _make_tree(rng: RandomNumberGenerator, p: Vector3, force_h: float,
+		biome_override: int = -1, include_details := true) -> Dictionary:
+	var g := height(p.x, p.z)
+	var biome := biome_override if biome_override >= 0 else biome_at(p.x, p.z)
+	var trunk_h := force_h
+	var trunk_r := 0.7
+	var blob_count := 3
+	var blob_min := 2.8
+	var blob_max := 4.6
+	var branch_count := 2
+	var vine_min := 2
+	var vine_max := 4
+	if force_h <= 0.0:
+		match biome:
+			Biome.BAMBOO_GROVE:
+				trunk_h = rng.randf_range(13.0, 21.0)
+				trunk_r = rng.randf_range(0.20, 0.38)
+				blob_count = rng.randi_range(1, 2)
+				blob_min = 1.45
+				blob_max = 2.55
+				branch_count = rng.randi_range(0, 1)
+				vine_min = 0
+				vine_max = 1
+			Biome.WETLAND:
+				trunk_h = rng.randf_range(11.0, 19.0)
+				trunk_r = rng.randf_range(0.48, 0.86)
+				blob_count = rng.randi_range(2, 3)
+				blob_min = 2.5
+				blob_max = 4.1
+				branch_count = rng.randi_range(2, 3)
+				vine_min = 3
+				vine_max = 5
+			Biome.HIGHLAND:
+				trunk_h = rng.randf_range(10.0, 18.0)
+				trunk_r = rng.randf_range(0.68, 1.18)
+				blob_count = rng.randi_range(2, 3)
+				blob_min = 2.35
+				blob_max = 3.9
+				branch_count = rng.randi_range(2, 3)
+				vine_min = 1
+				vine_max = 3
+			_:
+				trunk_h = rng.randf_range(15.0, 27.0)
+				trunk_r = rng.randf_range(0.58, 1.08)
+				blob_count = rng.randi_range(3, 4)
+				branch_count = rng.randi_range(2, 3)
+				vine_min = 3
+				vine_max = 5
+	else:
+		trunk_r = rng.randf_range(0.65, 1.0)
+		blob_count = rng.randi_range(3, 4)
+		branch_count = rng.randi_range(2, 3)
+	var base := Vector3(p.x, g, p.z)
+
+	var blobs: Array = []
+	for i in range(blob_count):
+		var shade := rng.randf()
+		var flower_chance := 0.12 if biome == Biome.RAINFOREST else 0.045
+		var flower := rng.randf() < flower_chance
+		blobs.append({
+			"off": Vector3(rng.randf_range(-1.8, 1.8),
+				trunk_h - 1.0 + float(i) * rng.randf_range(1.0, 2.0),
+				rng.randf_range(-1.8, 1.8)),
+			"r": rng.randf_range(blob_min, blob_max),
+			"flower": flower,
+			"shade": shade,
+			"color": Color(0.93, 0.55, 0.68) if flower \
+				else biome_foliage_color(biome, shade),
+		})
+
+	var branches: Array = []
+	for i in range(branch_count):
+		var a := rng.randf() * TAU
+		var branch_len := rng.randf_range(2.2, 4.8)
+		var branch_h := trunk_h * rng.randf_range(0.45, 0.7)
+		var branch_r := rng.randf_range(0.13, 0.27)
+		if include_details:
+			branches.append({
+				"dir": Vector3(cos(a), 0, sin(a)),
+				"len": branch_len,
+				"h": branch_h,
+				"r": branch_r,
+			})
+
+	var vlist: Array = []
+	var vine_count := rng.randi_range(vine_min, vine_max)
+	if not include_details:
+		# Preserve every RNG draw that the canonical near tree consumes so later
+		# silhouettes remain exact, but skip branch/vine dictionaries and discarded
+		# vine-anchor height samples in the visual-only horizon path.
+		for i in range(vine_count):
+			if i >= branch_count:
+				rng.randi_range(0, blobs.size() - 1)
+				rng.randf()
+			if i == 0:
+				rng.randf_range(2.3, 2.9)
+			else:
+				rng.randf_range(2.3, 5.0)
+	else:
+		for i in range(vine_count):
+			var anchor: Vector3
+			if i < branches.size():
+				var b: Dictionary = branches[i]
+				anchor = base + b.dir * (b.len + trunk_r * 0.6) \
+					+ Vector3(0, b.h, 0)
+			else:
+				var bl: Dictionary = blobs[rng.randi_range(0, blobs.size() - 1)]
+				var a2 := rng.randf() * TAU
+				anchor = base + bl.off + Vector3(cos(a2) * bl.r * 0.8,
+					-bl.r * 0.2, sin(a2) * bl.r * 0.8)
+			var lift := rng.randf_range(2.3, 2.9) if i == 0 \
+				else rng.randf_range(2.3, 5.0)
+			var vlen := anchor.y - (height(anchor.x, anchor.z) + lift)
+			if vlen < 3.0:
+				continue
+			vlist.append({"anchor": anchor, "len": vlen})
+
+	return {"pos": base, "trunk_h": trunk_h, "trunk_r": trunk_r,
+		"blobs": blobs, "branches": branches, "vines": vlist,
+		"biome": biome}
+
+
+## Cheap silhouettes for the coarse horizon tier. They deliberately omit
+## branches, vines, collectibles and collision data; thousands can therefore
+## share two MultiMeshes while retaining the local biome's height and colour.
+func distant_tree_layout(cx: int, cz: int) -> Array:
+	var trees: Array = []
+	for tree in chunk_layout(cx, cz, false).trees:
+		var distant_blobs: Array = []
+		for blob in tree.blobs:
+			distant_blobs.append({
+				"pos": tree.pos + blob.off,
+				"r": blob.r,
+				"color": blob.color,
+			})
+		trees.append({
+			"pos": tree.pos,
+			"trunk_h": tree.trunk_h,
+			"trunk_r": tree.trunk_r,
+			"blobs": distant_blobs,
+		})
+	return trees
+
+
+# ---- vine registry ---------------------------------------------------------
+
+func register_chunk_vines(key: Vector2i, layout: Dictionary) -> void:
+	var ids: Array = []
+	var i := 0
+	for t in layout.trees:
+		for v in t.vines:
+			var id := "%d,%d#%d" % [key.x, key.y, i]
+			vines[id] = {"anchor": v.anchor, "len": v.len, "chunk": key,
+				"hidden": false, "simulated": false, "points": PackedVector3Array()}
+			ids.append(id)
+			i += 1
+	_vines_by_chunk[key] = ids
+
+
+func unregister_chunk_vines(key: Vector2i) -> void:
+	if _vines_by_chunk.has(key):
+		for id in _vines_by_chunk[key]:
+			vines.erase(id)
+		_vines_by_chunk.erase(key)
+
+
+func add_debug_vine(anchor: Vector3, vlen: float) -> String:
+	_debug_count += 1
+	var id := "dbg#%d" % _debug_count
+	var key := Vector2i(floori(anchor.x / CHUNK), floori(anchor.z / CHUNK))
+	vines[id] = {"anchor": anchor, "len": vlen, "chunk": key,
+		"hidden": false, "simulated": false, "points": PackedVector3Array()}
+	if not _vines_by_chunk.has(key):
+		_vines_by_chunk[key] = []
+	_vines_by_chunk[key].append(id)
+	return id
+
+
+func set_vine_hidden(id: String, hidden: bool) -> void:
+	if not vines.has(id):
+		return
+	vines[id].hidden = hidden
+	if hidden:
+		vines[id].simulated = false
+		vines[id].points = PackedVector3Array()
+	vine_visual_changed.emit(vines[id].chunk)
+
+
+func start_vine_simulation(id: String, points: PackedVector3Array) -> void:
+	if not vines.has(id):
+		return
+	vines[id].hidden = false
+	vines[id].simulated = true
+	vines[id].points = points
+	vine_visual_changed.emit(vines[id].chunk)
+
+
+func update_vine_simulation(id: String, points: PackedVector3Array) -> void:
+	if vines.has(id) and bool(vines[id].get("simulated", false)):
+		vines[id].points = points
+
+
+func stop_vine_simulation(id: String) -> void:
+	if not vines.has(id):
+		return
+	vines[id].simulated = false
+	vines[id].points = PackedVector3Array()
+	vine_visual_changed.emit(vines[id].chunk)
+
+
+## Best grabbable vine for the crosshair ray (origin + dir), hand at `hand`.
+## Primary: the strand sample nearest the crosshair inside the aim cone.
+## Fallback: any strand within arm's reach of the hand (blind instinct grab).
+## Returns {} or {id, anchor, len, point}.
+func best_vine(origin: Vector3, dir: Vector3, hand: Vector3, exclude: Dictionary, now_s: float) -> Dictionary:
+	var cc := Vector2i(floori(hand.x / CHUNK), floori(hand.z / CHUNK))
+	var best := {}
+	var best_score := INF
+	var fall := {}
+	var fall_d := REACH
+	for dx in range(-1, 2):
+		for dz in range(-1, 2):
+			var key := cc + Vector2i(dx, dz)
+			if not _vines_by_chunk.has(key):
+				continue
+			for id in _vines_by_chunk[key]:
+				var v: Dictionary = vines[id]
+				if v.hidden:
+					continue
+				if exclude.has(id) and now_s < float(exclude[id]):
+					continue
+				var anchor: Vector3 = v.anchor
+				if anchor.y < hand.y + 0.5:
+					continue
+				var vl := float(v.len)
+				var samples := PackedVector3Array()
+				if bool(v.get("simulated", false)) and (v.get("points", PackedVector3Array()) as PackedVector3Array).size() >= 2:
+					samples = v.points
+				else:
+					var ns := clampi(int(vl / 1.2) + 1, 2, 14)
+					for si in range(ns + 1):
+						samples.append(anchor + Vector3.DOWN * (vl * float(si) / float(ns)))
+				for si in range(samples.size()):
+					var depth := vl * float(si) / float(samples.size() - 1)
+					var p: Vector3 = samples[si]
+					var hd := hand.distance_to(p)
+					if hd < fall_d:
+						fall_d = hd
+						fall = {"id": id, "anchor": anchor, "len": vl, "point": p, "depth": depth}
+					# reach is measured from the HAND (realistic arm range);
+					# aim direction is measured from the crosshair ray
+					var reach_d := hand.distance_to(p)
+					if reach_d > TARGET_DIST or reach_d < 0.3:
+						continue
+					var to_p := p - origin
+					var d := to_p.length()
+					if d < 0.3:
+						continue
+					var a := dir.dot(to_p / d)
+					if a < TARGET_COS:
+						continue
+					var score := (1.0 - a) * 100.0 + reach_d * 0.05
+					if score < best_score:
+						best_score = score
+						best = {"id": id, "anchor": anchor, "len": vl, "point": p, "depth": depth}
+	return best if not best.is_empty() else fall

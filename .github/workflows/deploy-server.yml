@@ -1,0 +1,61 @@
+name: Deploy dedicated server
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - .dockerignore
+      - Dockerfile
+      - export_presets.cfg
+      - fly.toml
+      - project.godot
+      - scenes/**
+      - scripts/**
+      - .github/workflows/deploy-server.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: troop-dedicated-server-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Build and deploy to Fly.io
+    if: ${{ vars.FLY_DEPLOY_ENABLED == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: production
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Validate deployment configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f Dockerfile
+          test -f fly.toml
+          test -f export_presets.cfg
+
+      - name: Install flyctl
+        uses: superfly/flyctl-actions/setup-flyctl@ed8efb33836e8b2096c7fd3ba1c8afe303ebbff1
+
+      - name: Deploy dedicated server
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+          FLY_APP_NAME: ${{ secrets.FLY_APP_NAME }}
+        shell: bash
+        run: >-
+          test -n "${FLY_API_TOKEN:-}" &&
+          test -n "${FLY_APP_NAME:-}" &&
+          flyctl deploy
+          --app "$FLY_APP_NAME"
+          --config fly.toml
+          --ha=false
+          --remote-only
+          --wait-timeout 10m

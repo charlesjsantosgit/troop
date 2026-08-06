@@ -1,0 +1,16 @@
+.git
+.github
+.godot
+.DS_Store
+
+artifacts
+build
+dist
+hosting
+packaging
+
+*.dmg
+*.exe
+*.mp4
+*.ogv
+*.zip

@@ -1,0 +1,125 @@
+name: Build and publish TROOP
+
+on:
+  push:
+    tags:
+      - "v*"
+
+concurrency:
+  group: troop-release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+
+jobs:
+  release:
+    runs-on: macos-14
+    environment: release
+    env:
+      GODOT_VERSION: "4.7"
+      TROOP_PUBLIC_SERVER_HOST: ${{ vars.TROOP_PUBLIC_SERVER_HOST }}
+    steps:
+      - name: Check out the tagged source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Resolve and validate release metadata
+        id: release
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          test -n "${TROOP_PUBLIC_SERVER_HOST:-}"
+          python3 packaging/prepare_release.py \
+            --version "$VERSION" \
+            --repository "$GITHUB_REPOSITORY" \
+            --server-host "$TROOP_PUBLIC_SERVER_HOST"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Install Godot 4.7 and export templates
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          GODOT_ARCHIVE="$RUNNER_TEMP/godot.zip"
+          TEMPLATE_ARCHIVE="$RUNNER_TEMP/godot-templates.tpz"
+          GODOT_UNPACK="$RUNNER_TEMP/godot"
+          TEMPLATE_UNPACK="$RUNNER_TEMP/godot-templates"
+          curl --fail --location --retry 3 \
+            --output "$GODOT_ARCHIVE" \
+            "https://github.com/godotengine/godot-builds/releases/download/${GODOT_VERSION}-stable/Godot_v${GODOT_VERSION}-stable_macos.universal.zip"
+          curl --fail --location --retry 3 \
+            --output "$TEMPLATE_ARCHIVE" \
+            "https://github.com/godotengine/godot-builds/releases/download/${GODOT_VERSION}-stable/Godot_v${GODOT_VERSION}-stable_export_templates.tpz"
+          GODOT_DIGEST="$(gh api \
+            "repos/godotengine/godot-builds/releases/tags/${GODOT_VERSION}-stable" \
+            --jq ".assets[] | select(.name == \"Godot_v${GODOT_VERSION}-stable_macos.universal.zip\") | .digest")"
+          TEMPLATE_DIGEST="$(gh api \
+            "repos/godotengine/godot-builds/releases/tags/${GODOT_VERSION}-stable" \
+            --jq ".assets[] | select(.name == \"Godot_v${GODOT_VERSION}-stable_export_templates.tpz\") | .digest")"
+          test "${GODOT_DIGEST#sha256:}" != "$GODOT_DIGEST"
+          test "${TEMPLATE_DIGEST#sha256:}" != "$TEMPLATE_DIGEST"
+          printf '%s  %s\n' "${GODOT_DIGEST#sha256:}" "$GODOT_ARCHIVE" | shasum -a 256 -c -
+          printf '%s  %s\n' "${TEMPLATE_DIGEST#sha256:}" "$TEMPLATE_ARCHIVE" | shasum -a 256 -c -
+          mkdir -p "$GODOT_UNPACK" "$TEMPLATE_UNPACK"
+          ditto -x -k "$GODOT_ARCHIVE" "$GODOT_UNPACK"
+          ditto -x -k "$TEMPLATE_ARCHIVE" "$TEMPLATE_UNPACK"
+          TEMPLATE_DEST="$HOME/Library/Application Support/Godot/export_templates/${GODOT_VERSION}.stable"
+          mkdir -p "$TEMPLATE_DEST"
+          ditto "$TEMPLATE_UNPACK/templates" "$TEMPLATE_DEST"
+          GODOT_BIN="$GODOT_UNPACK/Godot.app/Contents/MacOS/Godot"
+          test -x "$GODOT_BIN"
+          echo "GODOT_BIN=$GODOT_BIN" >> "$GITHUB_ENV"
+
+      - name: Install NSIS
+        run: brew install nsis
+
+      - name: Run updater, voice, and public-transport security tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$GODOT_BIN" --headless --path . --script res://tests/updatetest.gd
+          "$GODOT_BIN" --headless --path . --script res://tests/voicetest.gd
+          "$GODOT_BIN" --headless --path . --script res://tests/netsecuritytest.gd
+
+      - name: Build installers and cross-platform content pack
+        shell: bash
+        run: ./packaging/build_installers.sh
+
+      - name: Sign and verify the update manifest
+        env:
+          UPDATE_SIGNING_KEY_B64: ${{ secrets.UPDATE_SIGNING_KEY_B64 }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 packaging/make_update_manifest.py \
+            --version "${{ steps.release.outputs.version }}" \
+            --repository "$GITHUB_REPOSITORY" \
+            --private-key-env UPDATE_SIGNING_KEY_B64
+          python3 packaging/verify_update_manifest.py \
+            --envelope dist/TROOP-update.json \
+            --public-key packaging/update_public_key.pem \
+            --dist dist \
+            --repository "$GITHUB_REPOSITORY"
+
+      - name: Attest release assets
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
+        with:
+          subject-path: "dist/TROOP-*"
+
+      - name: Create immutable-ready draft, upload everything, then publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh release create "$GITHUB_REF_NAME" \
+            --draft \
+            --verify-tag \
+            --title "TROOP ${{ steps.release.outputs.version }}" \
+            --generate-notes
+          gh release upload "$GITHUB_REF_NAME" dist/TROOP-*
+          gh release edit "$GITHUB_REF_NAME" --draft=false --latest
