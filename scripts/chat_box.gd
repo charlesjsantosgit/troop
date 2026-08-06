@@ -8,7 +8,7 @@ extends Control
 signal command_submitted(text: String)
 signal closed
 
-const MAX_LINES := 7
+const MAX_LINES := 12
 const LINE_LIFETIME := 12.0
 const FADE_TIME := 1.5
 
@@ -121,6 +121,8 @@ func _add_line(text: String, color: Color) -> void:
 
 
 func _process(dt: float) -> void:
+	# Lines are never freed by fading — only the FIFO cap retires them — so
+	# pressing ENTER always brings recent history back at full strength.
 	var dead: Array = []
 	for label in _line_ages:
 		if not is_instance_valid(label):
@@ -130,12 +132,10 @@ func _process(dt: float) -> void:
 		var age: float = _line_ages[label]
 		if _entry.visible:
 			label.modulate.a = 1.0  # reading history while typing
-		elif age > LINE_LIFETIME:
+		elif age <= LINE_LIFETIME:
+			label.modulate.a = 1.0
+		else:
 			label.modulate.a = maxf(0.0,
 				1.0 - (age - LINE_LIFETIME) / FADE_TIME)
-			if label.modulate.a <= 0.0:
-				dead.append(label)
 	for label in dead:
 		_line_ages.erase(label)
-		if is_instance_valid(label):
-			label.queue_free()

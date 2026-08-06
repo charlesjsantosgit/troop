@@ -101,9 +101,18 @@ func _ready() -> void:
 	time_row.add_child(release)
 	column.add_child(time_row)
 
+	var footer_row := HBoxContainer.new()
+	footer_row.add_theme_constant_override("separation", 6)
+	var help := _button("📜 COMMAND LIST → CHAT")
+	help.pressed.connect(func() -> void:
+		visible = false
+		controller.run_command("/help"))
+	footer_row.add_child(help)
 	var close := _button("CLOSE  ·  F8")
+	close.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	close.pressed.connect(func() -> void: visible = false)
-	column.add_child(close)
+	footer_row.add_child(close)
+	column.add_child(footer_row)
 
 	visibility_changed.connect(_on_visibility_changed)
 
