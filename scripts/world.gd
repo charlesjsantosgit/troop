@@ -18,6 +18,7 @@ const LIGHTING_UPDATE_STEP := 0.05
 const SKY_UPDATE_STEP := 0.50
 const CLOCK_RESYNC_STEP := 1.0
 const CALENDAR_CHECK_STEP := 60.0
+const MOON_SKY_ENERGY := 3.8
 
 static var _muzzle_mesh: SphereMesh
 static var _muzzle_material: StandardMaterial3D
@@ -43,9 +44,11 @@ var _marker: MeshInstance3D
 var _particles: GPUParticles3D
 var water_fx: WaterFX
 var _environment: Environment
-var _sky_material: ProceduralSkyMaterial
+var _sky_material: ShaderMaterial
+var _celestial_sky: CelestialSky
 var _sun: DirectionalLight3D
 var _moon: DirectionalLight3D
+var _moon_visual_strength := 0.0
 var seasonal_weather: SeasonalWeather
 var season := SeasonalCycle.Season.SUMMER
 var weather := SeasonalCycle.Weather.CLEAR
@@ -88,15 +91,9 @@ func build() -> void:
 	add_child(water_fx)
 	var env := Environment.new()
 	_environment = env
-	var sky_mat := ProceduralSkyMaterial.new()
+	_celestial_sky = CelestialSky.new()
+	var sky_mat := _celestial_sky.get_material()
 	_sky_material = sky_mat
-	sky_mat.sky_top_color = Color(0.12, 0.34, 0.60)
-	sky_mat.sky_horizon_color = Color(0.62, 0.80, 0.67)
-	sky_mat.ground_bottom_color = Color(0.055, 0.16, 0.11)
-	sky_mat.ground_horizon_color = Color(0.34, 0.53, 0.36)
-	sky_mat.sun_angle_max = 12.0
-	sky_mat.sun_curve = 0.08
-	sky_mat.sky_energy_multiplier = 0.82
 	var sky := Sky.new()
 	sky.sky_material = sky_mat
 	sky.process_mode = Sky.PROCESS_MODE_INCREMENTAL
@@ -147,6 +144,7 @@ func build() -> void:
 	sun.light_color = Color(1.0, 0.91, 0.70)
 	sun.light_energy = 1.18
 	sun.light_angular_distance = 0.62
+	sun.sky_mode = DirectionalLight3D.SKY_MODE_LIGHT_AND_SKY
 	sun.shadow_enabled = true
 	sun.shadow_blur = 1.6
 	sun.directional_shadow_mode = DirectionalLight3D.SHADOW_PARALLEL_2_SPLITS
@@ -162,6 +160,9 @@ func build() -> void:
 	moon.light_color = Color(0.42, 0.56, 0.88)
 	moon.light_energy = 0.14
 	moon.light_angular_distance = 0.52
+	# The scene-light job remains separate from the visible cratered moon drawn by
+	# CelestialSky, so the sky can be vivid without over-lighting the jungle.
+	moon.sky_mode = DirectionalLight3D.SKY_MODE_LIGHT_ONLY
 	moon.shadow_enabled = false
 	add_child(moon)
 	_apply_day_night(true)
@@ -278,6 +279,16 @@ func clear_time_of_day_override() -> void:
 	_clock_resync_timer = CLOCK_RESYNC_STEP
 	time_of_day_hours = Net.authoritative_cycle_hour()
 	_apply_day_night(true)
+
+
+func moon_visual_strength() -> float:
+	return _moon_visual_strength
+
+
+func moon_source_direction() -> Vector3:
+	if not _moon:
+		return Vector3.UP
+	return _moon.global_basis.z.normalized()
 
 
 func _apply_season(next_season: SeasonalCycle.Season) -> void:
@@ -844,7 +855,7 @@ func _update_day_night(dt: float) -> void:
 
 
 func _apply_day_night(update_sky: bool) -> void:
-	if not _environment or not _sun or not _moon:
+	if not _environment or not _sun or not _moon or not _celestial_sky:
 		return
 	var elevation := SeasonalCycle.solar_elevation_for_hour(time_of_day_hours)
 	daylight_amount = smoothstep(-0.10, 0.14, elevation)
@@ -862,6 +873,11 @@ func _apply_day_night(update_sky: bool) -> void:
 			weather_light = 0.90
 		SeasonalCycle.Weather.SNOW:
 			weather_light = 0.82
+	# Daytime fog can softly unify the canopy and sky, but that same green
+	# contribution turns a clear midnight teal. Keep clear nights navy while
+	# allowing rain and snow to retain a believable veil over the stars.
+	_environment.fog_sky_affect = lerpf(
+		0.025 + (1.0 - weather_light) * 0.12, 0.12, daylight_amount)
 	var sunrise_color := Color(1.0, 0.42, 0.16)
 	var noon_color := Color(1.0, 0.955, 0.86)
 	_sun.light_color = sunrise_color.lerp(noon_color, high_sun)
@@ -869,6 +885,10 @@ func _apply_day_night(update_sky: bool) -> void:
 		* weather_light
 	_sun.shadow_enabled = daylight_amount > 0.08
 	_moon.light_energy = (1.0 - daylight_amount) * 0.27 * weather_light
+	# Cloudy seasonal weather attenuates the visible disc more strongly than the
+	# diffuse moonlight, so rain and snow do not leave a pasted-on white circle.
+	_moon_visual_strength = (1.0 - daylight_amount) * MOON_SKY_ENERGY \
+		* weather_light * weather_light
 	_environment.ambient_light_energy = lerpf(0.23, 0.60,
 		daylight_amount) * lerpf(0.90, weather_light, 0.58)
 	_environment.tonemap_exposure = lerpf(0.87, 0.96, daylight_amount)
@@ -877,12 +897,12 @@ func _apply_day_night(update_sky: bool) -> void:
 		_particles.emitting = season == SeasonalCycle.Season.SUMMER \
 			and daylight_amount < 0.52
 
-	if not update_sky or not _sky_material:
+	if not update_sky or not _sky_material or not _celestial_sky:
 		return
 	var storm := 1.0 - weather_light
-	var night_top := Color(0.006, 0.012, 0.045)
+	var night_top := Color(0.027, 0.082, 0.239)
 	var day_top := Color(0.075, 0.29, 0.64)
-	var night_horizon := Color(0.026, 0.045, 0.085)
+	var night_horizon := Color(0.063, 0.169, 0.357)
 	var day_horizon := Color(0.58, 0.77, 0.89)
 	var twilight_horizon := Color(1.0, 0.31, 0.095)
 	var sky_top := night_top.lerp(day_top, daylight_amount)
@@ -891,14 +911,17 @@ func _apply_day_night(update_sky: bool) -> void:
 		twilight * (0.82 - high_sun * 0.54))
 	sky_top = sky_top.lerp(Color(0.22, 0.27, 0.32), storm * 0.68)
 	sky_horizon = sky_horizon.lerp(Color(0.40, 0.45, 0.49), storm * 0.56)
-	_sky_material.sky_top_color = sky_top
-	_sky_material.sky_horizon_color = sky_horizon
-	_sky_material.ground_bottom_color = Color(0.012, 0.025, 0.038).lerp(
+	var ground_bottom := Color(0.008, 0.025, 0.075).lerp(
 		Color(0.08, 0.18, 0.11), daylight_amount)
-	_sky_material.ground_horizon_color = Color(0.035, 0.055, 0.075).lerp(
+	var ground_horizon := Color(0.025, 0.080, 0.165).lerp(
 		Color(0.30, 0.48, 0.34), daylight_amount)
-	_sky_material.sky_energy_multiplier = lerpf(0.18, 0.86,
-		daylight_amount) * lerpf(1.0, weather_light, 0.62)
+	var sky_energy := lerpf(0.68, 0.92, daylight_amount) \
+		* lerpf(1.0, weather_light, 0.48)
+	_celestial_sky.update_palette(sky_top, sky_horizon,
+		ground_bottom, ground_horizon, sky_energy)
+	_celestial_sky.update_celestials(daylight_amount, weather_light,
+		moon_source_direction(), _moon_visual_strength, time_of_day_hours,
+		_sun.global_basis.z.normalized())
 
 
 func _stream(budget: int) -> void:

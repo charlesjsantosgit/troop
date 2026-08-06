@@ -47,7 +47,11 @@ off whenever T is released. Voice volume and the PTT binding are configurable.
 
 A complete 24-hour day/night cycle lasts 60 real minutes. Its shared clock stays
 in sync in multiplayer, including for players who join a match already in
-progress.
+progress. A visible moon follows the same orbit as the moonlight, fades out in
+daylight, and becomes muted by rainy or snowy weather. Clear nights fade into a
+deep midnight-blue sky filled with varied stars, recognizable constellations,
+and softly colored planets. The slightly enlarged moon has a crisp rim and
+visible procedural crater shading rather than a featureless white glow.
 
 The local calendar selects Northern Hemisphere seasons. Spring brings rain,
 summer favors clear skies and nighttime fireflies, fall turns the leaves and
@@ -209,6 +213,7 @@ godot --resolution 1600x900 --max-fps 0 --path . res://scenes/main.tscn -- perft
 godot --resolution 1600x900 --max-fps 0 --path . res://scenes/main.tscn -- perftest spring
 godot --resolution 1600x900 --max-fps 0 --path . res://scenes/main.tscn -- perftest summer
 godot --resolution 1600x900 --max-fps 0 --path . res://scenes/main.tscn -- perftest winter
+godot --resolution 1600x900 --max-fps 0 --path . res://scenes/main.tscn -- perftest night
 # two-terminal multiplayer check:
 godot --headless --path . res://scenes/main.tscn --quit-after 4000 -- nettest-host
 godot --headless --path . res://scenes/main.tscn --quit-after 4000 -- nettest-join 127.0.0.1
@@ -230,6 +235,10 @@ godot --path . res://scenes/main.tscn -- shot season-autumn /tmp/autumn.png
 godot --path . res://scenes/main.tscn -- shot season-winter /tmp/winter.png
 godot --path . res://scenes/main.tscn -- shot winter-scarf /tmp/scarf.png
 godot --path . res://scenes/main.tscn -- shot lighting-night /tmp/night.png
+godot --path . res://scenes/main.tscn -- shot lighting-moon /tmp/moon.png
+godot --path . res://scenes/main.tscn -- shot lighting-celestial /tmp/celestial.png
+godot --path . res://scenes/main.tscn -- shot lighting-celestial-rain /tmp/celestial-rain.png
+godot --path . res://scenes/main.tscn -- shot lighting-moon-detail /tmp/moon-detail.png
 # reload/healing/hut visual fixtures:
 godot --path . res://scenes/main.tscn -- shot reload-banana /tmp/reload.png
 godot --path . res://scenes/main.tscn -- shot bandage /tmp/bandage.png
