@@ -3,6 +3,7 @@ extends Node3D
 ## Owns the streamed infinite jungle plus lighting, ambience, players/puppets.
 
 const HorizonChunkScript = preload("res://scripts/horizon_chunk.gd")
+const SkylineChunkScript = preload("res://scripts/skyline_chunk.gd")
 
 signal combat_score_changed
 signal headshot_scored(source: Node3D, target: Node3D, lethal: bool, distance: float)
@@ -35,6 +36,10 @@ var horizon_chunks: Dictionary = {}  # Vector2i -> HorizonChunk macro sectors
 var _horizon_queue: Array = []
 var _horizon_pending: Dictionary = {}
 var _horizon_detail_queue: Array[HorizonChunk] = []
+var skyline_chunks: Dictionary = {}  # Vector2i -> SkylineChunk mountain vista
+var _skyline_queue: Array = []
+var _skyline_pending: Dictionary = {}
+var _skyline_center := Vector2i(0x3fffffff, 0x3fffffff)
 var _stream_center := Vector2i(0x3fffffff, 0x3fffffff)
 var _prefetch_center := Vector2i(0x3fffffff, 0x3fffffff)
 var _horizon_center := Vector2i(0x3fffffff, 0x3fffffff)
@@ -119,10 +124,11 @@ func build() -> void:
 	env.ssil_intensity = 0.65
 	env.fog_enabled = true
 	env.fog_light_color = Color(0.43, 0.61, 0.43)
-	env.fog_density = 0.0017
+	env.fog_density = 0.00100
 	env.fog_height = 2.0
 	env.fog_height_density = 0.055
 	env.fog_sky_affect = 0.12
+	env.fog_aerial_perspective = 0.55
 	env.volumetric_fog_enabled = false
 	env.volumetric_fog_density = 0.0035
 	env.volumetric_fog_albedo = Color(0.60, 0.75, 0.56)
@@ -788,19 +794,19 @@ func _update_biome_ambience(dt: float) -> void:
 				local_player.global_position.z):
 			Gen.Biome.BAMBOO_GROVE:
 				_biome_fog_target = Color(0.53, 0.66, 0.38)
-				_biome_density_target = 0.00145
+				_biome_density_target = 0.00086
 				_biome_saturation_target = 1.06
 			Gen.Biome.WETLAND:
 				_biome_fog_target = Color(0.34, 0.58, 0.53)
-				_biome_density_target = 0.00205
+				_biome_density_target = 0.00120
 				_biome_saturation_target = 0.99
 			Gen.Biome.HIGHLAND:
 				_biome_fog_target = Color(0.56, 0.67, 0.62)
-				_biome_density_target = 0.00235
+				_biome_density_target = 0.00137
 				_biome_saturation_target = 0.96
 			_:
 				_biome_fog_target = Color(0.43, 0.61, 0.43)
-				_biome_density_target = 0.0017
+				_biome_density_target = 0.00100
 				_biome_saturation_target = 1.08
 	var night_fog := Color(0.055, 0.075, 0.13)
 	var fog_target := night_fog.lerp(_biome_fog_target,
@@ -922,6 +928,11 @@ func _apply_day_night(update_sky: bool) -> void:
 		Color(0.08, 0.18, 0.11), daylight_amount)
 	var ground_horizon := Color(0.025, 0.080, 0.165).lerp(
 		Color(0.30, 0.48, 0.34), daylight_amount)
+	# Just below the horizon line the sky hemisphere must read as distant haze,
+	# not flat green: past the skyline tier (~1.9 km) it is all a viewer sees,
+	# and daytime aerial perspective already fades far terrain toward the sky.
+	ground_horizon = ground_horizon.lerp(sky_horizon, 0.66 * daylight_amount)
+	ground_bottom = ground_bottom.lerp(sky_horizon, 0.22 * daylight_amount)
 	var sky_energy := lerpf(0.68, 0.92, daylight_amount) \
 		* lerpf(1.0, weather_light, 0.48)
 	_celestial_sky.update_palette(sky_top, sky_horizon,
@@ -939,6 +950,9 @@ func _stream(budget: int) -> void:
 	var hc := center_horizon_sector()
 	if hc != _horizon_center:
 		_refresh_horizon_targets(hc)
+	var sc := center_skyline_sector()
+	if sc != _skyline_center:
+		_refresh_skyline_targets(sc)
 	var did_heavy_work := false
 	if not _queue.is_empty():
 		var n := mini(budget, _queue.size())
@@ -1003,6 +1017,18 @@ func _stream(budget: int) -> void:
 			did_heavy_work = true
 			break
 
+	# Skyline mountain sectors: huge, rare, and purely scenic. They outrank the
+	# horizon's decorative tree silhouettes so distant ranges appear promptly,
+	# but never displace near-field streaming or collision work.
+	if not did_heavy_work and not _skyline_queue.is_empty():
+		var sk: Vector2i = _skyline_queue.pop_front()
+		_skyline_pending.erase(sk)
+		var sd := (sk - sc).abs()
+		if maxi(sd.x, sd.y) <= Gen.SKYLINE_VIEW_R \
+				and not skyline_chunks.has(sk):
+			_build_skyline_chunk(sk)
+			did_heavy_work = true
+
 	# Tree silhouettes and other visual detail use only otherwise-idle frames.
 	if not did_heavy_work:
 		while not _horizon_detail_queue.is_empty():
@@ -1020,6 +1046,12 @@ func _stream(budget: int) -> void:
 func center_horizon_sector() -> Vector2i:
 	var c := local_player.global_position if local_player else Vector3.ZERO
 	var sector_size := Gen.CHUNK * Gen.HORIZON_SECTOR_CHUNKS
+	return Vector2i(floori(c.x / sector_size), floori(c.z / sector_size))
+
+
+func center_skyline_sector() -> Vector2i:
+	var c := local_player.global_position if local_player else Vector3.ZERO
+	var sector_size := Gen.CHUNK * Gen.SKYLINE_SECTOR_CHUNKS
 	return Vector2i(floori(c.x / sector_size), floori(c.z / sector_size))
 
 
@@ -1111,6 +1143,36 @@ func _refresh_horizon_targets(hc: Vector2i) -> void:
 		horizon_chunks.erase(k)
 
 
+func _refresh_skyline_targets(sc: Vector2i) -> void:
+	_skyline_center = sc
+	_skyline_queue.clear()
+	_skyline_pending.clear()
+	for dx in range(-Gen.SKYLINE_VIEW_R, Gen.SKYLINE_VIEW_R + 1):
+		for dz in range(-Gen.SKYLINE_VIEW_R, Gen.SKYLINE_VIEW_R + 1):
+			var k := sc + Vector2i(dx, dz)
+			if not skyline_chunks.has(k):
+				_skyline_queue.append(k)
+				_skyline_pending[k] = true
+	_skyline_queue.sort_custom(func(a, b):
+		return Vector2(a - sc).length_squared() \
+			< Vector2(b - sc).length_squared())
+	var dead: Array = []
+	for k in skyline_chunks:
+		var d: Vector2i = (k - sc).abs()
+		if maxi(d.x, d.y) > Gen.SKYLINE_DROP_R:
+			dead.append(k)
+	for k in dead:
+		skyline_chunks[k].queue_free()
+		skyline_chunks.erase(k)
+
+
+func _build_skyline_chunk(k: Vector2i) -> void:
+	var sector: Node3D = SkylineChunkScript.new()
+	add_child(sector)
+	sector.setup(k)
+	skyline_chunks[k] = sector
+
+
 func _build_chunk(k: Vector2i, defer_outer_details := true) -> void:
 	var c := Chunk.new()
 	add_child(c)
@@ -1160,6 +1222,14 @@ func warm(radius: int) -> void:
 			var hk := hc + Vector2i(dx, dz)
 			if not horizon_chunks.has(hk):
 				_build_horizon_chunk(hk, false)
+	# Nine skyline sectors put the mountain ranges on screen from the first
+	# frame (±1.15 km); the outer ring streams in on idle frames.
+	var sc := center_skyline_sector()
+	for dx in range(-1, 2):
+		for dz in range(-1, 2):
+			var sk := sc + Vector2i(dx, dz)
+			if not skyline_chunks.has(sk):
+				_build_skyline_chunk(sk)
 
 
 ## Fast online entry: publish one fully playable chunk — the one under the

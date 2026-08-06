@@ -1963,6 +1963,40 @@ func _do_shot(args: Array) -> void:
 		print("BIOME_VISTA %s position=(%.1f,%.1f) horizon=%.0fm" % [
 			Gen.biome_name(requested_biome), vista.x, vista.z,
 			Gen.HORIZON_DISTANCE])
+	elif what == "mountains":
+		# Find the tallest peak within skyline range, stand in its foothills,
+		# and frame the range: verifies ridged relief, snow bands, and the
+		# ultra-far skyline tier in one deterministic composition.
+		var peak := Vector3.ZERO
+		for gx in range(-21, 22):
+			for gz in range(-21, 22):
+				var x := float(gx) * 96.0
+				var z := float(gz) * 96.0
+				var h := Gen.height(x, z)
+				if h > peak.y:
+					peak = Vector3(x, h, z)
+		var toward_origin := Vector3(-peak.x, 0.0, -peak.z).normalized()
+		var viewpoint := peak + toward_origin * 640.0
+		viewpoint.y = Gen.height(viewpoint.x, viewpoint.z)
+		var p := world.local_player
+		p.test_mode = true
+		p.set_physics_process(false)
+		p.global_position = viewpoint + Vector3.UP * 1.5
+		p.reset_physics_interpolation()
+		if hud:
+			hud.visible = false
+		for i in range(160):
+			await get_tree().process_frame
+		cam.fov = 58.0
+		cam.far = 4000.0
+		# Rise well above the local canopy (rainforest crowns reach ~36 m over
+		# ground) so the lens frames the range instead of the nearest tree.
+		var lens := viewpoint - toward_origin * 30.0
+		lens.y = maxf(viewpoint.y, Gen.height(lens.x, lens.z)) + 42.0
+		cam.global_position = lens
+		cam.look_at(Vector3(peak.x, peak.y * 0.86, peak.z))
+		print("MOUNTAIN_VISTA peak=(%.0f,%.0f) height=%.1fm skyline=%.0fm" % [
+			peak.x, peak.z, peak.y, Gen.SKYLINE_DISTANCE])
 	else:
 		var g0 := Gen.height(0, 0)
 		var m1 := world.spawn_puppet(7, "Mango")

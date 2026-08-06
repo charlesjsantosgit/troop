@@ -69,11 +69,12 @@ func run(main) -> void:
 		det = a.trees[0].pos == b.trees[0].pos and a.trees[0].vines.size() == b.trees[0].vines.size()
 	check("chunk_layout deterministic", det)
 
-	# 2 — terrain heights sane everywhere sampled
+	# 2 — terrain heights sane everywhere sampled. Ridged mountain ranges may
+	# legitimately reach ~80 m; the bound only guards against NaN/runaway noise.
 	var ok_h := true
 	for i in range(120):
 		var h := Gen.height(i * 13.7 - 800.0, i * 7.3 - 400.0)
-		if is_nan(h) or absf(h) > 60.0:
+		if is_nan(h) or absf(h) > 120.0:
 			ok_h = false
 	check("terrain heights finite", ok_h)
 

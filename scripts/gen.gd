@@ -16,6 +16,16 @@ const HORIZON_DROP_R := 3
 const HORIZON_NEAR_FADE := 108.0
 const HORIZON_DISTANCE := CHUNK * HORIZON_SECTOR_CHUNKS \
 	* (HORIZON_VIEW_R + 0.5)
+const SKYLINE_SECTOR_CHUNKS := 16 # 768 m ultra-far sectors for mountain vistas
+const SKYLINE_VIEW_R := 2        # 5x5 sectors: about a 1.9 km visible radius
+const SKYLINE_DROP_R := 2
+const SKYLINE_NEAR_FADE := 600.0 # dithered handoff inside the horizon ring
+const SKYLINE_DISTANCE := CHUNK * SKYLINE_SECTOR_CHUNKS \
+	* (SKYLINE_VIEW_R + 0.5)
+const MOUNTAIN_HEIGHT := 66.0    # ridge crest amplitude above the jungle floor
+const TREE_LINE := 27.0          # jungle canopy stops growing above this height
+const SNOW_LINE_START := 26.0    # rock band begins fading into permanent snow
+const SNOW_LINE_FULL := 40.0     # full snowpack on peaks (shaders + tint agree)
 const REACH := 2.2               # blind arm's-reach fallback grab distance
 const TARGET_DIST := 3.0         # realistic grab reach from the hand (1-3m)
 const TARGET_COS := 0.82         # ~35° aim cone around the crosshair
@@ -54,6 +64,9 @@ var _n_lake := FastNoiseLite.new()
 var _n_lake_warp := FastNoiseLite.new()
 var _n_biome := FastNoiseLite.new()
 var _n_moisture := FastNoiseLite.new()
+var _n_hill := FastNoiseLite.new()
+var _n_mountain := FastNoiseLite.new()
+var _n_mountain_mask := FastNoiseLite.new()
 
 # vine registry: id -> {anchor, len, chunk, hidden, simulated, points}
 # `hidden` means a monkey currently owns the visual. `simulated` means a
@@ -91,15 +104,51 @@ func setup(seed_v: int) -> void:
 	_n_moisture.seed = seed_v + 606
 	_n_moisture.noise_type = FastNoiseLite.TYPE_SIMPLEX_SMOOTH
 	_n_moisture.frequency = 0.0026
+	# Relief fields. Hills roll on a ~350 m wavelength everywhere; mountains are
+	# ridged crests gated by an even broader mask so they form distinct ranges
+	# with jungle valleys between them instead of uniform roughness.
+	_n_hill.seed = seed_v + 707
+	_n_hill.noise_type = FastNoiseLite.TYPE_SIMPLEX_SMOOTH
+	_n_hill.frequency = 0.0028
+	_n_mountain.seed = seed_v + 808
+	_n_mountain.noise_type = FastNoiseLite.TYPE_SIMPLEX_SMOOTH
+	_n_mountain.frequency = 0.00085
+	_n_mountain_mask.seed = seed_v + 909
+	_n_mountain_mask.noise_type = FastNoiseLite.TYPE_SIMPLEX_SMOOTH
+	_n_mountain_mask.frequency = 0.00042
 
 
 func height(x: float, z: float) -> float:
 	return _height_with_lake(x, z, lake_influence(x, z))
 
 
+## 0..1 strength of the mountain ranges at a point. Suppressed near the world
+## origin so the spawn meadow, hero grove, and duel arena keep their authored
+## gentle terrain, and cheap when far from any range (one mask sample).
+func mountain_influence(x: float, z: float) -> float:
+	var mask: float = smoothstep(0.30, 0.62, _n_mountain_mask.get_noise_2d(x, z))
+	if mask < 0.002:
+		return 0.0
+	mask *= smoothstep(120.0, 280.0, Vector2(x, z).length())
+	if mask < 0.002:
+		return 0.0
+	# Ridged crests: fold the signed noise so zero-crossings become sharp
+	# spines, plus a finer octave for jagged shoulders. Both samples only run
+	# inside the range mask, so ordinary jungle pays one mask lookup.
+	var ridge := 1.0 - absf(_n_mountain.get_noise_2d(x, z))
+	var jag := 1.0 - absf(_n_mountain.get_noise_2d(x * 2.7 + 511.0, z * 2.7))
+	return mask * (pow(ridge, 2.3) + pow(jag, 2.6) * 0.22)
+
+
 func _height_with_lake(x: float, z: float, lake: float) -> float:
 	var h := _n_base.get_noise_2d(x, z) * 9.0 \
-		+ _n_detail.get_noise_2d(x, z) * 1.3 + 3.2
+		+ _n_detail.get_noise_2d(x, z) * 1.3 + 3.2 \
+		+ _n_hill.get_noise_2d(x, z) * 5.5
+	# Mountains rise before the lake blend so basins carve fjord-like shores
+	# through the foothills; scaling by (1 - lake) keeps peaks off lake beds.
+	var mountain := mountain_influence(x, z)
+	if mountain > 0.0:
+		h += mountain * MOUNTAIN_HEIGHT * (1.0 - lake)
 	# Blend terrain into a deep, gently uneven lake floor. The warped 600 m-ish
 	# field produces 120–350 m connected water bodies: roughly an order of
 	# magnitude wider than the old noise pockets, without hard circular shores.
@@ -163,22 +212,32 @@ func biome_name(biome: int) -> String:
 func ground_color(h: float, x: float, z: float) -> Color:
 	var jit := _n_color.get_noise_2d(x, z)
 	if h < WATER_Y + 0.4:
-		return Color(0.62 + jit * 0.045, 0.54, 0.31)
+		return Color(0.55 + jit * 0.04, 0.47, 0.27)
 	var t := clampf((h - 1.0) / 11.0, 0.0, 1.0)
 	var biome := biome_at_height(x, z, h)
-	var low := Color(0.24, 0.60, 0.18)
-	var high := Color(0.08, 0.38, 0.13)
+	# Deep, sunlight-starved forest-floor greens rather than lawn tones.
+	var low := Color(0.085, 0.26, 0.08)
+	var high := Color(0.035, 0.155, 0.06)
 	match biome:
 		Biome.BAMBOO_GROVE:
-			low = Color(0.34, 0.61, 0.15)
-			high = Color(0.16, 0.42, 0.10)
+			low = Color(0.14, 0.30, 0.075)
+			high = Color(0.065, 0.19, 0.05)
 		Biome.WETLAND:
-			low = Color(0.25, 0.47, 0.18)
-			high = Color(0.11, 0.31, 0.17)
+			low = Color(0.095, 0.225, 0.09)
+			high = Color(0.045, 0.14, 0.08)
 		Biome.HIGHLAND:
-			low = Color(0.20, 0.48, 0.22)
-			high = Color(0.075, 0.29, 0.18)
+			low = Color(0.075, 0.215, 0.10)
+			high = Color(0.035, 0.13, 0.085)
 	var c := low.lerp(high, t)
+	# Above the canopy line the soil turns to bare rock, then permanent snow.
+	# Shaders add sparkle/roughness on top; the vertex tint carries the bands so
+	# every LOD tier (near lattice, horizon, skyline) agrees for free.
+	var rock_band := smoothstep(TREE_LINE * 0.7, SNOW_LINE_START, h)
+	if rock_band > 0.0:
+		c = c.lerp(Color(0.31, 0.28, 0.245), rock_band)
+	var snow_band := smoothstep(SNOW_LINE_START, SNOW_LINE_FULL, h)
+	if snow_band > 0.0:
+		c = c.lerp(Color(0.83, 0.87, 0.91), snow_band)
 	if jit > 0.42:
 		c = c.darkened(0.22)
 	return Color(c.r + jit * 0.04, c.g + jit * 0.04, c.b)
@@ -441,6 +500,8 @@ func chunk_layout(cx: int, cz: int, include_decorations := true) -> Dictionary:
 			continue  # keep the spawn meadow clear (hero grove owns it)
 		if local_height < WATER_Y + 0.5:
 			continue
+		if local_height > TREE_LINE:
+			continue  # bare rock and snow above the canopy line
 		tree_points.append(point)
 		var generated_tree := _make_tree(rng, Vector3(px, 0, pz), 0.0,
 			local_biome, include_decorations)
@@ -471,6 +532,10 @@ func chunk_layout(cx: int, cz: int, include_decorations := true) -> Dictionary:
 
 	var rock_count := rng.randi_range(2, 5) \
 		if center_biome == Biome.HIGHLAND else rng.randi_range(0, 2)
+	# Slopes above the tree line trade canopy for scree: extra boulders make the
+	# bare rock band read as mountainside instead of empty lawn.
+	if height(x0 + CHUNK * 0.5, z0 + CHUNK * 0.5) > TREE_LINE * 0.75:
+		rock_count += rng.randi_range(3, 6)
 	for i in range(rock_count):
 		var rx := x0 + rng.randf() * CHUNK
 		var rz := z0 + rng.randf() * CHUNK
@@ -506,6 +571,8 @@ func chunk_layout(cx: int, cz: int, include_decorations := true) -> Dictionary:
 		if fh < WATER_Y - 0.24 or (fh < WATER_Y + 0.08 \
 				and fb != Biome.WETLAND):
 			continue
+		if fh > TREE_LINE:
+			continue  # no undergrowth on the bare rock and snow bands
 		var kind := 0
 		if fb == Biome.WETLAND:
 			kind = 2 if foliage_rng.randf() < 0.72 else 0
@@ -633,18 +700,20 @@ func _tree_density(biome: int) -> float:
 
 
 func biome_foliage_color(biome: int, shade: float) -> Color:
+	# Deeper, higher-saturation canopy tones: real broadleaf crowns sit closer
+	# to 25-45% value than the old minty 40-70% range.
 	match biome:
 		Biome.BAMBOO_GROVE:
-			return Color.from_hsv(0.20 + shade * 0.055, 0.62,
-				0.42 + shade * 0.27)
+			return Color.from_hsv(0.20 + shade * 0.055, 0.68,
+				0.23 + shade * 0.16)
 		Biome.WETLAND:
-			return Color.from_hsv(0.30 + shade * 0.055, 0.48,
-				0.32 + shade * 0.23)
+			return Color.from_hsv(0.30 + shade * 0.055, 0.56,
+				0.185 + shade * 0.14)
 		Biome.HIGHLAND:
-			return Color.from_hsv(0.37 + shade * 0.055, 0.48,
-				0.32 + shade * 0.25)
-	return Color.from_hsv(0.27 + shade * 0.07, 0.62,
-		0.40 + shade * 0.31)
+			return Color.from_hsv(0.37 + shade * 0.055, 0.54,
+				0.185 + shade * 0.15)
+	return Color.from_hsv(0.27 + shade * 0.07, 0.70,
+		0.205 + shade * 0.175)
 
 
 func _make_tree(rng: RandomNumberGenerator, p: Vector3, force_h: float,
@@ -713,7 +782,7 @@ func _make_tree(rng: RandomNumberGenerator, p: Vector3, force_h: float,
 			"r": rng.randf_range(blob_min, blob_max),
 			"flower": flower,
 			"shade": shade,
-			"color": Color(0.93, 0.55, 0.68) if flower \
+			"color": Color(0.74, 0.40, 0.52) if flower \
 				else biome_foliage_color(biome, shade),
 		})
 
