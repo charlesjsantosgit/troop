@@ -4,8 +4,10 @@ extends Node3D
 
 const HorizonChunkScript = preload("res://scripts/horizon_chunk.gd")
 const SkylineChunkScript = preload("res://scripts/skyline_chunk.gd")
+const FriendlyMonkeyScript = preload("res://scripts/friendly_monkey.gd")
 
 signal combat_score_changed
+signal villager_trade_requested(villager: Node3D, player: Node3D)
 signal headshot_scored(source: Node3D, target: Node3D, lethal: bool, distance: float)
 
 const BUILD_BUDGET := 1  # cap streaming work to avoid traversal frame spikes
@@ -75,6 +77,9 @@ var _pending_supply_loot: Dictionary = {} # requested hut id -> immutable loot p
 var _rewarded_supply_huts: Dictionary = {} # local inventory idempotency guard
 var _vine_sims: Dictionary = {}      # vine id -> released VinePhysics
 var ai_opponent: Node3D
+var friendly_monkeys: Array[Node3D] = []
+var villagers: Array[Node3D] = []
+var _friendly_serial := 0
 var combat_kills: Dictionary = {}
 var practice_targets: Array[PracticeTarget] = []
 var _t := 0.0
@@ -461,6 +466,42 @@ func spawn_local(peer_id: int, pname: String) -> MonkeyPlayer:
 	_ensure_seasonal_weather()
 	_apply_scarf_state()
 	return p
+
+
+func spawn_friendly(mode: int, at: Vector3, target: Node3D = null) -> Node3D:
+	var friend = FriendlyMonkeyScript.new()
+	_friendly_serial += 1
+	friend.peer_id = -100 - _friendly_serial
+	friend.display_name = ["Loop", "Shadow", "Steady", "Ookbar"][
+		clampi(mode, 0, 3)]
+	friend.is_local = false
+	friend.is_ai = true
+	friend.world = self
+	friend.configure_friendly(mode, at, target)
+	friend.position = at
+	add_child(friend)
+	friendly_monkeys.append(friend)
+	if mode == FriendlyMonkeyScript.Mode.VILLAGER:
+		villagers.append(friend)
+	return friend
+
+
+## E-interaction: a trading villager within reach outranks chests and vines.
+func nearby_trade_villager(player: Node3D) -> Node3D:
+	for villager in villagers:
+		if is_instance_valid(villager) \
+				and villager.global_position.distance_to(
+					player.global_position) < 3.4:
+			return villager
+	return null
+
+
+func try_open_villager_trade(player: Node3D) -> bool:
+	var villager := nearby_trade_villager(player)
+	if not villager:
+		return false
+	villager_trade_requested.emit(villager, player)
+	return true
 
 
 func spawn_solo_ai() -> Node3D:
