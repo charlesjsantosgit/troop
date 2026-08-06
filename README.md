@@ -6,7 +6,6 @@
 
 ![Godot 4.7](https://img.shields.io/badge/Godot-4.7-478cbf?logo=godotengine&logoColor=white)
 ![Language](https://img.shields.io/badge/GDScript-27k_lines-355570)
-![Assets](https://img.shields.io/badge/asset_files-zero_·_100%25_generated-e0a927)
 ![Multiplayer](https://img.shields.io/badge/multiplayer-ENet_·_UDP_30623-2e7d4f)
 
 <img src="docs/media/hero-swing.jpg" alt="A monkey mid-swing on a vine over the jungle floor, banana gun in paw" width="900">
