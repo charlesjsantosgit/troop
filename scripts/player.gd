@@ -78,6 +78,10 @@ const MELEE_COMBO_RESET_TIME := 0.85
 const BANDAGE_TIME := 2.45
 const BANDAGE_HEAL := 42.0
 const MAX_BANDAGES := 5
+const FLY_SPEED := 22.0
+const FLY_SPRINT_SPEED := 38.0
+const FLY_VERTICAL_SPEED := 15.0
+const FLY_ACCEL := 42.0
 
 var peer_id := 1
 var display_name := "Monkey"
@@ -130,6 +134,7 @@ var sniper: SniperRifle
 var active_weapon: Node3D
 var weapon_slot := 1
 var melee_mode := false
+var fly_mode := false
 var melee_attack_remaining := 0.0
 var melee_attack_combo := 0
 var body_hitbox: CombatHitbox
@@ -262,6 +267,11 @@ func _physics_process(dt: float) -> void:
 	roll_t = maxf(roll_t - dt, 0.0)
 
 	var inp := _gather()
+	if inp.interact_just and state != S.SWING and is_local and world \
+			and world.has_method("try_open_villager_trade") \
+			and world.try_open_villager_trade(self):
+		inp.interact_just = false
+		inp.grab = false
 	if inp.interact_just and state != S.SWING and world \
 			and world.has_method("try_open_supply_chest") \
 			and world.try_open_supply_chest(self):
@@ -274,12 +284,15 @@ func _physics_process(dt: float) -> void:
 	var pre_floor := is_on_floor()
 	var pre_vy := velocity.y
 
-	match state:
-		S.GROUND: _st_ground(dt, inp)
-		S.SLIDE: _st_slide(dt, inp)
-		S.AIR: _st_air(dt, inp)
-		S.SWING: _st_swing(dt, inp)
-		S.SWIM: _st_swim(dt, inp)
+	if fly_mode:
+		_st_fly(dt, inp)
+	else:
+		match state:
+			S.GROUND: _st_ground(dt, inp)
+			S.SLIDE: _st_slide(dt, inp)
+			S.AIR: _st_air(dt, inp)
+			S.SWING: _st_swing(dt, inp)
+			S.SWIM: _st_swim(dt, inp)
 
 	velocity = velocity.limit_length(ABS_MAX)
 	move_and_slide()
@@ -1334,7 +1347,7 @@ func _post(dt: float, inp: Dictionary, pre_floor: bool, pre_vy: float) -> void:
 			is_weapon_stowed(), melee_mode,
 			int(active_weapon.ammo) if active_weapon else 0,
 			active_weapon != null and active_weapon.reload_remaining > 0.0,
-			bandage_progress())
+			bandage_progress(), fly_mode)
 
 	# wind volume follows speed
 	if wind:
@@ -1552,3 +1565,52 @@ func _process(dt: float) -> void:
 	var anim := _anim()
 	rig.update_motion(dt, anim, velocity, is_on_floor(), _active_pivot())
 	_update_motion_effects(anim)
+
+
+# ---- admin fly mode and remote-applied admin actions -----------------------
+
+
+func set_fly_mode(active: bool) -> void:
+	if fly_mode == active:
+		return
+	if active and state == S.SWING:
+		_release(false)
+	fly_mode = active
+	if active:
+		state = S.AIR
+		velocity.y = maxf(velocity.y, 3.0)
+		Sfx.play("djump", -6.0, 0.8)
+	if rig:
+		rig.set_angel_wings(active)
+
+
+func _st_fly(dt: float, inp: Dictionary) -> void:
+	state = S.AIR
+	jumps_used = 1
+	var wish := _wish_dir(inp)
+	var target := wish * (FLY_SPRINT_SPEED if inp.sprint else FLY_SPEED)
+	var vertical := 0.0
+	if inp.jump_held:
+		vertical += FLY_VERTICAL_SPEED
+	if inp.crouch_held:
+		vertical -= FLY_VERTICAL_SPEED
+	target.y = vertical
+	velocity = velocity.move_toward(target, FLY_ACCEL * dt)
+
+
+func admin_kill() -> void:
+	_invulnerable_t = 0.0
+	take_damage(MAX_HEALTH * 4.0, null, Vector3.UP * 3.0, "body")
+
+
+func admin_heal() -> void:
+	health = MAX_HEALTH
+	health_changed.emit(health)
+
+
+func admin_teleport(destination: Vector3) -> void:
+	if state == S.SWING:
+		_release(false)
+	global_position = destination
+	velocity = Vector3.ZERO
+	reset_physics_interpolation()

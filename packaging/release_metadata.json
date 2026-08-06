@@ -1,7 +1,7 @@
 {
   "godot_compatibility": "4.7",
   "minimum_bootstrap": 1,
-  "network_protocol": 3,
-  "notes": "Beta: realistic terrain overhaul. Rolling hills, ridged snow-capped mountain ranges with tree lines and scree, a third ultra-far skyline LOD tier (~1.9 km vistas), deeper forest greens, atmospheric aerial perspective, and a leaner draw budget (399 vs 552 calls in the benchmark scene).",
+  "network_protocol": 4,
+  "notes": "Beta: debug playground (parkour, rope garden, regenerating robot range), in-game text chat, token-gated admin suite (interactive console, spawnable monkeys, villager trading, angel-wing fly mode, teleports, kick/temp-ban), professional menu redesign with live auto-update status. Wire protocol 4.",
   "requires_installer": false
 }

@@ -40,6 +40,7 @@ var _remote_weapon_stowed := false
 var _state_weapon_stowed := false
 var _state_melee_mode := false
 var _state_healing_progress := 0.0
+var _state_flying := false
 var _last_swim_fx_cycle := -1.0
 var _last_swim_kick_bucket := -1
 var _was_swimming_fx := false
@@ -140,7 +141,7 @@ func apply_state(pos: Vector3, yaw: float, vel: Vector3, anim: int,
 		swinging: bool, anchor: Vector3, tail: float,
 		wraps: PackedVector3Array, weapon_kind := Net.WEAPON_REVOLVER,
 		weapon_stowed := false, melee_mode := false, weapon_ammo := -1,
-		weapon_reloading := false, healing_progress := 0.0) -> void:
+		weapon_reloading := false, healing_progress := 0.0, flying := false) -> void:
 	if defeated_visual:
 		if _defeat_guard_t > 0.0:
 			return
@@ -170,6 +171,9 @@ func apply_state(pos: Vector3, yaw: float, vel: Vector3, anim: int,
 	_state_weapon_stowed = weapon_stowed
 	_state_melee_mode = melee_mode
 	_state_healing_progress = clampf(healing_progress, 0.0, 1.0)
+	_state_flying = flying
+	if rig:
+		rig.set_angel_wings(flying)
 	_sync_remote_reload(weapon_reloading, weapon_ammo)
 	_age = 0.0
 	state_count += 1

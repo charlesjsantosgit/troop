@@ -24,6 +24,9 @@ func _draw() -> void:
 	draw_circle(Vector2(s.x * 0.73, s.y * 0.27), minf(s.x, s.y) * 0.19, Color(0.95, 0.78, 0.31, 0.14))
 	draw_circle(Vector2(s.x * 0.73, s.y * 0.27), minf(s.x, s.y) * 0.12, Color(1.0, 0.9, 0.55, 0.07))
 
+	# Snow-capped ranges on the horizon, echoing the in-game skyline tier.
+	_draw_mountains(s, 0.46, 0.16, Color(0.36, 0.44, 0.52, 0.85), true)
+	_draw_mountains(s, 0.52, 0.11, Color(0.24, 0.32, 0.38, 0.9), false)
 	# Distant hills, then darker foreground canopy layers.
 	_draw_hills(s, 0.55, Color("123f31"), 0.045)
 	_draw_hills(s, 0.67, Color("0b3027"), 0.075)
@@ -82,3 +85,43 @@ func _draw_fireflies(s: Vector2) -> void:
 		var y := s.y * (0.10 + fmod(seed * 0.319, 0.82)) + cos(_time * 0.8 + seed) * 8.0
 		var pulse := 0.35 + 0.25 * (sin(_time * 2.2 + seed) + 1.0)
 		draw_circle(Vector2(x, y), 2.2, Color(0.88, 1.0, 0.48, pulse))
+
+
+func _draw_mountains(s: Vector2, horizon: float, relief: float, color: Color,
+		snow_caps: bool) -> void:
+	var steps := 40
+	var ridge := PackedVector2Array()
+	var heights: Array[float] = []
+	for i in range(steps + 1):
+		var t := float(i) / float(steps)
+		# Two folded sines make ridged crests, like the terrain generator.
+		var fold := 1.0 - absf(sin(t * 9.7 + horizon * 12.0))
+		var fold2 := 1.0 - absf(sin(t * 23.0 + horizon * 5.0))
+		var crest := pow(fold, 1.8) + pow(fold2, 2.2) * 0.25
+		var y := s.y * (horizon - crest * relief)
+		heights.append(y)
+		ridge.append(Vector2(s.x * t, y))
+	var polygon := ridge.duplicate()
+	polygon.append(Vector2(s.x, s.y))
+	polygon.append(Vector2(0, s.y))
+	draw_colored_polygon(polygon, color)
+	if not snow_caps:
+		return
+	# White caps: refill only the slice of each peak above the local snowline.
+	var snowline := s.y * (horizon - relief * 0.55)
+	var cap := PackedVector2Array()
+	for i in range(steps + 1):
+		var point := ridge[i]
+		if point.y < snowline:
+			cap.append(point)
+		elif cap.size() > 1:
+			cap.append(Vector2(point.x, snowline))
+			cap.append(Vector2(cap[0].x, snowline))
+			draw_colored_polygon(cap, Color(0.88, 0.92, 0.96, 0.8))
+			cap = PackedVector2Array()
+		else:
+			cap = PackedVector2Array()
+	if cap.size() > 2:
+		cap.append(Vector2(cap[cap.size() - 1].x, snowline))
+		cap.append(Vector2(cap[0].x, snowline))
+		draw_colored_polygon(cap, Color(0.88, 0.92, 0.96, 0.8))

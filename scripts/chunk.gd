@@ -593,11 +593,19 @@ func _build_vine_mesh() -> void:
 			var sway := minf(0.4, vl * 0.045)
 			var p0 := anchor + Vector3.DOWN * (vl * t0) + Vector3(sin(phase + t0 * 2.1), 0, cos(phase + t0 * 1.7)) * sway * t0
 			var p1 := anchor + Vector3.DOWN * (vl * t1) + Vector3(sin(phase + t1 * 2.1), 0, cos(phase + t1 * 1.7)) * sway * t1
-			var c0 := Color(0.2, 0.28, 0.1).lerp(Color(0.3, 0.42, 0.13), t0)
-			var c1 := Color(0.2, 0.28, 0.1).lerp(Color(0.3, 0.42, 0.13), t1)
-			_ribbon(st, p0 - center, p1 - center, 0.055, c0, c1)
+			# The debug playground dresses vines as workshop ropes: braided
+			# tan strands, thicker, with no leaf tint.
+			var low := Color(0.42, 0.30, 0.16) if Gen.debug_world \
+				else Color(0.2, 0.28, 0.1)
+			var high := Color(0.55, 0.42, 0.24) if Gen.debug_world \
+				else Color(0.3, 0.42, 0.13)
+			var c0 := low.lerp(high, t0)
+			var c1 := low.lerp(high, t1)
+			_ribbon(st, p0 - center, p1 - center,
+				0.075 if Gen.debug_world else 0.055, c0, c1)
 			prev = p1
-		var tipc := Color(0.5, 0.72, 0.25)
+		var tipc := Color(0.62, 0.48, 0.28) if Gen.debug_world \
+			else Color(0.5, 0.72, 0.25)
 		_ribbon(st, prev - center + Vector3(0.18, 0.3, 0),
 			prev - center + Vector3(-0.18, -0.12, 0), 0.13, tipc, tipc)
 		_ribbon(st, prev - center + Vector3(0, 0.3, 0.18),

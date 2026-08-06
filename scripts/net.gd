@@ -14,7 +14,7 @@ signal peer_state(id: int, pos: Vector3, yaw: float, vel: Vector3, anim: int,
 	swinging: bool, anchor: Vector3, rope_tail: float,
 	wraps: PackedVector3Array, weapon_kind: int, weapon_stowed: bool,
 	melee_mode: bool, weapon_ammo: int, weapon_reloading: bool,
-	healing_progress: float)
+	healing_progress: float, flying: bool)
 signal score_changed
 signal banana_taken(id: String)
 signal supply_chest_claimed(chest_id: String, claimant_id: int)
@@ -29,11 +29,14 @@ signal melee_swung(shooter_id: int, origin: Vector3, direction: Vector3,
 signal peer_defeated(id: int, pos: Vector3, yaw: float, velocity: Vector3,
 	impulse: Vector3, headshot: bool)
 signal voice_packet(speaker_id: int, sequence: int, payload: PackedByteArray)
+signal chat_received(id: int, sender_name: String, text: String, from_admin: bool)
+signal admin_changed(enabled: bool)
+signal admin_action(action: String, args: Dictionary)
 
 const PORT := 30623
 const MAX_CLIENTS := 24
 const CHANNEL_COUNT := 2
-const PROTOCOL_VERSION := 3
+const PROTOCOL_VERSION := 4
 const MAX_NAME_LENGTH := 20
 const REGISTRATION_TIMEOUT_SECONDS := 5.0
 const MAX_STATE_PACKETS_PER_SECOND := 30
@@ -46,6 +49,11 @@ const MAX_BANANA_ID_LENGTH := 48
 const MAX_CHEST_ID_LENGTH := 64
 const MAX_VOICE_PACKET_BYTES := VoiceCodec.MAX_PACKET_BYTES
 const MAX_VOICE_SEQUENCE := 0x7fffffff
+const MAX_CHAT_LENGTH := 200
+const MAX_BAN_MINUTES := 40320  # 28 days
+const BAN_FILE := "user://bans.json"
+const ADMIN_ACTIONS := ["kick", "ban", "kill", "heal", "give_ammo",
+	"teleport_to", "announce"]
 
 const WEAPON_REVOLVER := 0
 const WEAPON_SHOTGUN := 1
@@ -53,6 +61,9 @@ const WEAPON_SMG := 2
 const WEAPON_SNIPER := 3
 
 var active := false
+var is_admin := false
+var _admins: Dictionary = {}    # server: peer id -> true
+var _bans: Dictionary = {}      # server: remote address -> {until, name}
 var is_host := false
 var is_dedicated := false
 var local_name := "Monkey"
@@ -149,6 +160,9 @@ func host(pname: String, seed_v: int, port := PORT) -> Error:
 	claimed_supply_chests = {}
 	_registered = {1: true}
 	_rate_windows = {}
+	_admins = {}
+	is_admin = true  # the listen host owns the machine running the session
+	admin_changed.emit(true)
 	_initialize_cycle_from_local_calendar()
 	return OK
 
@@ -185,6 +199,7 @@ func start_dedicated(seed_v: int, port := PORT, bind_ip := "*",
 	claimed_supply_chests = {}
 	_registered = {}
 	_rate_windows = {}
+	_load_bans()
 	_initialize_cycle_from_local_calendar()
 	return OK
 
@@ -227,6 +242,9 @@ func solo(pname: String, seed_v: int) -> void:
 	claimed_supply_chests = {}
 	_registered = {}
 	_rate_windows = {}
+	_admins = {}
+	is_admin = true  # offline sessions run on the player's own machine
+	admin_changed.emit(true)
 	_initialize_cycle_from_local_calendar()
 
 
@@ -245,8 +263,57 @@ func shutdown() -> void:
 
 func _on_connected() -> void:
 	active = true
+	is_admin = false
 	rpc_id(1, "srv_register", local_name, PROTOCOL_VERSION,
-		effective_game_version())
+		effective_game_version(), _client_admin_key())
+
+
+## Admin access is a shared secret, never a display name: the client offers
+## TROOP_ADMIN_KEY and the server compares it to its own TROOP_ADMIN_TOKEN.
+func _client_admin_key() -> String:
+	return OS.get_environment("TROOP_ADMIN_KEY").strip_edges().left(128)
+
+
+func _server_admin_token() -> String:
+	return OS.get_environment("TROOP_ADMIN_TOKEN").strip_edges().left(128)
+
+
+func _peer_address(id: int) -> String:
+	var enet := multiplayer.multiplayer_peer as ENetMultiplayerPeer
+	if not enet:
+		return ""
+	var peer := enet.get_peer(id)
+	return peer.get_remote_address() if peer else ""
+
+
+func _ban_remaining_minutes(address: String) -> int:
+	if address.is_empty() or not _bans.has(address):
+		return 0
+	var until := int(_bans[address].get("until", 0))
+	var remaining := until - int(Time.get_unix_time_from_system())
+	if remaining <= 0:
+		_bans.erase(address)
+		_save_bans()
+		return 0
+	return int(ceil(remaining / 60.0))
+
+
+func _save_bans() -> void:
+	var f := FileAccess.open(BAN_FILE, FileAccess.WRITE)
+	if f:
+		f.store_string(JSON.stringify(_bans))
+
+
+func _load_bans() -> void:
+	_bans = {}
+	if not FileAccess.file_exists(BAN_FILE):
+		return
+	var f := FileAccess.open(BAN_FILE, FileAccess.READ)
+	if not f:
+		return
+	var parsed: Variant = JSON.parse_string(f.get_as_text())
+	if parsed is Dictionary:
+		_bans = parsed
 
 
 func _on_connection_failed() -> void:
@@ -280,6 +347,7 @@ func _on_peer_disconnected(id: int) -> void:
 	_registered.erase(id)
 	names.erase(id)
 	scores.erase(id)
+	_admins.erase(id)
 	_clear_rate_windows(id)
 	if is_host:
 		rpc("cl_roster", names, scores)
@@ -289,7 +357,8 @@ func _on_peer_disconnected(id: int) -> void:
 
 
 @rpc("any_peer", "call_remote", "reliable", 0)
-func srv_register(pname: String, protocol: int, game_version: String) -> void:
+func srv_register(pname: String, protocol: int, game_version: String,
+		admin_key := "") -> void:
 	if not is_host:
 		return
 	var id := multiplayer.get_remote_sender_id()
@@ -302,9 +371,19 @@ func srv_register(pname: String, protocol: int, game_version: String) -> void:
 		_reject_peer(id, "Server is running TROOP %s; your game is %s." % [
 			effective_game_version(), game_version])
 		return
+	var ban_minutes := _ban_remaining_minutes(_peer_address(id))
+	if ban_minutes > 0:
+		_reject_peer(id, ("Temporarily banned from the public canopy for "
+			+ "another %d minute%s. Solo play still works.") % [
+			ban_minutes, "" if ban_minutes == 1 else "s"])
+		return
 	_registered[id] = true
 	names[id] = _sanitize_name(pname, id)
 	scores[id] = 0
+	var token := _server_admin_token()
+	if not token.is_empty() and not admin_key.is_empty() and admin_key == token:
+		_admins[id] = true
+		rpc_id(id, "cl_admin", true)
 	rpc("cl_roster", names, scores)
 	rpc_id(id, "cl_world", world_seed, collected.keys(),
 		claimed_supply_chests, authoritative_cycle_hour(),
@@ -369,17 +448,17 @@ func send_state(pos: Vector3, yaw: float, vel: Vector3, anim: int,
 		swinging: bool, anchor: Vector3, rope_tail: float,
 		wraps: PackedVector3Array, weapon_kind: int, weapon_stowed: bool,
 		melee_mode: bool, weapon_ammo: int, weapon_reloading: bool,
-		healing_progress: float) -> void:
+		healing_progress: float, flying := false) -> void:
 	if not active:
 		return
 	if is_host:
 		rpc("cl_state", local_id(), pos, yaw, vel, anim, swinging, anchor,
 			rope_tail, wraps, weapon_kind, weapon_stowed, melee_mode,
-			weapon_ammo, weapon_reloading, healing_progress)
+			weapon_ammo, weapon_reloading, healing_progress, flying)
 	else:
 		rpc_id(1, "srv_state", pos, yaw, vel, anim, swinging, anchor,
 			rope_tail, wraps, weapon_kind, weapon_stowed, melee_mode,
-			weapon_ammo, weapon_reloading, healing_progress)
+			weapon_ammo, weapon_reloading, healing_progress, flying)
 
 
 @rpc("any_peer", "call_remote", "unreliable_ordered", 0)
@@ -387,7 +466,7 @@ func srv_state(pos: Vector3, yaw: float, vel: Vector3, anim: int,
 		swinging: bool, anchor: Vector3, rope_tail: float,
 		wraps: PackedVector3Array, weapon_kind: int, weapon_stowed: bool,
 		melee_mode: bool, weapon_ammo: int, weapon_reloading: bool,
-			healing_progress: float) -> void:
+			healing_progress: float, flying := false) -> void:
 	var sender := multiplayer.get_remote_sender_id()
 	if not _registered_peer(sender) \
 			or not _allow_rate(sender, "state", MAX_STATE_PACKETS_PER_SECOND) \
@@ -397,10 +476,10 @@ func srv_state(pos: Vector3, yaw: float, vel: Vector3, anim: int,
 		return
 	peer_state.emit(sender, pos, yaw, vel, anim, swinging, anchor, rope_tail,
 		wraps, weapon_kind, weapon_stowed, melee_mode, weapon_ammo,
-		weapon_reloading, healing_progress)
+		weapon_reloading, healing_progress, flying)
 	rpc("cl_state", sender, pos, yaw, vel, anim, swinging, anchor, rope_tail,
 		wraps, weapon_kind, weapon_stowed, melee_mode, weapon_ammo,
-		weapon_reloading, healing_progress)
+		weapon_reloading, healing_progress, flying)
 
 
 @rpc("authority", "call_remote", "unreliable_ordered", 0)
@@ -408,7 +487,7 @@ func cl_state(id: int, pos: Vector3, yaw: float, vel: Vector3, anim: int,
 		swinging: bool, anchor: Vector3, rope_tail: float,
 		wraps: PackedVector3Array, weapon_kind: int, weapon_stowed: bool,
 		melee_mode: bool, weapon_ammo: int, weapon_reloading: bool,
-		healing_progress: float) -> void:
+		healing_progress: float, flying := false) -> void:
 	if id == local_id() or not names.has(id):
 		return
 	if not _valid_state(pos, yaw, vel, anim, swinging, anchor, rope_tail,
@@ -416,7 +495,7 @@ func cl_state(id: int, pos: Vector3, yaw: float, vel: Vector3, anim: int,
 		return
 	peer_state.emit(id, pos, yaw, vel, anim, swinging, anchor, rope_tail,
 		wraps, weapon_kind, weapon_stowed, melee_mode, weapon_ammo,
-		weapon_reloading, healing_progress)
+		weapon_reloading, healing_progress, flying)
 
 
 # ---- collectibles and shared world state ----------------------------------
@@ -785,6 +864,147 @@ func cl_voice(speaker_id: int, sequence: int, payload: PackedByteArray) -> void:
 			and payload.size() <= MAX_VOICE_PACKET_BYTES \
 			and VoiceCodec.is_valid_packet(payload):
 		voice_packet.emit(speaker_id, sequence, payload)
+
+
+# ---- text chat and admin control ------------------------------------------
+
+
+func send_chat(text: String) -> void:
+	var clean := _sanitize_chat(text)
+	if clean.is_empty():
+		return
+	if not active:
+		chat_received.emit(local_id(), local_name, clean, is_admin)
+		return
+	if is_host:
+		chat_received.emit(1, local_name, clean, is_admin)
+		_relay_chat(1, local_name, clean, is_admin)
+	else:
+		rpc_id(1, "srv_chat", clean)
+
+
+@rpc("any_peer", "call_remote", "reliable", 0)
+func srv_chat(text: String) -> void:
+	var sender := multiplayer.get_remote_sender_id()
+	if not _registered_peer(sender) or not _allow_rate(sender, "chat", 3):
+		return
+	var clean := _sanitize_chat(text)
+	if clean.is_empty():
+		return
+	var sender_name: String = names.get(sender, "Monkey-%d" % sender)
+	var from_admin := _admins.has(sender)
+	if not is_dedicated:
+		chat_received.emit(sender, sender_name, clean, from_admin)
+	_relay_chat(sender, sender_name, clean, from_admin)
+
+
+func _relay_chat(sender: int, sender_name: String, text: String,
+		from_admin: bool) -> void:
+	for peer_id in names:
+		if peer_id != 1 and peer_id != sender:
+			rpc_id(peer_id, "cl_chat", sender, sender_name, text, from_admin)
+
+
+@rpc("authority", "call_remote", "reliable", 0)
+func cl_chat(id: int, sender_name: String, text: String,
+		from_admin: bool) -> void:
+	var clean := _sanitize_chat(text)
+	if clean.is_empty() or id == local_id():
+		return
+	chat_received.emit(id, _sanitize_name(sender_name, id), clean, from_admin)
+
+
+func _sanitize_chat(text: String) -> String:
+	var out := ""
+	for character in text.left(MAX_CHAT_LENGTH):
+		var code := character.unicode_at(0)
+		if code >= 32 and code != 127:
+			out += character
+	return out.strip_edges()
+
+
+## Entry point for every admin verb. Offline the machine owner applies the
+## action directly; online only a token-authenticated admin can ask the server,
+## and the server re-validates before touching any other peer.
+func admin_command(action: String, args: Dictionary) -> void:
+	if not is_admin or not ADMIN_ACTIONS.has(action):
+		return
+	if not active:
+		admin_action.emit(action, args)
+		return
+	if is_host:
+		_host_admin(1, action, args)
+	else:
+		rpc_id(1, "srv_admin", action, args)
+
+
+@rpc("any_peer", "call_remote", "reliable", 0)
+func srv_admin(action: String, args: Dictionary) -> void:
+	var sender := multiplayer.get_remote_sender_id()
+	if not _registered_peer(sender) or not _admins.has(sender) \
+			or not _allow_rate(sender, "admin", 8):
+		return
+	_host_admin(sender, action, args)
+
+
+func _host_admin(sender: int, action: String, args: Dictionary) -> void:
+	if not ADMIN_ACTIONS.has(action):
+		return
+	var target := int(args.get("target", 0))
+	match action:
+		"kick":
+			if names.has(target) and target != 1 and target != sender:
+				rpc_id(target, "cl_kicked",
+					_sanitize_chat(str(args.get("reason", "Kicked by admin"))))
+				_disconnect_rejected_peer(target)
+		"ban":
+			if names.has(target) and target != 1 and target != sender:
+				var minutes := clampi(int(args.get("minutes", 60)), 1,
+					MAX_BAN_MINUTES)
+				var address := _peer_address(target)
+				if not address.is_empty():
+					_bans[address] = {
+						"until": int(Time.get_unix_time_from_system())
+							+ minutes * 60,
+						"name": names.get(target, ""),
+					}
+					_save_bans()
+				rpc_id(target, "cl_kicked",
+					"Temporarily banned from the public canopy for %d minutes. "
+					% minutes + "Solo play still works.")
+				_disconnect_rejected_peer(target)
+		"announce":
+			var text := _sanitize_chat(str(args.get("text", "")))
+			if not text.is_empty():
+				if not is_dedicated:
+					chat_received.emit(1, "SERVER", text, true)
+				_relay_chat(0, "SERVER", text, true)
+		_:
+			# Player-directed actions apply on the target's own authoritative
+			# machine; the payload is whitelisted and bounds-checked there too.
+			if names.has(target):
+				if target == local_id() and not is_dedicated:
+					admin_action.emit(action, args)
+				else:
+					rpc_id(target, "cl_admin_apply", action, args)
+
+
+@rpc("authority", "call_remote", "reliable", 0)
+func cl_admin_apply(action: String, args: Dictionary) -> void:
+	if ADMIN_ACTIONS.has(action):
+		admin_action.emit(action, args)
+
+
+@rpc("authority", "call_remote", "reliable", 0)
+func cl_admin(enabled: bool) -> void:
+	is_admin = enabled
+	admin_changed.emit(enabled)
+
+
+@rpc("authority", "call_remote", "reliable", 0)
+func cl_kicked(reason: String) -> void:
+	net_error.emit(_sanitize_chat(reason).left(180))
+	call_deferred("shutdown")
 
 
 # ---- validation ------------------------------------------------------------

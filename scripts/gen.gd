@@ -57,6 +57,10 @@ const BIOME_NAMES := {
 }
 
 var world_seed: int = 1337
+# Debug playground: a flat plane with no procedural content, used by the
+# `debugworld` mode. Layout math short-circuits so streaming stays cheap and
+# the authored parkour/range props own the space.
+var debug_world := false
 var _n_base := FastNoiseLite.new()
 var _n_detail := FastNoiseLite.new()
 var _n_color := FastNoiseLite.new()
@@ -119,6 +123,8 @@ func setup(seed_v: int) -> void:
 
 
 func height(x: float, z: float) -> float:
+	if debug_world:
+		return 2.0
 	return _height_with_lake(x, z, lake_influence(x, z))
 
 
@@ -126,6 +132,8 @@ func height(x: float, z: float) -> float:
 ## origin so the spawn meadow, hero grove, and duel arena keep their authored
 ## gentle terrain, and cheap when far from any range (one mask sample).
 func mountain_influence(x: float, z: float) -> float:
+	if debug_world:
+		return 0.0
 	var mask: float = smoothstep(0.30, 0.62, _n_mountain_mask.get_noise_2d(x, z))
 	if mask < 0.002:
 		return 0.0
@@ -171,6 +179,8 @@ func _height_with_lake(x: float, z: float, lake: float) -> float:
 
 
 func lake_influence(x: float, z: float) -> float:
+	if debug_world:
+		return 0.0
 	var warp := _n_lake_warp.get_noise_2d(x, z) * 92.0
 	var basin := _n_lake.get_noise_2d(x + warp, z - warp * 0.72)
 	return smoothstep(0.16, 0.46, basin)
@@ -441,6 +451,10 @@ func _is_origin_arena_chunk(cx: int, cz: int) -> bool:
 
 func chunk_layout(cx: int, cz: int, include_decorations := true) -> Dictionary:
 	var rng := _chunk_rng(cx, cz)
+	if debug_world:
+		return {"trees": [], "bananas": [], "rocks": [], "foliage": [],
+			"structures": [], "arena_pieces": [], "arena_id": "",
+			"biome": Biome.RAINFOREST}
 	var trees: Array = []
 	var bananas: Array = []
 	var rocks: Array = []

@@ -108,6 +108,10 @@ var bandage_strip: MeshInstance3D
 var winter_scarf: MeshInstance3D
 var _outline_material: Material
 var _is_local_visual := false
+var _wings_active := false
+var _wing_unfold := 0.0
+var _wing_l: Node3D
+var _wing_r: Node3D
 
 
 func setup(display_name: String, show_tag: bool) -> void:
@@ -703,6 +707,7 @@ func _rope_seg(a: Vector3, b: Vector3, w: float, ca: Color, cb: Color) -> void:
 ## gripping arms onto the rope when swinging.
 func update_motion(dt: float, anim: int, vel: Vector3, on_floor: bool, anchor: Vector3) -> void:
 	_t += dt
+	_update_angel_wings(dt)
 	if anim != _anim_prev:
 		if anim == Anim.SPRINT or _anim_prev == Anim.SPRINT:
 			_reset_gait_plants()
@@ -1796,3 +1801,85 @@ func _orient_weapon_forearm(elbow: Node3D, forward: Vector3,
 	local_z = local_x.cross(local_y).normalized()
 	elbow.global_transform = Transform3D(
 		Basis(local_x, local_y, local_z), elbow.global_position)
+
+
+# ---- angel wings (admin fly mode) ------------------------------------------
+
+
+## Grows a pair of feathered angel wings out of the back. Built lazily on the
+## first request, then folded/unfolded with an eased blend so enabling fly mode
+## reads as the wings sprouting rather than popping into existence.
+func set_angel_wings(active: bool) -> void:
+	if active and not _wing_l:
+		_build_angel_wings()
+	_wings_active = active
+
+
+func has_angel_wings_visible() -> bool:
+	return _wing_l != null and _wing_unfold > 0.05
+
+
+func _build_angel_wings() -> void:
+	var feather := StandardMaterial3D.new()
+	feather.albedo_color = Color(0.97, 0.97, 0.99)
+	feather.roughness = 0.72
+	feather.emission_enabled = true
+	feather.emission = Color(0.92, 0.94, 1.0)
+	feather.emission_energy_multiplier = 0.14
+	for side in [-1.0, 1.0]:
+		var root := Node3D.new()
+		root.name = "AngelWingL" if side < 0.0 else "AngelWingR"
+		root.position = Vector3(0.085 * side, 0.34, 0.16)
+		torso_p.add_child(root)
+		# Three sweeping feather rows, each row a fan of flattened capsules.
+		for row in range(3):
+			var row_length: float = [0.62, 0.47, 0.33][row]
+			var row_lift: float = [0.30, 0.16, 0.02][row]
+			for i in range(4):
+				var t := float(i) / 3.0
+				var quill := MeshInstance3D.new()
+				var m := CapsuleMesh.new()
+				m.radius = 0.028
+				m.height = row_length * lerpf(1.0, 0.55, t)
+				m.radial_segments = 6
+				m.rings = 2
+				quill.mesh = m
+				quill.material_override = feather
+				quill.cast_shadow = \
+					GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+				if _is_local_visual:
+					quill.layers = LOCAL_BODY_VISUAL_LAYER
+				quill.position = Vector3(
+					side * (0.10 + t * 0.30) * (1.0 - 0.18 * row),
+					row_lift - t * (0.14 + 0.10 * row),
+					0.035 * row)
+				quill.rotation = Vector3(0.0, 0.0,
+					side * (-0.55 - t * 0.85 - row * 0.10))
+				quill.scale = Vector3(1.0, 1.0, 0.35)
+				root.add_child(quill)
+		if side < 0.0:
+			_wing_l = root
+		else:
+			_wing_r = root
+	_wing_l.scale = Vector3.ONE * 0.02
+	_wing_r.scale = Vector3.ONE * 0.02
+
+
+func _update_angel_wings(dt: float) -> void:
+	if not _wing_l:
+		return
+	var target := 1.0 if _wings_active else 0.0
+	_wing_unfold = move_toward(_wing_unfold, target, dt * 1.8)
+	var visible_now := _wing_unfold > 0.01
+	_wing_l.visible = visible_now
+	_wing_r.visible = visible_now
+	if not visible_now:
+		return
+	var grow: float = SatisfyingReload.smooth01(_wing_unfold)
+	var flap := sin(_t * 3.1) * 0.30 + sin(_t * 6.2) * 0.06
+	var spread := lerpf(-1.15, 0.28 + flap * 0.5, grow)
+	for entry in [[_wing_l, 1.0], [_wing_r, -1.0]]:
+		var wing: Node3D = entry[0]
+		var side: float = entry[1]
+		wing.scale = Vector3.ONE * maxf(grow, 0.02)
+		wing.rotation = Vector3(0.12 - flap * 0.22, side * spread, 0.0)

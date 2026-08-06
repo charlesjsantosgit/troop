@@ -8,6 +8,8 @@ extends Node
 ##   host | join <host>  local diagnostics / direct connection
 ##   online              join the configured public server
 
+const DebugWorldBuilder = preload("res://scripts/debug_world_builder.gd")
+const FriendlyMonkeyScript = preload("res://scripts/friendly_monkey.gd")
 const MONKEY_NAMES := ["Bongo", "Mango", "Kiko", "Chimpy", "Zuzu", "Coco", "Peel", "Momo", "Banzai", "Ooki", "Jojo", "Tarz"]
 const RENDER_PIXEL_BUDGET := 1440000.0
 const MIN_RENDER_SCALE := 0.38
@@ -16,6 +18,12 @@ const NETTEST_CYCLE_TOLERANCE_HOURS := 0.20
 
 var world: World
 var hud: HUD
+var chat_box: ChatBox
+var admin_controller: AdminController
+var admin_panel: AdminPanel
+var trade_ui: TradeUI
+var _session_ui_layer: CanvasLayer
+var update_chip: Label
 var menu: Control
 var pause_menu: PauseMenu
 var pause_layer: CanvasLayer
@@ -160,6 +168,14 @@ func _ready() -> void:
 			_begin_public_join(_rand_name())
 		"server":
 			_start_dedicated_server()
+		"debugworld":
+			_start_debug_world(_rand_name())
+		"debugtest":
+			_start_debug_world("DebugTester")
+			mode = "debugtest"
+			var dt_node = load("res://tests/debugtest.gd").new()
+			add_child(dt_node)
+			dt_node.call_deferred("run", self)
 		"solo":
 			mode = "solo"
 			_start_solo(_rand_name(), randi() % 1000000, 2)
@@ -197,6 +213,8 @@ func _register_inputs() -> void:
 	_add_key("menu", KEY_ESCAPE)
 	_add_key("fullscreen", KEY_F11)
 	_add_key("camera_mode", KEY_C)
+	_add_key("chat", KEY_ENTER)
+	_add_key("admin_panel", KEY_F8)
 
 
 func _add_key(action: String, key: Key) -> void:
@@ -260,10 +278,54 @@ func _finish_world_entry(pname: String) -> void:
 	hud.player = world.local_player
 	add_child(hud)
 	Voice.attach_world(world)
+	_build_session_ui()
 	_sync_puppets()
 	_reset_adaptive_rendering()
-	if DisplayServer.get_name() != "headless" and mode in ["menu", "solo", "host", "join"]:
+	if DisplayServer.get_name() != "headless" \
+			and mode in ["menu", "solo", "host", "join", "debugworld"]:
 		Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
+
+
+## Chat, admin console, and the trade stall live on one overlay layer created
+## per session and torn down with the world.
+func _build_session_ui() -> void:
+	_session_ui_layer = CanvasLayer.new()
+	_session_ui_layer.layer = 60
+	add_child(_session_ui_layer)
+	chat_box = ChatBox.new()
+	chat_box.set_anchors_preset(Control.PRESET_FULL_RECT)
+	_session_ui_layer.add_child(chat_box)
+	admin_controller = AdminController.new()
+	add_child(admin_controller)
+	admin_controller.configure(self, world, chat_box)
+	chat_box.command_submitted.connect(admin_controller.run_command)
+	admin_panel = AdminPanel.new()
+	admin_panel.configure(admin_controller)
+	admin_panel.visible = false
+	_session_ui_layer.add_child(admin_panel)
+	trade_ui = TradeUI.new()
+	_session_ui_layer.add_child(trade_ui)
+	# Controls parented to a CanvasLayer only fill the window if the preset is
+	# applied after they enter the tree.
+	for overlay in [chat_box, admin_panel, trade_ui]:
+		overlay.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	world.villager_trade_requested.connect(
+		func(_villager: Node3D, player: Node3D) -> void:
+			trade_ui.open_for(player))
+	if Net.is_admin:
+		chat_box.add_system_line(
+			"Admin unlocked — F8 opens the console, /help lists commands.")
+
+
+func _teardown_session_ui() -> void:
+	for node in [_session_ui_layer, admin_controller]:
+		if node and is_instance_valid(node):
+			node.queue_free()
+	_session_ui_layer = null
+	chat_box = null
+	admin_controller = null
+	admin_panel = null
+	trade_ui = null
 
 
 func _reset_adaptive_rendering() -> void:
@@ -346,6 +408,21 @@ func _process(dt: float) -> void:
 		_perf_high_samples = 0
 		_render_scale = minf(_render_scale_ceiling, _render_scale + 0.02)
 		get_viewport().scaling_3d_scale = _render_scale
+
+
+func _start_debug_world(pname: String) -> void:
+	mode = "debugworld"
+	Gen.debug_world = true
+	Net.solo(pname, 7)
+	_enter_world(pname, 7, 2)
+	var course := DebugWorldBuilder.new()
+	world.add_child(course)
+	course.build(world)
+	world.spawn_friendly(FriendlyMonkeyScript.Mode.VILLAGER,
+		Vector3(-6.0, 2.2, -4.0))
+	if chat_box:
+		chat_box.add_system_line("Debug world — parkour east, range south, "
+			+ "ropes west. You are admin here.")
 
 
 func _start_solo(pname: String, seed_v: int, warm_r: int) -> void:
@@ -473,11 +550,11 @@ func _on_peer_state(id: int, pos: Vector3, yaw: float, vel: Vector3,
 		anim: int, swinging: bool, anchor: Vector3, rope_tail: float,
 		wraps: PackedVector3Array, weapon_kind: int, weapon_stowed: bool,
 		melee_mode: bool, weapon_ammo: int, weapon_reloading: bool,
-		healing_progress: float) -> void:
+		healing_progress: float, flying := false) -> void:
 	if world and world.puppets.has(id):
 		world.puppets[id].apply_state(pos, yaw, vel, anim, swinging, anchor,
 			rope_tail, wraps, weapon_kind, weapon_stowed, melee_mode,
-			weapon_ammo, weapon_reloading, healing_progress)
+			weapon_ammo, weapon_reloading, healing_progress, flying)
 
 
 func _on_peer_left(id: int) -> void:
@@ -502,6 +579,8 @@ func _on_net_error(msg: String) -> void:
 	if hud:
 		hud.queue_free()
 		hud = null
+	_teardown_session_ui()
+	Gen.debug_world = false
 	_show_menu()
 	if status_label:
 		status_label.text = "disconnected: " + msg
@@ -520,6 +599,7 @@ func _on_update_status_changed(next_status: String, next_detail: String) -> void
 			status_label.text = "TROOP %s needs the full installer before it can update." % _update_version
 		else:
 			status_label.text = next_detail
+	_set_update_chip(next_status)
 	_refresh_update_button()
 
 
@@ -618,7 +698,7 @@ func _show_menu() -> void:
 	bg.set_anchors_preset(Control.PRESET_FULL_RECT)
 	menu.add_child(bg)
 	var shade := ColorRect.new()
-	shade.color = Color(0.0, 0.08, 0.06, 0.20)
+	shade.color = Color(0.0, 0.07, 0.05, 0.26)
 	shade.set_anchors_preset(Control.PRESET_FULL_RECT)
 	shade.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	menu.add_child(shade)
@@ -632,101 +712,143 @@ func _show_menu() -> void:
 	menu.add_child(center)
 	var panel := PanelContainer.new()
 	panel.add_theme_stylebox_override("panel", _menu_panel_style())
-	panel.custom_minimum_size = Vector2(570, 0)
-	_menu_scale_size(panel, Vector2(570, 0))
+	panel.custom_minimum_size = Vector2(880, 0)
+	_menu_scale_size(panel, Vector2(880, 0))
 	center.add_child(panel)
+
 	var v := VBoxContainer.new()
-	v.add_theme_constant_override("separation", 13)
+	v.add_theme_constant_override("separation", 14)
 	panel.add_child(v)
 
+	# ---- header: identity block left, feature badges right
+	var header := HBoxContainer.new()
+	header.add_theme_constant_override("separation", 18)
+	var title_block := VBoxContainer.new()
+	title_block.add_theme_constant_override("separation", 2)
 	var eyebrow := Label.new()
 	eyebrow.text = "WELCOME TO THE CANOPY"
-	eyebrow.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	eyebrow.add_theme_color_override("font_color", Color("b8e979"))
-	_menu_scale_font(eyebrow, 13)
-	v.add_child(eyebrow)
-
+	_menu_scale_font(eyebrow, 12)
+	title_block.add_child(eyebrow)
 	var title := Label.new()
 	title.text = "TROOP"
 	title.add_theme_color_override("font_color", Color("f4ffd3"))
-	title.add_theme_color_override("font_shadow_color", Color(0.02, 0.11, 0.06, 0.9))
+	title.add_theme_color_override("font_shadow_color",
+		Color(0.02, 0.11, 0.06, 0.9))
 	title.add_theme_constant_override("shadow_offset_x", 4)
 	title.add_theme_constant_override("shadow_offset_y", 5)
-	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	_menu_scale_font(title, 76)
-	v.add_child(title)
+	_menu_scale_font(title, 68)
+	title_block.add_child(title)
 	var sub := Label.new()
 	sub.text = "SWING · SHOOT · OOK  —  AN INFINITE JUNGLE"
 	sub.add_theme_color_override("font_color", Color("b7d9b6"))
-	sub.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	_menu_scale_font(sub, 16)
-	v.add_child(sub)
-
-	var badges := HBoxContainer.new()
-	badges.alignment = BoxContainer.ALIGNMENT_CENTER
-	badges.add_theme_constant_override("separation", 8)
-	for text in ["∞ JUNGLE", "MOMENTUM SWINGING", "6-SHOT BANANA GUN"]:
+	_menu_scale_font(sub, 15)
+	title_block.add_child(sub)
+	header.add_child(title_block)
+	var header_spacer := Control.new()
+	header_spacer.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	header.add_child(header_spacer)
+	var badge_column := VBoxContainer.new()
+	badge_column.add_theme_constant_override("separation", 6)
+	badge_column.alignment = BoxContainer.ALIGNMENT_END
+	for text in ["∞  PROCEDURAL JUNGLE + MOUNTAINS", "🍌  MOMENTUM VINE PHYSICS",
+			"🌐  WORLDWIDE SERVER · VOICE"]:
 		var badge := Label.new()
 		badge.text = text
-		badge.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		badge.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
 		badge.add_theme_color_override("font_color", Color("d6f2bd"))
 		badge.add_theme_stylebox_override("normal", _menu_badge_style())
 		_menu_scale_font(badge, 11)
-		badges.add_child(badge)
-	v.add_child(badges)
+		badge_column.add_child(badge)
+	header.add_child(badge_column)
+	v.add_child(header)
 
 	var divider := ColorRect.new()
 	divider.color = Color(0.67, 0.90, 0.42, 0.22)
 	divider.custom_minimum_size = Vector2(0, 1)
 	v.add_child(divider)
 
-	var name_row := HBoxContainer.new()
-	name_row.add_theme_constant_override("separation", 12)
-	var nl := Label.new()
-	nl.text = "YOUR MONKEY"
-	nl.add_theme_color_override("font_color", Color("b8d0ba"))
-	_menu_scale_font(nl, 12)
-	name_row.add_child(nl)
+	# ---- two columns: play actions left, monkey setup right
+	var columns := HBoxContainer.new()
+	columns.add_theme_constant_override("separation", 22)
+	v.add_child(columns)
+
+	var play_column := VBoxContainer.new()
+	play_column.add_theme_constant_override("separation", 10)
+	play_column.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	play_column.size_flags_stretch_ratio = 1.15
+	columns.add_child(play_column)
+	var play_head := Label.new()
+	play_head.text = "JUMP IN"
+	play_head.add_theme_color_override("font_color", Color("8fb98f"))
+	_menu_scale_font(play_head, 12)
+	play_column.add_child(play_head)
+
+	var solo := _menu_action_card(play_column, "SOLO BANANA DUEL",
+		"Instant match against Captain Peel in a fresh jungle",
+		Color("88cf3f"), Color("bdf06b"))
+	solo.pressed.connect(func():
+		mode = "solo"
+		_close_menu()
+		_start_solo(_pname(), randi() % 1000000, 2))
+
+	var online_b := _menu_action_card(play_column, "PLAY ONLINE · PUBLIC CANOPY",
+		"Managed dedicated server · push-to-talk T · no port forwarding",
+		Color("257f70"), Color("39aa8f"))
+	online_b.disabled = _public_server_host().is_empty()
+	if online_b.disabled:
+		online_b.tooltip_text = ("No hosted address is embedded in this "
+			+ "source build; releases connect automatically.")
+	online_b.pressed.connect(func(): _begin_public_join(_pname()))
+
+	var debug_b := _menu_action_card(play_column, "DEBUG WORLD",
+		"Flat playground: parkour · rope garden · regenerating robot range",
+		Color("6b5d33"), Color("9a8850"))
+	debug_b.pressed.connect(func():
+		_close_menu()
+		_start_debug_world(_pname()))
+
+	var setup_column := VBoxContainer.new()
+	setup_column.add_theme_constant_override("separation", 10)
+	setup_column.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	columns.add_child(setup_column)
+	var setup_head := Label.new()
+	setup_head.text = "YOUR MONKEY"
+	setup_head.add_theme_color_override("font_color", Color("8fb98f"))
+	_menu_scale_font(setup_head, 12)
+	setup_column.add_child(setup_head)
+
 	name_edit = LineEdit.new()
 	name_edit.text = _rand_name()
 	name_edit.placeholder_text = "Choose a name"
-	name_edit.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	name_edit.add_theme_stylebox_override("normal", _menu_input_style())
 	name_edit.add_theme_stylebox_override("focus", _menu_input_style(true))
 	_menu_scale_font(name_edit, 17)
-	name_row.add_child(name_edit)
-	v.add_child(name_row)
+	setup_column.add_child(name_edit)
+	name_edit.text_submitted.connect(
+		func(_text: String): solo.emit_signal("pressed"))
 
-	var camera_row := HBoxContainer.new()
-	camera_row.add_theme_constant_override("separation", 12)
-	var camera_label := Label.new()
-	camera_label.text = "CAMERA"
-	camera_label.add_theme_color_override("font_color", Color("b8d0ba"))
-	_menu_scale_font(camera_label, 12)
-	camera_row.add_child(camera_label)
 	var camera_select := OptionButton.new()
-	camera_select.add_item("RIGHT SHOULDER", 0)
-	camera_select.add_item("FIRST PERSON", 1)
-	camera_select.add_item("FRONT VIEW", 2)
+	camera_select.add_item("CAMERA · RIGHT SHOULDER", 0)
+	camera_select.add_item("CAMERA · FIRST PERSON", 1)
+	camera_select.add_item("CAMERA · FRONT VIEW", 2)
 	camera_select.selected = _camera_mode_preference
-	camera_select.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	camera_select.custom_minimum_size = Vector2(0, 42)
 	camera_select.add_theme_stylebox_override("normal", _menu_input_style())
 	camera_select.add_theme_stylebox_override("hover", _menu_input_style(true))
 	camera_select.add_theme_stylebox_override("focus", _menu_input_style(true))
 	camera_select.add_theme_color_override("font_color", Color("e9ffd7"))
 	camera_select.add_theme_color_override("font_hover_color", Color.WHITE)
-	_menu_scale_font(camera_select, 15)
+	_menu_scale_font(camera_select, 14)
 	_menu_scale_size(camera_select, Vector2(0, 42))
 	camera_select.item_selected.connect(func(index: int):
 		_camera_mode_preference = index)
-	camera_row.add_child(camera_select)
-	v.add_child(camera_row)
+	setup_column.add_child(camera_select)
 
 	var sensitivity_row := HBoxContainer.new()
-	sensitivity_row.add_theme_constant_override("separation", 12)
+	sensitivity_row.add_theme_constant_override("separation", 10)
 	var sensitivity_label := Label.new()
-	sensitivity_label.text = "LOOK SENS"
+	sensitivity_label.text = "LOOK"
 	sensitivity_label.add_theme_color_override("font_color", Color("b8d0ba"))
 	_menu_scale_font(sensitivity_label, 12)
 	sensitivity_row.add_child(sensitivity_label)
@@ -742,11 +864,11 @@ func _show_menu() -> void:
 	sensitivity_row.add_child(sensitivity_slider)
 	var sensitivity_value := Label.new()
 	sensitivity_value.text = "%.2f×" % _mouse_sensitivity
-	sensitivity_value.custom_minimum_size = Vector2(58, 0)
+	sensitivity_value.custom_minimum_size = Vector2(52, 0)
 	sensitivity_value.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
 	sensitivity_value.add_theme_color_override("font_color", Color("e9ffd7"))
 	_menu_scale_font(sensitivity_value, 13)
-	_menu_scale_size(sensitivity_value, Vector2(58, 0))
+	_menu_scale_size(sensitivity_value, Vector2(52, 0))
 	sensitivity_row.add_child(sensitivity_value)
 	sensitivity_slider.value_changed.connect(func(value: float):
 		_apply_mouse_sensitivity(value)
@@ -757,73 +879,103 @@ func _show_menu() -> void:
 		if changed:
 			Settings.save())
 	sensitivity_slider.focus_exited.connect(func(): Settings.save())
-	v.add_child(sensitivity_row)
+	setup_column.add_child(sensitivity_row)
 
-	var solo := _menu_button("SOLO BANANA DUEL", Color("88cf3f"), Color("bdf06b"))
-	solo.pressed.connect(func():
-		mode = "solo"
-		_close_menu()
-		_start_solo(_pname(), randi() % 1000000, 2))
-	name_edit.text_submitted.connect(func(_text: String): solo.emit_signal("pressed"))
-	v.add_child(solo)
-
-	var multiplayer_label := Label.new()
-	multiplayer_label.text = "WORLDWIDE MULTIPLAYER"
-	multiplayer_label.add_theme_color_override("font_color", Color("b8d0ba"))
-	_menu_scale_font(multiplayer_label, 12)
-	v.add_child(multiplayer_label)
-	var online_b := _menu_button("PLAY ONLINE  ·  PUBLIC CANOPY",
-		Color("257f70"), Color("39aa8f"))
-	online_b.disabled = _public_server_host().is_empty()
-	online_b.tooltip_text = ("Connects to the managed TROOP world. No port "
-		+ "forwarding or player-hosted server required.")
-	online_b.pressed.connect(func(): _begin_public_join(_pname()))
-	v.add_child(online_b)
-	var online_hint := Label.new()
-	online_hint.text = ("MANAGED DEDICATED SERVER  ·  PUSH-TO-TALK  T  ·  NO PORT FORWARDING"
-		if not online_b.disabled else
-		"SERVER DEPLOYMENT PENDING  ·  CONFIGURE THROUGH GITHUB RELEASE SETUP")
-	online_hint.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	online_hint.add_theme_color_override("font_color", Color("8fb9a4"))
-	_menu_scale_font(online_hint, 11)
-	v.add_child(online_hint)
+	var tip_panel := PanelContainer.new()
+	tip_panel.add_theme_stylebox_override("panel", _menu_tip_style())
+	setup_column.add_child(tip_panel)
+	var foot := Label.new()
+	foot.text = ("WASD MOVE · E GRAB / CHEST · LMB FIRE · RMB AIM\n"
+		+ "1–4 WEAPONS · R RELOAD · H BANDAGE\n"
+		+ "HOLD T TO TALK · ENTER CHAT · C CAMERA")
+	foot.add_theme_color_override("font_color", Color("a5c8a5"))
+	foot.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_menu_scale_font(foot, 11)
+	tip_panel.add_child(foot)
 
 	status_label = Label.new()
-	status_label.text = ("" if not online_b.disabled else
-		"This source build is ready for a public server, but no hosted address is embedded yet.")
+	status_label.text = ""
 	status_label.add_theme_color_override("font_color", Color("ffd58a"))
 	status_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	status_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	_menu_scale_font(status_label, 14)
+	_menu_scale_font(status_label, 13)
 	v.add_child(status_label)
 
-	update_button = _menu_button("DOWNLOAD UPDATE", Color("a06628"), Color("c78331"))
+	update_button = _menu_button("DOWNLOAD UPDATE", Color("a06628"),
+		Color("c78331"))
 	update_button.visible = false
 	update_button.pressed.connect(_on_update_button_pressed)
 	v.add_child(update_button)
 	_refresh_update_button()
 
-	var tip_panel := PanelContainer.new()
-	tip_panel.add_theme_stylebox_override("panel", _menu_tip_style())
-	v.add_child(tip_panel)
-	var foot := Label.new()
-	foot.text = "WASD MOVE  ·  E GRAB / OPEN CHEST  ·  LMB FIRE  ·  HOLD RMB AIM\n1–4 WEAPONS  ·  R RELOAD  ·  H BANDAGE  ·  HOLD T TO TALK  ·  C CAMERA"
-	foot.add_theme_color_override("font_color", Color("a5c8a5"))
-	foot.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	_menu_scale_font(foot, 12)
-	tip_panel.add_child(foot)
-
-	var fullscreen_hint := Label.new()
-	fullscreen_hint.text = "F11  FULLSCREEN"
-	fullscreen_hint.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	fullscreen_hint.add_theme_color_override("font_color", Color(0.62, 0.80, 0.63, 0.7))
-	_menu_scale_font(fullscreen_hint, 11)
-	v.add_child(fullscreen_hint)
+	# ---- footer: version left, live update state right
+	var footer := HBoxContainer.new()
+	footer.add_theme_constant_override("separation", 10)
+	var version_label := Label.new()
+	version_label.text = "TROOP %s · PROTOCOL %d · F11 FULLSCREEN" % [
+		Updater.current_version(), Net.PROTOCOL_VERSION]
+	version_label.add_theme_color_override("font_color",
+		Color(0.62, 0.80, 0.63, 0.7))
+	_menu_scale_font(version_label, 11)
+	footer.add_child(version_label)
+	var footer_spacer := Control.new()
+	footer_spacer.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	footer.add_child(footer_spacer)
+	update_chip = Label.new()
+	update_chip.add_theme_color_override("font_color",
+		Color(0.72, 0.85, 0.70, 0.85))
+	_menu_scale_font(update_chip, 11)
+	footer.add_child(update_chip)
+	v.add_child(footer)
+	_set_update_chip(Updater.status)
 
 	add_child(menu)
 	call_deferred("_refresh_menu_scale")
+	# The updater already checks 1.5 s after boot and every six hours; asking
+	# again on each menu visit is free (internally throttled) and keeps the
+	# footer chip honest.
+	Updater.check_for_updates()
 	if not _update_version.is_empty() and Updater.is_update_staged():
 		_schedule_staged_update_restart(_update_version)
+
+
+## A large left-aligned action button with a caption line underneath.
+func _menu_action_card(parent: VBoxContainer, title_text: String,
+		caption_text: String, base: Color, hover: Color) -> Button:
+	var card := VBoxContainer.new()
+	card.add_theme_constant_override("separation", 3)
+	var button := _menu_button(title_text, base, hover)
+	button.alignment = HORIZONTAL_ALIGNMENT_LEFT
+	card.add_child(button)
+	var caption := Label.new()
+	caption.text = caption_text
+	caption.add_theme_color_override("font_color", Color(0.62, 0.76, 0.62))
+	_menu_scale_font(caption, 11)
+	card.add_child(caption)
+	parent.add_child(card)
+	return button
+
+
+func _set_update_chip(status: String) -> void:
+	if not update_chip or not is_instance_valid(update_chip):
+		return
+	var text := "AUTO-UPDATE · READY"
+	match status:
+		"disabled":
+			text = "AUTO-UPDATE · SOURCE BUILD (RELEASES SELF-UPDATE)"
+		"checking":
+			text = "AUTO-UPDATE · CHECKING…"
+		"current":
+			text = "AUTO-UPDATE · UP TO DATE"
+		"available", "downloading":
+			text = "AUTO-UPDATE · DOWNLOADING NEW VERSION"
+		"staged":
+			text = "AUTO-UPDATE · READY — RESTARTS FROM THE MENU"
+		"installer_ready":
+			text = "AUTO-UPDATE · INSTALLER DOWNLOADED"
+		"error":
+			text = "AUTO-UPDATE · CHECK FAILED (OFFLINE?)"
+	update_chip.text = text
 
 
 func _menu_button(text: String, base: Color, hover: Color) -> Button:
@@ -1015,6 +1167,8 @@ func _return_to_main_menu() -> void:
 		hud.visible = false
 		hud.queue_free()
 	hud = null
+	_teardown_session_ui()
+	Gen.debug_world = false
 	_show_menu()
 
 
@@ -1031,8 +1185,29 @@ func _unhandled_input(e: InputEvent) -> void:
 			hud.show_camera_mode(_camera_mode_preference)
 		get_viewport().set_input_as_handled()
 		return
+	if e.is_action_pressed("chat") and world and menu == null \
+			and not pause_menu and chat_box and not chat_box.is_open() \
+			and (not admin_panel or not admin_panel.visible) \
+			and (not trade_ui or not trade_ui.visible):
+		chat_box.open()
+		get_viewport().set_input_as_handled()
+		return
+	if e.is_action_pressed("admin_panel") and world and menu == null \
+			and not pause_menu and admin_panel and Net.is_admin \
+			and (not chat_box or not chat_box.is_open()):
+		admin_panel.visible = not admin_panel.visible
+		get_viewport().set_input_as_handled()
+		return
 	if e.is_action_pressed("menu"):
 		if pause_menu:
+			return
+		if trade_ui and trade_ui.visible:
+			return  # the stall closes itself on ESC
+		if chat_box and chat_box.is_open():
+			return  # chat closes itself on ESC
+		if admin_panel and admin_panel.visible:
+			admin_panel.visible = false
+			get_viewport().set_input_as_handled()
 			return
 		if world and menu == null:
 			_open_pause_menu()
@@ -1091,6 +1266,73 @@ func _point_segment_distance_2d(point: Vector2, start: Vector2,
 	return point.distance_to(start + span * along)
 
 
+## Screenshot fixtures for the debug playground and admin features.
+func _do_debug_shot(what: String, out: String) -> void:
+	_start_debug_world("Bongo")
+	var p := world.local_player
+	p.test_mode = true
+	for i in range(30):
+		await get_tree().process_frame
+	var cam := Camera3D.new()
+	add_child(cam)
+	cam.fov = 60.0
+	match what:
+		"debug-course":
+			if hud:
+				hud.visible = false
+			p.set_physics_process(false)
+			p.global_position = Vector3(0, 3.0, 20.0)
+			cam.global_position = Vector3(30.0, 20.0, 30.0)
+			cam.look_at(Vector3(2.0, 3.0, -16.0))
+			cam.make_current()
+			for i in range(60):
+				await get_tree().process_frame
+		"debug-wings":
+			cam.queue_free()
+			p.set_fly_mode(true)
+			p.ti.jump_held = true
+			for i in range(50):
+				await get_tree().physics_frame
+			p.ti.jump_held = false
+			p.set_physics_process(false)
+			var wing_cam := Camera3D.new()
+			add_child(wing_cam)
+			wing_cam.fov = 55.0
+			wing_cam.global_position = p.global_position \
+				+ Vector3(2.6, 0.8, 3.4)
+			wing_cam.look_at(p.global_position + Vector3.UP * 0.6)
+			wing_cam.make_current()
+			if hud:
+				hud.visible = false
+			for i in range(20):
+				await get_tree().process_frame
+		"debug-trade":
+			Net.scores[Net.local_id()] = 7
+			trade_ui.open_for(p)
+			for i in range(10):
+				await get_tree().process_frame
+		"debug-admin":
+			admin_panel.visible = true
+			for i in range(10):
+				await get_tree().process_frame
+		"debug-chat":
+			chat_box.open()
+			Net.send_chat("anyone up for parkour?")
+			chat_box.add_system_line("Admin unlocked — F8 opens the console.")
+			for i in range(10):
+				await get_tree().process_frame
+	if what != "debug-wings" and what != "debug-course":
+		cam.queue_free()
+	for i in range(8):
+		await RenderingServer.frame_post_draw
+	var image := get_viewport().get_texture().get_image()
+	image.save_png(out)
+	print("SHOT_SAVED " + out)
+	get_tree().quit(0)
+
+
+
+
 func _do_shot(args: Array) -> void:
 	mode = "shot"
 	var what: String = args[1] if args.size() > 1 else "vista"
@@ -1123,6 +1365,9 @@ func _do_shot(args: Array) -> void:
 		menu_image.save_png(out)
 		print("SHOT_SAVED " + out)
 		get_tree().quit(0)
+		return
+	if what.begins_with("debug-"):
+		await _do_debug_shot(what, out)
 		return
 	_start_solo("Bongo", 2026, 1 if seasonal_diagnostic else 3)
 	match what:

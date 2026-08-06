@@ -4,12 +4,12 @@ config_version=5
 [application]
 
 config/name="TROOP"
-config/version="0.2.1.1"
-config/update_repository=""
+config/version="0.2.2"
+config/update_repository="charlesjsantosgit/troop"
 config/update_channel="stable"
 config/update_auto_check=true
 config/update_auto_download=true
-config/network_protocol=3
+config/network_protocol=4
 run/main_scene="res://scenes/main.tscn"
 run/max_fps=160
 config/icon="res://icon.svg"
@@ -29,7 +29,7 @@ driver/enable_input=true
 
 [network]
 
-public_server_host=""
+public_server_host="troop-public-canopy.fly.dev"
 public_server_port=30623
 
 [display]

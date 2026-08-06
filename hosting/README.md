@@ -148,3 +148,12 @@ A successful image build proves the project parses, emits its smoke sentinel,
 exports the dedicated binary, and starts that binary headlessly. The external
 Internet join still needs a deployed Fly app, dedicated IPv4 allocation, GitHub
 secrets, and the public client hostname described above.
+
+## Admin access
+
+Grant yourself (and only yourself) in-game admin by setting a shared secret on
+the server — `fly secrets set TROOP_ADMIN_TOKEN=<long-random-string>` — and
+launching your own client with `TROOP_ADMIN_KEY=<the-same-string>`. The server
+compares the two during registration; display names are never trusted. Kick
+and temp-ban verbs act on connected peers, and address bans persist in the
+machine's `user://bans.json`.
