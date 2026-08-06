@@ -880,6 +880,9 @@ func send_chat(text: String) -> void:
 		chat_received.emit(1, local_name, clean, is_admin)
 		_relay_chat(1, local_name, clean, is_admin)
 	else:
+		# The server relays to everyone except the sender, so the sender's own
+		# message must echo locally or their chat looks dead.
+		chat_received.emit(local_id(), local_name, clean, is_admin)
 		rpc_id(1, "srv_chat", clean)
 
 

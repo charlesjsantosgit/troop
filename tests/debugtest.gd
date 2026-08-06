@@ -94,6 +94,26 @@ func run(main) -> void:
 		"solo chat echoes sanitized text with the admin tag")
 	_check(Net._sanitize_chat("x".repeat(500)).length() == Net.MAX_CHAT_LENGTH,
 		"chat length is clamped")
+	# chat feed: lines fade after expiry but survive until the FIFO cap, and
+	# opening the input (ENTER) revives recent history at full strength
+	var chat: ChatBox = main.chat_box
+	var feed_before: int = chat._feed.get_child_count()
+	Net.send_chat("history line")
+	chat._process(20.0)
+	var line: Label = chat._feed.get_child(chat._feed.get_child_count() - 1)
+	_check(chat._feed.get_child_count() == feed_before + 1
+			and line.modulate.a <= 0.01,
+		"expired chat lines fade out but stay in history")
+	chat.open()
+	chat._process(0.05)
+	_check(line.modulate.a >= 0.99, "opening chat revives faded history")
+	chat.close()
+	var admin_help: AdminController = main.admin_controller
+	var before_help: int = chat._feed.get_child_count()
+	admin_help.run_command("/help")
+	_check(chat._feed.get_child_count() >= before_help + 8
+			and chat._feed.get_child_count() <= chat.MAX_LINES,
+		"/help prints the organized command list within the feed cap")
 
 	# 8 — admin: solo grants it; slash commands act
 	_check(Net.is_admin, "offline session grants admin")

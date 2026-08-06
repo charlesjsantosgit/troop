@@ -226,10 +226,17 @@ func run_command(text: String) -> void:
 	var verb := parts[0].to_lower()
 	match verb:
 		"help":
-			feedback("/kill [player] · /heal [player] · /give <weapon> <n> "
-				+ "[player] · /fly · /tp <place|player> · /spawn <kind> · "
-				+ "/time <hour> · /kick <player> · /ban <player> <minutes> · "
-				+ "/say <text>")
+			feedback("— ADMIN COMMANDS —")
+			feedback("/kill [player] · /heal [player] — KO or restore")
+			feedback("/give <banana|shotgun|smg|sniper> <rounds> [player]")
+			feedback("/fly — toggle angel wings (SPACE up, CTRL down)")
+			feedback("/tp <rainforest|bamboo|wetland|highland|mountains"
+				+ "|player-name>")
+			feedback("/spawn <peel|swinger|follower|statue|villager>")
+			feedback("/time <hour|clear> — set or release the clock")
+			feedback("/kick <player> · /ban <player> <minutes>")
+			feedback("/say <text> — server-wide announcement")
+			feedback("F8 opens the same commands as buttons.")
 		"kill":
 			kill_target(_resolve_peer(parts, 1))
 		"heal":

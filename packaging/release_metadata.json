@@ -2,6 +2,6 @@
   "godot_compatibility": "4.7",
   "minimum_bootstrap": 1,
   "network_protocol": 4,
-  "notes": "Beta: debug playground (parkour, rope garden, regenerating robot range), in-game text chat, token-gated admin suite (interactive console, spawnable monkeys, villager trading, angel-wing fly mode, teleports, kick/temp-ban), professional menu redesign with live auto-update status. Wire protocol 4.",
+  "notes": "Chat fixes: your own messages now echo locally online, the feed keeps history until it expires or you reopen chat with ENTER, and /help prints an organized command list (also a button in the F8 console).",
   "requires_installer": false
 }
