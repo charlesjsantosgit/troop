@@ -38,19 +38,23 @@ void fragment() {
 	float slope = 1.0 - clamp(world_normal.y, 0.0, 1.0);
 	float mottled = mix(0.82, 1.13, broad) * mix(0.93, 1.06, fine);
 	vec3 earth = vec3(0.20, 0.14, 0.075);
-	vec3 base = vertex_tint.rgb * mottled * 0.72;
+	vec3 base = vertex_tint.rgb * mottled * 0.66;
 	base = mix(base, earth, slope * 0.28);
 	float damp = smoothstep(0.75, 0.2, world_pos.y);
 	vec3 ground = mix(base, base * vec3(0.58, 0.72, 0.68), damp * 0.35);
 	// Let soil texture and broad terrain variation remain legible below the
 	// accumulation.  Fully replacing the ground with a flat near-white made
 	// winter hills clip into one featureless value under the noon sun.
-	float snow = snow_amount * smoothstep(0.28, 0.72, world_normal.y)
-		* mix(0.70, 0.90, fine);
+	// Permanent altitude snow joins seasonal snow: peaks stay white all year,
+	// matching the rock/snow bands the vertex tint already carries.
+	float alt_snow = smoothstep(26.0, 40.0, world_pos.y);
+	float snow = max(snow_amount * smoothstep(0.28, 0.72, world_normal.y),
+		alt_snow * smoothstep(0.20, 0.65, world_normal.y))
+		* mix(0.70, 0.92, fine);
 	vec3 snow_color = vec3(0.70, 0.77, 0.82)
 		* mix(0.88, 1.08, broad) * mix(0.94, 1.03, fine);
 	ALBEDO = mix(ground, snow_color, snow);
-	ROUGHNESS = mix(mix(0.96, 0.72, damp), 0.88, snow);
+	ROUGHNESS = mix(mix(0.96, 0.72, damp), 0.62, snow);
 	SPECULAR = 0.18;
 	AO = 0.78 + fine * 0.18;
 	RIM = 0.08;
@@ -150,7 +154,7 @@ void fragment() {
 	AO = mix(0.72, 1.0, upper);
 	RIM = 0.34;
 	RIM_TINT = 0.58;
-	EMISSION = leaf_color * pow(1.0 - max(dot(NORMAL, VIEW), 0.0), 3.0) * 0.055;
+	EMISSION = leaf_color * pow(1.0 - max(dot(NORMAL, VIEW), 0.0), 3.0) * 0.028;
 }
 """
 
@@ -202,7 +206,7 @@ void fragment() {
 	AO = 0.82;
 	RIM = 0.32;
 	RIM_TINT = 0.58;
-	EMISSION = leaf_color * pow(1.0 - max(dot(NORMAL, VIEW), 0.0), 3.0) * 0.045;
+	EMISSION = leaf_color * pow(1.0 - max(dot(NORMAL, VIEW), 0.0), 3.0) * 0.024;
 }
 """
 
@@ -212,6 +216,7 @@ render_mode diffuse_burley, specular_schlick_ggx;
 
 uniform vec2 focus_xz = vec2(0.0);
 uniform float near_fade = 108.0;
+uniform float fade_band = 18.0;
 uniform float snow_amount : hint_range(0.0, 1.0) = 0.0;
 varying vec3 world_pos;
 varying vec4 vertex_tint;
@@ -229,12 +234,13 @@ void vertex() {
 
 void fragment() {
 	float distance_to_focus = distance(world_pos.xz, focus_xz);
-	float coverage = smoothstep(near_fade - 18.0, near_fade + 18.0,
+	float coverage = smoothstep(near_fade - fade_band, near_fade + fade_band,
 		distance_to_focus);
 	if (hash21(floor(world_pos.xz * 0.36)) > coverage) { discard; }
 	vec3 ground = vertex_tint.rgb * 0.84;
 	float snow_noise = hash21(floor(world_pos.xz * 0.12));
-	float snow = snow_amount * mix(0.68, 0.87, snow_noise);
+	float alt_snow = smoothstep(26.0, 40.0, world_pos.y);
+	float snow = max(snow_amount, alt_snow) * mix(0.68, 0.90, snow_noise);
 	vec3 snow_color = vec3(0.68, 0.75, 0.81)
 		* mix(0.90, 1.07, snow_noise);
 	ALBEDO = mix(ground, snow_color, snow);
@@ -345,8 +351,8 @@ void vertex() {
 void fragment() {
 	float patch = hash21(floor(world_pos.xz * 0.45));
 	float blade = hash21(floor(world_pos.xz * 4.0));
-	vec3 low = vec3(0.075, 0.28, 0.045);
-	vec3 high = vec3(0.27, 0.61, 0.12);
+	vec3 low = vec3(0.05, 0.20, 0.035);
+	vec3 high = vec3(0.16, 0.42, 0.085);
 	vec3 grass = mix(low, high, 0.35 + patch * 0.5) * mix(0.88, 1.12, blade);
 	float snow = snow_amount * smoothstep(0.22, 0.68, world_normal.y);
 	ALBEDO = mix(grass, vec3(0.80, 0.88, 0.93), snow);
@@ -536,7 +542,9 @@ void fragment() {
 	vec3 stone = mix(vec3(0.32, 0.39, 0.36), vec3(0.58, 0.62, 0.55), grain * 0.65 + bands * 0.18);
 	float moss = smoothstep(0.45, 0.82, world_normal.y) * hash31(floor(world_pos * 0.7));
 	vec3 rock = mix(stone, vec3(0.20, 0.40, 0.13), moss * 0.52);
-	float snow = snow_amount * smoothstep(0.38, 0.78, world_normal.y)
+	float alt_snow = smoothstep(26.0, 40.0, world_pos.y);
+	float snow = max(snow_amount, alt_snow)
+		* smoothstep(0.38, 0.78, world_normal.y)
 		* smoothstep(0.18, 0.90, grain);
 	ALBEDO = mix(rock, vec3(0.78, 0.86, 0.92), snow);
 	ROUGHNESS = 0.91;
@@ -721,6 +729,18 @@ static func far_ground_material() -> ShaderMaterial:
 	return _shared.far_ground
 
 
+## Ultra-far skyline tier: the same shader as the horizon shell but with its
+## dithered handoff pushed out to the horizon-ring edge and widened to match
+## the 48 m skyline cells, so mountain silhouettes take over seamlessly.
+static func skyline_ground_material() -> ShaderMaterial:
+	if not _shared.has("skyline_ground"):
+		_shared.skyline_ground = _material(FAR_GROUND_SHADER,
+			{"near_fade": Gen.SKYLINE_NEAR_FADE,
+				"fade_band": 96.0,
+				"snow_amount": _snow_amount})
+	return _shared.skyline_ground
+
+
 static func far_jungle_material() -> ShaderMaterial:
 	if not _shared.has("far_jungle"):
 		_shared.far_jungle = _material(FAR_JUNGLE_SHADER,
@@ -747,7 +767,7 @@ static func set_far_focus(position: Vector3) -> void:
 		return
 	_far_focus = focus
 	for material in [far_ground_material(), far_jungle_material(),
-			far_water_material()]:
+			far_water_material(), skyline_ground_material()]:
 		material.set_shader_parameter("focus_xz", focus)
 
 
@@ -760,7 +780,7 @@ static func set_season(season: SeasonalCycle.Season) -> void:
 	_snow_amount = 1.0 if season == SeasonalCycle.Season.WINTER else 0.0
 
 	for material in [ground_material(), trunk_material(), grass_material(),
-			rock_material(), far_ground_material()]:
+			rock_material(), far_ground_material(), skyline_ground_material()]:
 		material.set_shader_parameter("snow_amount", _snow_amount)
 	for material in [foliage_lod_material(), far_jungle_material()]:
 		_apply_foliage_season(material)

@@ -462,7 +462,7 @@ func _build_grass() -> void:
 		var z := z0 + rng.randf() * Gen.CHUNK
 		var inside_structure := _inside_structure_clearance(x, z)
 		var h := Gen.height(x, z)
-		if h < Gen.WATER_Y + 0.15:
+		if h < Gen.WATER_Y + 0.15 or h > Gen.TREE_LINE:
 			continue
 		var b := Basis(Vector3.UP, rng.randf() * TAU).scaled(Vector3.ONE * rng.randf_range(0.7, 1.5))
 		if not inside_structure:

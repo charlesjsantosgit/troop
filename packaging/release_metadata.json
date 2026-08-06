@@ -2,6 +2,6 @@
   "godot_compatibility": "4.7",
   "minimum_bootstrap": 1,
   "network_protocol": 3,
-  "notes": "Smooth non-blocking online entry and seamless push-to-talk toggling.",
+  "notes": "Beta: realistic terrain overhaul. Rolling hills, ridged snow-capped mountain ranges with tree lines and scree, a third ultra-far skyline LOD tier (~1.9 km vistas), deeper forest greens, atmospheric aerial perspective, and a leaner draw budget (399 vs 552 calls in the benchmark scene).",
   "requires_installer": false
 }
