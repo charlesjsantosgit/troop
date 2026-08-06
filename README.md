@@ -205,6 +205,7 @@ godot --headless --path . res://scenes/main.tscn --quit-after 6000 -- generation
 godot --headless --path . res://scenes/main.tscn --quit-after 6000 -- seasontest
 godot --headless --path . res://scenes/main.tscn --quit-after 6000 -- combattest
 godot --headless --path . res://scenes/main.tscn --quit-after 6000 -- pausetest
+godot --headless --path . res://scenes/main.tscn --quit-after 8000 -- entrytest
 godot --headless --path . res://scenes/main.tscn --quit-after 6000 -- aitest
 godot --headless --path . --script res://tests/voicetest.gd
 godot --headless --path . --script res://tests/netsecuritytest.gd

@@ -448,8 +448,7 @@ func spawn_local(peer_id: int, pname: String) -> MonkeyPlayer:
 	p.display_name = pname
 	p.is_local = true
 	p.world = self
-	var jitter := Vector3(float(peer_id % 5) - 2.0, 0, float((peer_id / 5) % 5) - 2.0)
-	p.position = spawn_point() + jitter
+	p.position = spawn_position(peer_id)
 	add_child(p)
 	local_player = p
 	combat_kills[peer_id] = 0
@@ -540,6 +539,14 @@ func _on_vine_sim_finished(id: String, simulation: VinePhysics) -> void:
 
 func spawn_point() -> Vector3:
 	return Vector3(0, Gen.height(0, 0) + 2.5, 0)
+
+
+## Deterministic per-peer spawn spot: a small ID-derived jitter keeps
+## simultaneous joiners from stacking inside each other.
+func spawn_position(peer_id: int) -> Vector3:
+	var jitter := Vector3(float(peer_id % 5) - 2.0, 0,
+		float((peer_id / 5) % 5) - 2.0)
+	return spawn_point() + jitter
 
 
 func respawn(p: MonkeyPlayer) -> void:
@@ -1155,11 +1162,14 @@ func warm(radius: int) -> void:
 				_build_horizon_chunk(hk, false)
 
 
-## Fast online entry: publish one fully playable chunk and let the normal
-## one-token streaming budget fill the surrounding jungle after the player is
-## visible. Solo/test warm() keeps its deterministic full-radius semantics.
-func warm_online_entry() -> void:
-	var cc := center_chunk()
+## Fast online entry: publish one fully playable chunk — the one under the
+## joining peer's jittered spawn spot, which the ID jitter can push outside
+## the origin chunk — and let the normal one-token streaming budget fill the
+## surrounding jungle after the player is visible. Solo/test warm() keeps its
+## deterministic full-radius semantics.
+func warm_online_entry(peer_id := 1) -> void:
+	var pos := spawn_position(peer_id)
+	var cc := Vector2i(floori(pos.x / Gen.CHUNK), floori(pos.z / Gen.CHUNK))
 	if not chunks.has(cc):
 		_build_chunk(cc, false)
 

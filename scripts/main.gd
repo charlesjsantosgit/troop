@@ -79,6 +79,11 @@ func _ready() -> void:
 			var gt = load("res://tests/generationtest.gd").new()
 			add_child(gt)
 			gt.call_deferred("run")
+		"entrytest":
+			mode = "entrytest"
+			var entry_test = load("res://tests/entrytest.gd").new()
+			add_child(entry_test)
+			entry_test.call_deferred("run", self)
 		"onlineperformancetest":
 			mode = "onlineperformancetest"
 			var online_performance_test = load(
@@ -235,7 +240,7 @@ func _enter_online_world(pname: String, seed_v: int) -> bool:
 	await get_tree().process_frame
 	if mode != "join" or not Net.active or not is_instance_valid(world):
 		return false
-	world.warm_online_entry()
+	world.warm_online_entry(Net.local_id())
 	await get_tree().process_frame
 	if mode != "join" or not Net.active or not is_instance_valid(world):
 		return false
