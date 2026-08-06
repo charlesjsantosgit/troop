@@ -584,6 +584,27 @@ func _on_net_error(msg: String) -> void:
 	_show_menu()
 	if status_label:
 		status_label.text = "disconnected: " + msg
+	_maybe_update_after_version_rejection(msg)
+
+
+## A version or protocol rejection means this build and the server disagree —
+## almost always because the server is ahead. Instead of leaving the player
+## stranded, force an immediate signed-update check: the pack downloads,
+## stages, and the menu restarts itself onto the matching version.
+func _maybe_update_after_version_rejection(msg: String) -> void:
+	if not (msg.begins_with("Server is running TROOP")
+			or msg.begins_with("Game protocol mismatch")):
+		return
+	var err: int = Updater.check_for_updates(true)
+	if status_label:
+		if err == OK:
+			status_label.text = ("The server is on a different TROOP version. "
+				+ "Checking for the update now — if one is available it "
+				+ "downloads and the menu restarts itself.")
+		elif err == ERR_UNCONFIGURED:
+			status_label.text = ("Version mismatch with the server. This "
+				+ "source build does not self-update — pull the latest and "
+				+ "rebuild.")
 
 
 func _on_microphone_error(msg: String) -> void:

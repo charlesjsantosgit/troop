@@ -155,6 +155,17 @@ func run(main) -> void:
 			and not Net._bans.has("10.0.0.9"),
 		"expired bans clean themselves up")
 
+	# 11 — a version-mismatch rejection tears down to the menu and immediately
+	# arms the updater (we assert the flow starts, not the network result)
+	main._on_net_error("Server is running TROOP 9.9.9; your game is 0.0.1")
+	await get_tree().process_frame
+	_check(main.menu != null and main.world == null,
+		"version rejection returns to the menu")
+	var armed: bool = Updater.status in ["checking", "available",
+			"downloading", "current", "error", "staged"] \
+		or str(main.status_label.text).contains("version")
+	_check(armed, "version rejection triggers an update check")
+
 	print("DEBUGTEST %d/%d %s" % [passed, total,
 		"PASS" if passed == total else "FAIL"])
 	await get_tree().process_frame
