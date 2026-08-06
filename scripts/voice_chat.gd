@@ -2,7 +2,9 @@ class_name VoiceChat
 extends Node
 ## Low-latency, proximity push-to-talk using Godot's microphone input.
 ##
-## Capture is active only while the bound PTT action is held in an online world.
+## Transmission is active only while the bound PTT action is held in an online
+## world. The input device stays warm briefly after release so quick PTT toggles
+## do not reconfigure the platform audio graph and hitch the render thread.
 ## Frames are downsampled to 16 kHz mono, independently IMA-ADPCM encoded, and
 ## sent through Net's isolated unreliable channel. Each remote speaker gets a
 ## short prebuffer and a positional AudioStreamGenerator attached to the world.
@@ -18,9 +20,13 @@ const TALKING_TIMEOUT_MSEC := 220
 const SPEAKER_RETIRE_MSEC := 5000
 const MAX_CAPTURE_PACKETS_PER_FRAME := 4
 const MAX_DECODED_QUEUE_PACKETS := 8
+const INPUT_IDLE_RELEASE_MSEC := 850
+const MAX_DISCARD_FRAMES_PER_TICK := 4096
 
 var local_talking := false
 var _capture_active := false
+var _input_device_active := false
+var _input_release_deadline_msec := 0
 var _sequence := 0
 var _world: Node
 var _speakers: Dictionary = {}
@@ -35,7 +41,7 @@ func _ready() -> void:
 
 
 func _exit_tree() -> void:
-	_stop_capture()
+	_stop_capture(true)
 	clear_world()
 
 
@@ -47,7 +53,7 @@ func attach_world(world_node: Node) -> void:
 
 
 func clear_world() -> void:
-	_stop_capture()
+	_stop_capture(true)
 	for peer_id in _speakers.keys():
 		_remove_speaker(int(peer_id), false)
 	_speakers.clear()
@@ -90,24 +96,49 @@ func _process(_dt: float) -> void:
 		_stop_capture()
 	if _capture_active:
 		_capture_packets()
+	elif _input_device_active:
+		# Drain while idle so a quick re-press starts with current speech, without
+		# an unbounded buffer-clearing loop on the input event frame.
+		_discard_input_frames(MAX_DISCARD_FRAMES_PER_TICK)
+		if input_release_due(Time.get_ticks_msec(),
+				_input_release_deadline_msec):
+			_deactivate_input_device()
 	_update_speakers()
 
 
 func _start_capture() -> void:
-	_discard_input_frames()
-	var err := AudioServer.set_input_device_active(true)
-	if err != OK:
-		microphone_error.emit("Microphone unavailable (%d). Check system privacy settings." % err)
-		return
+	_input_release_deadline_msec = 0
+	if not _input_device_active:
+		var err := AudioServer.set_input_device_active(true)
+		if err != OK:
+			microphone_error.emit("Microphone unavailable (%d). Check system privacy settings." % err)
+			return
+		_input_device_active = true
 	_capture_active = true
 	_set_local_talking(true)
 
 
-func _stop_capture() -> void:
-	if _capture_active:
-		AudioServer.set_input_device_active(false)
+func _stop_capture(immediate := false) -> void:
 	_capture_active = false
 	_set_local_talking(false)
+	if not _input_device_active:
+		return
+	if immediate:
+		_deactivate_input_device()
+	else:
+		_input_release_deadline_msec = Time.get_ticks_msec() \
+			+ INPUT_IDLE_RELEASE_MSEC
+
+
+func _deactivate_input_device() -> void:
+	if _input_device_active:
+		AudioServer.set_input_device_active(false)
+	_input_device_active = false
+	_input_release_deadline_msec = 0
+
+
+static func input_release_due(now_msec: int, deadline_msec: int) -> bool:
+	return deadline_msec > 0 and now_msec >= deadline_msec
 
 
 func _set_local_talking(active: bool) -> void:
@@ -157,12 +188,10 @@ func _resample_mono(source: PackedVector2Array,
 	return result
 
 
-func _discard_input_frames() -> void:
-	var remaining := AudioServer.get_input_frames_available()
-	while remaining > 0:
-		var count := mini(remaining, 4096)
-		AudioServer.get_input_frames(count)
-		remaining = AudioServer.get_input_frames_available()
+func _discard_input_frames(max_frames: int) -> void:
+	var available := AudioServer.get_input_frames_available()
+	if available > 0:
+		AudioServer.get_input_frames(mini(available, maxi(max_frames, 0)))
 
 
 func _on_voice_packet(peer_id: int, sequence: int,
