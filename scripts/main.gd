@@ -79,6 +79,11 @@ func _ready() -> void:
 			var gt = load("res://tests/generationtest.gd").new()
 			add_child(gt)
 			gt.call_deferred("run")
+		"entrytest":
+			mode = "entrytest"
+			var entry_test = load("res://tests/entrytest.gd").new()
+			add_child(entry_test)
+			entry_test.call_deferred("run", self)
 		"onlineperformancetest":
 			mode = "onlineperformancetest"
 			var online_performance_test = load(
@@ -103,7 +108,10 @@ func _ready() -> void:
 		"perftest":
 			mode = "perftest"
 			_start_solo("PerfMonkey", 2026, 2)
-			if args.size() > 1 and str(args[1]).to_lower() == "spring":
+			if args.size() > 1 and str(args[1]).to_lower() == "night":
+				world.set_season_override(SeasonalCycle.Season.SUMMER)
+				world.set_time_of_day_override(0.0)
+			elif args.size() > 1 and str(args[1]).to_lower() == "spring":
 				world.set_season_override(SeasonalCycle.Season.SPRING)
 				world.set_time_of_day_override(12.0)
 			elif args.size() > 1 and str(args[1]).to_lower() == "winter":
@@ -232,7 +240,7 @@ func _enter_online_world(pname: String, seed_v: int) -> bool:
 	await get_tree().process_frame
 	if mode != "join" or not Net.active or not is_instance_valid(world):
 		return false
-	world.warm_online_entry()
+	world.warm_online_entry(Net.local_id())
 	await get_tree().process_frame
 	if mode != "join" or not Net.active or not is_instance_valid(world):
 		return false
@@ -1103,7 +1111,8 @@ func _do_shot(args: Array) -> void:
 	var bandage_diagnostic := what in ["bandage", "bandage-third"]
 	var seasonal_diagnostic := what in [
 		"season-spring", "season-summer", "season-autumn", "season-winter",
-		"winter-scarf", "lighting-sunrise", "lighting-night",
+		"winter-scarf", "lighting-sunrise", "lighting-night", "lighting-moon",
+		"lighting-celestial", "lighting-celestial-rain", "lighting-moon-detail",
 	]
 	var diagnostic_clip := movement_diagnostic_clip or sniper_diagnostic_clip
 	if what == "menu":
@@ -1138,6 +1147,18 @@ func _do_shot(args: Array) -> void:
 		"lighting-night":
 			world.set_season_override(SeasonalCycle.Season.SUMMER)
 			world.set_time_of_day_override(23.0)
+		"lighting-moon":
+			world.set_season_override(SeasonalCycle.Season.SUMMER)
+			world.set_time_of_day_override(21.0)
+		"lighting-celestial":
+			world.set_season_override(SeasonalCycle.Season.SUMMER)
+			world.set_time_of_day_override(0.0)
+		"lighting-celestial-rain":
+			world.set_season_override(SeasonalCycle.Season.SPRING)
+			world.set_time_of_day_override(0.0)
+		"lighting-moon-detail":
+			world.set_season_override(SeasonalCycle.Season.SUMMER)
+			world.set_time_of_day_override(21.0)
 	if what in ["pause-menu", "pause-settings", "pause-controls"]:
 		await get_tree().process_frame
 		_open_pause_menu(what != "pause-menu")
@@ -1959,6 +1980,49 @@ func _do_shot(args: Array) -> void:
 				cam.global_position = world.local_player.global_position \
 					+ Vector3(1.55, 1.15, -2.20)
 				cam.look_at(world.local_player.global_position + Vector3.UP * 0.82)
+			elif what == "lighting-moon":
+				# Frame the 21:00 moon above the authored spawn clearing. Keeping the
+				# lens near play height leaves nearby crowns and trunks silhouetted
+				# against the sky, which also verifies that the moon respects depth.
+				cam.fov = 60.0
+				cam.far = 1200.0
+				cam.global_position = sp + Vector3(5.8, 0.65, 5.8)
+				var moon_direction := world.moon_source_direction()
+				var moon_composition := (moon_direction - Vector3.UP * 0.28).normalized()
+				cam.look_at(cam.global_position + moon_composition * 120.0,
+					Vector3.UP)
+			elif what in ["lighting-celestial", "lighting-celestial-rain"]:
+				# Lift the deterministic fixture above the tallest streamed canopy so
+				# most of the frame remains open sky. Offset the lens below and left of
+				# the moon to preserve a broad field for constellations and planets.
+				cam.fov = 52.0
+				cam.far = 1800.0
+				cam.global_position = Vector3(sp.x, sp.y + 44.0, sp.z)
+				var celestial_moon_direction := world.moon_source_direction()
+				var celestial_right := Vector3.UP.cross(celestial_moon_direction)
+				if celestial_right.length_squared() < 0.001:
+					celestial_right = Vector3.RIGHT
+				else:
+					celestial_right = celestial_right.normalized()
+				var celestial_composition := (celestial_moon_direction \
+					- Vector3.UP * 0.20 - celestial_right * 0.22).normalized()
+				var celestial_up := Vector3.FORWARD \
+					if absf(celestial_composition.dot(Vector3.UP)) > 0.90 \
+					else Vector3.UP
+				cam.look_at(cam.global_position + celestial_composition * 240.0,
+					celestial_up)
+			elif what == "lighting-moon-detail":
+				# A narrow, unobstructed lens verifies that the enlarged disc retains
+				# its crater pattern and rim instead of blooming into a white dot.
+				cam.fov = 27.0
+				cam.far = 1800.0
+				cam.global_position = Vector3(sp.x, sp.y + 44.0, sp.z)
+				var detailed_moon_direction := world.moon_source_direction()
+				var moon_detail_up := Vector3.FORWARD \
+					if absf(detailed_moon_direction.dot(Vector3.UP)) > 0.90 \
+					else Vector3.UP
+				cam.look_at(cam.global_position + detailed_moon_direction * 240.0,
+					moon_detail_up)
 			else:
 				cam.global_position = sp + Vector3(5.8, 2.8, 5.8)
 				cam.look_at(Vector3(0, g0 + 1.15, 0))

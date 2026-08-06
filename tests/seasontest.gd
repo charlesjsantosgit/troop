@@ -72,31 +72,148 @@ func run(main) -> void:
 	_check(is_equal_approx(world.time_of_day_hours, 9.0),
 		"the live World clock advances at the same one-hour-cycle rate")
 
+	# The visible sky is one cached shader/atlas. Moonlight remains a separate
+	# non-shadowing directional so visual richness never adds a shadow pass.
+	world.set_season_override(SeasonalCycle.Season.SUMMER)
+	var celestial: CelestialSky = world._celestial_sky
+	var celestial_material: ShaderMaterial = celestial.get_material() \
+		if celestial else null
+	var celestial_resource_ids: Dictionary = celestial.resource_instance_ids() \
+		if celestial else {}
+	_check(celestial != null and celestial_material != null \
+			and celestial_material == world._sky_material \
+			and world._environment.sky.sky_material == celestial_material,
+		"one custom celestial material owns the rendered sky")
+	_check(celestial.star_count() >= 700 and celestial.star_count() <= 1200,
+		"the deterministic star catalogue is rich but bounded")
+	var constellation_names := celestial.constellation_names()
+	_check("Big Dipper" in constellation_names \
+			and "Cassiopeia" in constellation_names \
+			and "Orion" in constellation_names \
+			and celestial.constellation_segment_count() >= 18 \
+			and celestial.constellation_segment_count() <= 36 \
+			and celestial.constellation_strength() > 0.0 \
+			and celestial.constellation_strength() <= 0.25,
+		"recognizable constellations use bounded subtle linework")
+	_check(celestial.planet_count() >= 2 and celestial.planet_count() <= 4,
+		"the sky contains a small bounded set of planets")
+	_check(celestial.moon_angular_diameter_degrees() >= 0.85 \
+			and celestial.moon_angular_diameter_degrees() <= 1.20 \
+			and celestial.moon_crater_count() >= 4 \
+			and celestial.moon_crater_count() <= 8,
+		"the moon is moderately enlarged with bounded crater detail")
+	var celestial_catalog_signature := celestial.catalog_signature()
+	_check(not celestial_catalog_signature.is_empty(),
+		"the generated celestial catalogue has a deterministic signature")
+	_check(celestial_resource_ids.size() >= 2 \
+			and celestial_resource_ids.size() <= 3 \
+			and world._environment.sky.process_mode \
+				== Sky.PROCESS_MODE_INCREMENTAL \
+			and CelestialSky.SKY_SHADER.find("TIME") < 0,
+		"the incremental sky uses a bounded cache without real-time shader updates")
+
 	world.set_time_of_day_override(12.0)
 	var noon_daylight := world.daylight_amount
 	var noon_sun_energy := world._sun.light_energy
 	var noon_moon_energy := world._moon.light_energy
+	var noon_moon_visual_strength := world.moon_visual_strength()
+	var noon_night_visibility := celestial.night_visibility()
+	var noon_weather_visibility := celestial.weather_visibility()
+	var noon_shader_moon_visibility := float(
+		celestial_material.get_shader_parameter("moon_visibility"))
 	var noon_shadow_casters := _count_shadow_directionals(world)
 	world.set_time_of_day_override(0.0)
 	var midnight_daylight := world.daylight_amount
 	var midnight_sun_energy := world._sun.light_energy
 	var midnight_moon_energy := world._moon.light_energy
+	var midnight_moon_visual_strength := world.moon_visual_strength()
+	var midnight_night_visibility := celestial.night_visibility()
+	var midnight_weather_visibility := celestial.weather_visibility()
+	var midnight_shader_moon_visibility := float(
+		celestial_material.get_shader_parameter("moon_visibility"))
+	var midnight_moon_direction := world.moon_source_direction()
+	var midnight_sun_direction := world._sun.global_basis.z.normalized()
+	var shader_moon_direction := Vector3(
+		celestial_material.get_shader_parameter("moon_direction"))
+	var midnight_palette := celestial.palette_colors()
+	var midnight_top: Color = midnight_palette.top
+	var midnight_horizon: Color = midnight_palette.horizon
 	var midnight_shadow_casters := _count_shadow_directionals(world)
 	_check(noon_daylight > 0.98 and midnight_daylight < 0.02 \
 			and noon_sun_energy > midnight_sun_energy \
 			and midnight_moon_energy > noon_moon_energy,
 		"runtime noon is sunlit while midnight is moonlit")
-	_check(not world._moon.shadow_enabled and noon_shadow_casters == 1 \
+	_check(noon_night_visibility <= 0.01 \
+			and noon_weather_visibility >= 0.99 \
+			and noon_moon_visual_strength <= 0.015 \
+			and noon_shader_moon_visibility <= 0.01 \
+			and midnight_night_visibility >= 0.95 \
+			and midnight_weather_visibility >= 0.99 \
+			and midnight_shader_moon_visibility > noon_shader_moon_visibility,
+		"stars, planets, constellations, and the moon fade out in daylight")
+	_check(_is_midnight_blue(midnight_top) \
+			and _is_midnight_blue(midnight_horizon) \
+			and midnight_horizon.get_luminance() \
+				> midnight_top.get_luminance(),
+		"clear midnight uses a readable deep-blue sky gradient")
+	_check(not world._moon.shadow_enabled \
+			and world._moon.sky_mode \
+				== DirectionalLight3D.SKY_MODE_LIGHT_ONLY \
+			and noon_shadow_casters == 1 \
 			and midnight_shadow_casters <= 1,
-		"moonlight is non-shadowing and at most one directional shadow pass is active")
+		"the cratered sky adds no directional shadow pass")
+	_check(shader_moon_direction.normalized().dot(
+			midnight_moon_direction) > 0.9999,
+		"the cratered moon follows the moonlight source direction")
+	_check(midnight_moon_direction.dot(midnight_sun_direction) < -0.999,
+		"the moon remains opposite the sun in the celestial orbit")
+	world.set_time_of_day_override(3.0)
+	var advanced_shader_moon_direction := Vector3(
+		celestial_material.get_shader_parameter("moon_direction"))
+	_check(midnight_moon_direction.dot(world.moon_source_direction()) < 0.95 \
+			and advanced_shader_moon_direction.normalized().dot(
+				world.moon_source_direction()) > 0.9999,
+		"the visible moon advances through the sky with game time")
 	world.set_season_override(SeasonalCycle.Season.SUMMER)
 	world.set_time_of_day_override(0.0)
 	var clear_night_moon_energy := world._moon.light_energy
+	var clear_night_moon_visual_strength := world.moon_visual_strength()
+	var clear_night_weather_visibility := celestial.weather_visibility()
+	var clear_night_shader_moon_visibility := float(
+		celestial_material.get_shader_parameter("moon_visibility"))
 	world.set_season_override(SeasonalCycle.Season.SPRING)
 	var rainy_night_moon_energy := world._moon.light_energy
+	var rainy_night_moon_visual_strength := world.moon_visual_strength()
+	var rainy_night_weather_visibility := celestial.weather_visibility()
+	var rainy_night_shader_moon_visibility := float(
+		celestial_material.get_shader_parameter("moon_visibility"))
+	world.set_season_override(SeasonalCycle.Season.WINTER)
+	var snowy_night_moon_visual_strength := world.moon_visual_strength()
+	var snowy_night_weather_visibility := celestial.weather_visibility()
+	var snowy_night_shader_moon_visibility := float(
+		celestial_material.get_shader_parameter("moon_visibility"))
 	_check(clear_night_moon_energy > 0.0 and rainy_night_moon_energy > 0.0 \
 			and rainy_night_moon_energy < clear_night_moon_energy,
 		"rainy nights dim moonlight below a clear summer night")
+	_check(clear_night_weather_visibility >= 0.99 \
+			and rainy_night_weather_visibility > 0.0 \
+			and rainy_night_weather_visibility \
+				< clear_night_weather_visibility \
+			and rainy_night_shader_moon_visibility \
+				< clear_night_shader_moon_visibility \
+			and rainy_night_moon_visual_strength \
+				< clear_night_moon_visual_strength,
+		"rain dims every visible celestial below a clear night")
+	_check(snowy_night_moon_visual_strength > 0.0 \
+			and snowy_night_moon_visual_strength \
+				< clear_night_moon_visual_strength \
+			and snowy_night_weather_visibility > 0.0 \
+			and snowy_night_weather_visibility \
+				< clear_night_weather_visibility \
+			and snowy_night_shader_moon_visibility > 0.0 \
+			and snowy_night_shader_moon_visibility \
+				< clear_night_shader_moon_visibility,
+		"snow dims every visible celestial without removing it")
 	world.set_season_override(SeasonalCycle.Season.SUMMER)
 
 	var weather_system: SeasonalWeather = world.seasonal_weather
@@ -206,6 +323,8 @@ func run(main) -> void:
 	# materials, so take the growth baseline after every actor path exists.
 	shared_material_count = Visuals._shared.size()
 	foliage_material_count = Visuals._foliage.size()
+	for transition_hour in [12.0, 0.0, 6.35, 21.0, 0.0]:
+		world.set_time_of_day_override(transition_hour)
 	for next_season in [
 		SeasonalCycle.Season.SUMMER,
 		SeasonalCycle.Season.AUTUMN,
@@ -231,10 +350,19 @@ func run(main) -> void:
 			and _weather_resources_match(world.seasonal_weather,
 				weather_process_ids, weather_mesh_ids),
 		"all weather types reuse one emitter and a bounded resource cache")
+	_check(world._celestial_sky == celestial \
+			and celestial.get_material() == celestial_material \
+			and celestial.resource_instance_ids() == celestial_resource_ids \
+			and celestial.catalog_signature() == celestial_catalog_signature,
+		"time and season transitions preserve one cached celestial sky")
 	_check(not local_rig.has_visible_winter_scarf() \
 			and not ai_rig.has_visible_winter_scarf() \
 			and not puppet_rig.has_visible_winter_scarf(),
 		"non-winter transitions hide every living scarf")
+	# Do not retain test-local references to renderer resources while the scene
+	# tree shuts down; World remains their sole owner after the assertions above.
+	celestial_material = null
+	celestial = null
 
 	world.remove_puppet(puppet_id)
 	ragdoll.queue_free()
@@ -365,6 +493,12 @@ func _count_shadow_directionals(node: Node) -> int:
 			count += 1
 		count += _count_shadow_directionals(child)
 	return count
+
+
+func _is_midnight_blue(color: Color) -> bool:
+	var luminance := color.get_luminance()
+	return color.b > color.g * 1.5 and color.b > color.r * 2.0 \
+		and luminance >= 0.015 and luminance <= 0.18
 
 
 func _check(condition: bool, label: String) -> void:
