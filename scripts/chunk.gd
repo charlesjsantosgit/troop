@@ -31,6 +31,7 @@ var _collisions_active := false
 var _supply_huts: Array[SupplyHut] = []
 var _arena_pieces: Array[ArenaPiece] = []
 var _details_pending := false
+var _detail_build_stage := 0
 var _pending_collected: Dictionary = {}
 var _pending_build_collisions := false
 
@@ -150,30 +151,52 @@ func setup(k: Vector2i, collected: Dictionary, build_collisions := true,
 	_pending_collected = collected
 	_pending_build_collisions = build_collisions
 	_details_pending = true
+	_detail_build_stage = 0
 	if not defer_details:
 		finish_deferred_build()
 	Gen.vine_visual_changed.connect(_on_vine_changed)
 
 
-## Streaming can publish the terrain/water shell first, then finish decorative
-## MultiMeshes on a later frame. Collision-near chunks still use the immediate
-## path, so traversal geometry is never deferred.
+## Streaming can publish the terrain/water shell first, then finish detail and
+## collision work in bounded stages. Explicit warm calls retain the immediate
+## path for deterministic test and solo startup semantics.
 func finish_deferred_build() -> void:
+	while _details_pending:
+		finish_deferred_build_step()
+
+
+## Completes one bounded portion of a streamed chunk. The immediate warm path
+## still calls finish_deferred_build(), while normal streaming spreads mesh and
+## collision creation across frames.
+func finish_deferred_build_step() -> bool:
 	if not _details_pending:
-		return
-	_details_pending = false
-	_build_trees()
-	_build_rocks()
-	_build_grass()
-	_build_understory()
-	_build_arena_pieces()
-	_build_supply_huts()
-	_build_vine_mesh()
-	_build_bananas(_pending_collected)
-	if _pending_build_collisions:
-		_build_collisions()
-	_pending_collected = {}
-	_pending_build_collisions = false
+		return true
+	match _detail_build_stage:
+		0:
+			_build_trees()
+		1:
+			_build_rocks()
+		2:
+			_build_grass()
+		3:
+			_build_understory()
+		4:
+			_build_arena_pieces()
+		5:
+			_build_supply_huts()
+		6:
+			_build_vine_mesh()
+		7:
+			_build_bananas(_pending_collected)
+		8:
+			if _pending_build_collisions:
+				_build_collisions()
+	_detail_build_stage += 1
+	if _detail_build_stage > 8:
+		_details_pending = false
+		_pending_collected = {}
+		_pending_build_collisions = false
+	return not _details_pending
 
 
 func is_deferred_build_pending() -> bool:

@@ -945,19 +945,35 @@ func _stream(budget: int) -> void:
 			collision_chunk.set_collision_active(true)
 			did_heavy_work = true
 
+	# Publish coarse horizon shells before decorative near-chunk stages. This keeps
+	# the backdrop independent and bounded while center-chunk collision already
+	# protects the newly joined player.
+	if not did_heavy_work and not _horizon_queue.is_empty():
+		var n := mini(HORIZON_BUILD_BUDGET, _horizon_queue.size())
+		for i in range(n):
+			var k: Vector2i = _horizon_queue.pop_front()
+			_horizon_pending.erase(k)
+			var delta := (k - hc).abs()
+			if maxi(delta.x, delta.y) <= Gen.HORIZON_VIEW_R \
+					and not horizon_chunks.has(k):
+				_build_horizon_chunk(k, true)
+				did_heavy_work = true
+
 	if not did_heavy_work:
 		while not _chunk_detail_queue.is_empty():
 			var detail_chunk: Chunk = _chunk_detail_queue.pop_front()
 			if not is_instance_valid(detail_chunk) \
 					or not detail_chunk.is_deferred_build_pending():
 				continue
-			detail_chunk.finish_deferred_build()
-			_register_chunk_bananas(detail_chunk)
+			var finished := detail_chunk.finish_deferred_build_step()
+			if finished:
+				_register_chunk_bananas(detail_chunk)
+			else:
+				_chunk_detail_queue.append(detail_chunk)
 			did_heavy_work = true
 			break
 
-	# Far terrain and silhouettes are lower priority, and silhouette generation
-	# itself is split across a few source chunks per idle frame.
+	# Tree silhouettes and other visual detail use only otherwise-idle frames.
 	if not did_heavy_work:
 		while not _horizon_detail_queue.is_empty():
 			var detail_sector: HorizonChunk = _horizon_detail_queue.front()
@@ -969,16 +985,6 @@ func _stream(budget: int) -> void:
 				_horizon_detail_queue.pop_front()
 			did_heavy_work = true
 			break
-	if not did_heavy_work and not _horizon_queue.is_empty():
-		var n := mini(HORIZON_BUILD_BUDGET, _horizon_queue.size())
-		for i in range(n):
-			var k: Vector2i = _horizon_queue.pop_front()
-			_horizon_pending.erase(k)
-			var delta := (k - hc).abs()
-			if maxi(delta.x, delta.y) <= Gen.HORIZON_VIEW_R \
-					and not horizon_chunks.has(k):
-				_build_horizon_chunk(k, true)
-				did_heavy_work = true
 
 
 func center_horizon_sector() -> Vector2i:
@@ -1080,7 +1086,10 @@ func _build_chunk(k: Vector2i, defer_outer_details := true) -> void:
 	add_child(c)
 	var d := (k - center_chunk()).abs()
 	var needs_collision := maxi(d.x, d.y) <= 1
-	var defer_details := defer_outer_details and not needs_collision
+	# Runtime streaming publishes terrain shells first even in the safety ring.
+	# Detail and collision construction then use bounded per-frame stages; the
+	# player cannot traverse the 48 m center chunk before that ring is completed.
+	var defer_details := defer_outer_details
 	c.setup(k, Net.collected, needs_collision, defer_details)
 	chunks[k] = c
 	if defer_details:
@@ -1121,6 +1130,15 @@ func warm(radius: int) -> void:
 			var hk := hc + Vector2i(dx, dz)
 			if not horizon_chunks.has(hk):
 				_build_horizon_chunk(hk, false)
+
+
+## Fast online entry: publish one fully playable chunk and let the normal
+## one-token streaming budget fill the surrounding jungle after the player is
+## visible. Solo/test warm() keeps its deterministic full-radius semantics.
+func warm_online_entry() -> void:
+	var cc := center_chunk()
+	if not chunks.has(cc):
+		_build_chunk(cc, false)
 
 
 # ---- test scaffolding ------------------------------------------------------

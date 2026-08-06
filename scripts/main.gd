@@ -79,6 +79,12 @@ func _ready() -> void:
 			var gt = load("res://tests/generationtest.gd").new()
 			add_child(gt)
 			gt.call_deferred("run")
+		"onlineperformancetest":
+			mode = "onlineperformancetest"
+			var online_performance_test = load(
+				"res://tests/onlineperformancetest.gd").new()
+			add_child(online_performance_test)
+			online_performance_test.call_deferred("run")
 		"seasontest":
 			mode = "seasontest"
 			_start_solo("SeasonTestMonkey", 2026, 1)
@@ -209,6 +215,33 @@ func _enter_world(pname: String, seed_v: int, warm_r: int) -> void:
 	add_child(world)
 	world.build()
 	world.warm(warm_r)
+	_finish_world_entry(pname)
+
+
+func _enter_online_world(pname: String, seed_v: int) -> bool:
+	Gen.setup(seed_v)
+	# Keep the connection screen alive between the expensive setup phases. The
+	# world itself remains paused until its center chunk and player are ready.
+	await get_tree().process_frame
+	if mode != "join" or not Net.active:
+		return false
+	world = World.new()
+	world.process_mode = Node.PROCESS_MODE_DISABLED
+	add_child(world)
+	world.build()
+	await get_tree().process_frame
+	if mode != "join" or not Net.active or not is_instance_valid(world):
+		return false
+	world.warm_online_entry()
+	await get_tree().process_frame
+	if mode != "join" or not Net.active or not is_instance_valid(world):
+		return false
+	_finish_world_entry(pname)
+	world.process_mode = Node.PROCESS_MODE_INHERIT
+	return true
+
+
+func _finish_world_entry(pname: String) -> void:
 	var player := world.spawn_local(Net.local_id(), pname)
 	player.cam.set_view_mode(_camera_mode_preference)
 	player.cam.set_sensitivity(_mouse_sensitivity)
@@ -350,8 +383,11 @@ func _begin_join(address: String, pname: String, port := Net.PORT) -> void:
 		if status_label:
 			status_label.text = "The online server did not answer. Try again shortly."
 		return
-	_close_menu()
-	_enter_world(pname, Net.world_seed, 2)
+	if status_label:
+		status_label.text = "Connected — preparing your nearby jungle…"
+	var entered := await _enter_online_world(pname, Net.world_seed)
+	if entered:
+		_close_menu()
 
 
 func _public_server_host() -> String:
