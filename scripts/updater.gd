@@ -256,7 +256,11 @@ func _start_periodic_checks() -> void:
 
 func _check_after_startup() -> void:
 	await get_tree().create_timer(1.5).timeout
-	check_for_updates(false)
+	# The launch check always runs. The six-hour throttle exists to pace the
+	# periodic timer and menu-visit checks, but a fresh boot must see a release
+	# published minutes ago — otherwise "checks on startup" silently does
+	# nothing for hours after any earlier check stamped the window.
+	check_for_updates(true)
 
 
 func _confirm_pending_after_stable_boot() -> void:
