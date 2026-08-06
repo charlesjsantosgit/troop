@@ -81,6 +81,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # A fresh Actions checkout has no .godot global-class cache. Import
+          # once before script-mode tests so parse errors cannot leave a test
+          # main loop waiting indefinitely.
+          "$GODOT_BIN" --headless --path . --editor --quit
           "$GODOT_BIN" --headless --path . --script res://tests/updatetest.gd
           "$GODOT_BIN" --headless --path . --script res://tests/voicetest.gd
           "$GODOT_BIN" --headless --path . --script res://tests/netsecuritytest.gd
