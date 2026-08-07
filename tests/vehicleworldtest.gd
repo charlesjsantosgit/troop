@@ -141,6 +141,58 @@ func run(main) -> void:
 		print("  (no lake within dock search range for this seed — float "
 			+ "checks skipped)")
 
+	# --- admin vehicle powers: deliver anywhere, teleport to every spawn ----
+	var admin = main.admin_controller
+	var p = w.local_player
+	p.test_mode = true
+	var delivered_ok := true
+	for kind_word in ["bike", "jeep", "boat", "jet"]:
+		if not admin.spawn_vehicle(kind_word):
+			delivered_ok = false
+	await sim(30)
+	var delivered := 0
+	for vid in w.vehicles:
+		if str(vid).begins_with("v:admin#"):
+			delivered += 1
+	check("admin delivers every vehicle kind on the spot",
+		delivered_ok and delivered == 4, "spawned=%d" % delivered)
+	var ride = null
+	for vid in w.vehicles:
+		if str(vid).begins_with("v:admin#"):
+			ride = w.vehicles[vid]
+			break
+	check("a delivered machine is immediately mountable",
+		ride != null and ride.can_enter(p))
+
+	admin.teleport_to_vehicle_spot("airstrip")
+	await sim(5)
+	var apron_spot: Vector2 = Gen.airstrip_apron_world()
+	check("teleport lands on the airstrip apron",
+		Vector2(p.global_position.x, p.global_position.z) \
+			.distance_to(apron_spot) < 30.0)
+	admin.teleport_to_vehicle_spot("pool")
+	await sim(5)
+	check("teleport lands at the origin motor pool",
+		Vector2(p.global_position.x, p.global_position.z) \
+			.distance_to(Vector2(40.0, 4.0)) < 12.0)
+	if Gen.boat_dock_valid:
+		admin.teleport_to_vehicle_spot("dock")
+		await sim(5)
+		check("teleport lands dry on the dock shore",
+			Vector2(p.global_position.x, p.global_position.z).distance_to(
+				Vector2(Gen.boat_dock_pos.x, Gen.boat_dock_pos.z)) < 70.0
+			and Gen.height(p.global_position.x, p.global_position.z)
+				> Gen.WATER_Y)
+	var hidden: Dictionary = admin._nearest_wilderness_vehicle(
+		p.global_position)
+	check("a wilderness machine hides within scan range",
+		not hidden.is_empty())
+	if not hidden.is_empty():
+		admin.teleport_to_vehicle_spot("machine")
+		await sim(5)
+		check("teleport lands beside the hidden machine",
+			p.global_position.distance_to(hidden.pos) < 9.0)
+
 	print("VEHICLEWORLDTEST %d/%d %s" % [total - fails, total,
 		"PASS" if fails == 0 else "FAIL"])
 	main.get_tree().quit(1 if fails > 0 else 0)

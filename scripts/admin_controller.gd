@@ -92,13 +92,12 @@ func toggle_fly() -> bool:
 	return now_flying
 
 
-## Deliver a machine to the admin's position (offline sessions only, like bot
-## spawns — network vehicles must come from deterministic world spawns).
+## Deliver any machine to the admin's position, in every session type. The id
+## carries the local peer id so two admins can never mint the same vehicle;
+## online, other players see it materialize through the normal driving state
+## stream the first time it is ridden.
 func spawn_vehicle(kind_word: String) -> bool:
-	if not _player() or not can_spawn():
-		if not can_spawn():
-			feedback("Vehicle delivery is a solo/debug perk — online rides "
-				+ "spawn at the motor pool, airstrip, and lakes.")
+	if not _player():
 		return false
 	var kinds := {"bike": Vehicle.Kind.BIKE, "motorcycle": Vehicle.Kind.BIKE,
 		"jeep": Vehicle.Kind.JEEP, "boat": Vehicle.Kind.BOAT,
@@ -111,13 +110,114 @@ func spawn_vehicle(kind_word: String) -> bool:
 	var p: MonkeyPlayer = _player()
 	var forward := Vector3(sin(p.rig.yaw_angle() + PI), 0.0,
 		cos(p.rig.yaw_angle() + PI))
-	var spot := p.global_position + forward * 5.0
+	var spot := p.global_position + forward * 5.5
 	var v: Vehicle = world.spawn_vehicle(kinds[query],
-		"v:admin#%d" % _admin_vehicle_serial, spot,
+		"v:admin#%d-%d" % [Net.local_id(), _admin_vehicle_serial], spot,
 		atan2(forward.x, forward.z))
 	feedback("%s delivered — E to %s." % [v.display_name(),
 		v.mount_verb().to_lower()])
 	return true
+
+
+## Teleport to the machines: the airstrip apron, the origin motor pool, the
+## lake dock, or the nearest hidden wilderness vehicle.
+const VEHICLE_SPOTS := {
+	"airstrip": "airstrip", "strip": "airstrip", "runway": "airstrip",
+	"jet": "airstrip",
+	"pool": "pool", "motorpool": "pool", "garage": "pool",
+	"dock": "dock", "boat": "dock", "airboat": "dock",
+	"machine": "machine", "vehicle": "machine", "wild": "machine",
+}
+
+
+func teleport_to_vehicle_spot(query: String) -> bool:
+	var p := _player()
+	if not p or not VEHICLE_SPOTS.has(query):
+		return false
+	if Gen.debug_world:
+		p.admin_teleport(Vector3(0.0, 3.0, 12.0))
+		feedback("Debug world: every machine is parked at the yard "
+			+ "just north of spawn.")
+		return true
+	match VEHICLE_SPOTS[query]:
+		"airstrip":
+			if not Gen.airstrip_valid:
+				feedback("This world generated without an airstrip.")
+				return true
+			var apron := Gen.airstrip_apron_world()
+			p.admin_teleport(Vector3(apron.x + 5.0,
+				Gen.airstrip_elevation + 0.6, apron.y + 5.0))
+			feedback("Airstrip apron — the jet is parked beside you; the "
+				+ "runway runs %d m." % int(Gen.AIRSTRIP_LENGTH))
+		"pool":
+			var pool_height := Gen.height(40.0, 4.0)
+			p.admin_teleport(Vector3(40.0, pool_height + 0.6, 4.0))
+			feedback("Origin motor pool — dual-sport and jeep, east of "
+				+ "the arena.")
+		"dock":
+			if not Gen.boat_dock_valid:
+				feedback("No lake within dock range on this seed — try "
+					+ "/vehicle boat instead.")
+				return true
+			var shore := _shore_near_dock()
+			p.admin_teleport(shore + Vector3.UP * 0.6)
+			feedback("Lakeside dock — the airboat floats just offshore.")
+		"machine":
+			var found := _nearest_wilderness_vehicle(p.global_position)
+			if found.is_empty():
+				feedback("No wilderness machine within ~1.5 km — they "
+					+ "average one per twenty chunks; try again elsewhere.")
+				return true
+			var target: Vector3 = found.pos
+			p.admin_teleport(target + Vector3(3.0, 0.8, 3.0))
+			feedback(("Found a hidden %s %.0f m out — it is right beside "
+				+ "you.") % [Vehicle.KIND_NAMES[int(found.kind)].to_lower(),
+				found.distance])
+	return true
+
+
+func _shore_near_dock() -> Vector3:
+	var toward := -Vector2(Gen.boat_dock_pos.x, Gen.boat_dock_pos.z) \
+		.normalized()
+	var probe := Vector2(Gen.boat_dock_pos.x, Gen.boat_dock_pos.z)
+	for step in range(14):
+		probe += toward * 3.0
+		var h := Gen.height(probe.x, probe.y)
+		if h > Gen.WATER_Y + 0.25:
+			return Vector3(probe.x, h, probe.y)
+	return Vector3(Gen.boat_dock_pos.x, Gen.WATER_Y + 0.4,
+		Gen.boat_dock_pos.z)
+
+
+## Ring-scan chunk layouts outward from the player for deterministic
+## wilderness spawn definitions (curated pool/strip/dock/admin ids excluded).
+func _nearest_wilderness_vehicle(from: Vector3) -> Dictionary:
+	var center := Vector2i(floori(from.x / Gen.CHUNK),
+		floori(from.z / Gen.CHUNK))
+	var best: Dictionary = {}
+	var best_distance := INF
+	for ring in range(0, 31):
+		for dx in range(-ring, ring + 1):
+			for dz in range(-ring, ring + 1):
+				if maxi(absi(dx), absi(dz)) != ring:
+					continue
+				var cx := center.x + dx
+				var cz := center.y + dz
+				for def in Gen.vehicle_layout(cx, cz):
+					var vid := str(def.get("id", ""))
+					if not vid.begins_with("v:%d," % cx):
+						continue   # curated spawn, not a wilderness find
+					var pos: Vector3 = def.get("pos", Vector3.ZERO)
+					var distance := from.distance_to(pos)
+					if distance < best_distance:
+						best_distance = distance
+						best = {"pos": pos, "kind": def.get("kind", 0),
+							"distance": distance}
+		# A hit plus one extra ring of margin beats scanning all 31 rings.
+		if not best.is_empty() and ring > 2 \
+				and best_distance < float(ring - 1) * Gen.CHUNK:
+			break
+	return best
 
 
 func teleport_to_biome(biome_name: String) -> bool:
@@ -261,8 +361,9 @@ func run_command(text: String) -> void:
 			feedback("/fly — toggle angel wings (SPACE up, CTRL down)")
 			feedback("/tp <rainforest|bamboo|wetland|highland|mountains"
 				+ "|player-name>")
+			feedback("/tp <airstrip|pool|dock|machine> — to the vehicles")
 			feedback("/spawn <peel|swinger|follower|statue|villager>")
-			feedback("/vehicle <bike|jeep|boat|jet> — deliver a machine (solo)")
+			feedback("/vehicle <bike|jeep|boat|jet> — deliver any machine")
 			feedback("/time <hour|clear> — set or release the clock")
 			feedback("/kick <player> · /ban <player> <minutes>")
 			feedback("/say <text> — server-wide announcement")
@@ -283,6 +384,8 @@ func run_command(text: String) -> void:
 			var where := parts[1].to_lower() if parts.size() > 1 else ""
 			if BIOME_BY_NAME.has(where) or where.begins_with("mountain"):
 				teleport_to_biome(where)
+			elif VEHICLE_SPOTS.has(where):
+				teleport_to_vehicle_spot(where)
 			else:
 				var peer := _find_peer_by_name(where)
 				if peer != 0:

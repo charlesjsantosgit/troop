@@ -2,6 +2,6 @@
   "godot_compatibility": "4.7",
   "minimum_bootstrap": 1,
   "network_protocol": 5,
-  "notes": "The Vehicle Update: a dual-sport motorcycle, safari jeep, airboat, and 700 mph fighter jet with realistic suspension, drivetrain, lean, buoyancy, and flight physics; a seeded bush airstrip; jungle canopy now visible to the full 15-mile horizon; and macOS packaging that can ship notarized builds.",
+  "notes": "Vehicle Update follow-up: admins can now deliver any machine on the spot (/vehicle bike|jeep|boat|jet, any session) and teleport to every vehicle spawn (/tp airstrip|pool|dock|machine), with matching F8 panel buttons.",
   "requires_installer": false
 }
