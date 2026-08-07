@@ -113,23 +113,33 @@ func step(dt: float, input_throttle: float, wheel_speed: float,
 			delivered = 0.0
 
 	if auto_shift and _shift_lockout <= 0.0 and gear >= 1:
-		_consider_auto_shift(ground_speed)
+		_consider_auto_shift(ground_speed, target_rpm)
 	return delivered
 
 
 ## Hysteresis keeps the box from hunting: a lockout after every shift, and an
 ## upshift only happens when the rpm it would LAND at stays well above the
 ## downshift line.
-func _consider_auto_shift(ground_speed: float) -> void:
+func _consider_auto_shift(ground_speed: float, driveline_rpm: float) -> void:
 	if gear < gear_ratios.size() and rpm > redline_rpm * 0.93 \
 			and throttle > 0.25:
 		var landing_rpm: float = rpm \
 			* float(gear_ratios[gear]) / float(gear_ratios[gear - 1])
 		if landing_rpm > redline_rpm * 0.42:
 			shift(1)
-	elif gear > 1 and rpm < redline_rpm * 0.26 \
-			and absf(ground_speed) > 0.5:
-		shift(-1)
+	elif gear > 1:
+		# Decide a coast-down shift from wheel-coupled RPM, not free crank RPM.
+		# Once the clutch opened, the old code held the crank at engagement speed
+		# above its downshift threshold, making automatic downshifts unreachable.
+		var current_ratio := float(gear_ratios[gear - 1])
+		var lower_ratio := float(gear_ratios[gear - 2])
+		var lower_gear_rpm := driveline_rpm * lower_ratio \
+			/ maxf(current_ratio, 0.001)
+		var downshift_line := redline_rpm * lerpf(0.30, 0.48, throttle)
+		var slowing_or_lugging := driveline_rpm < downshift_line \
+			or absf(ground_speed) < 2.0
+		if slowing_or_lugging and lower_gear_rpm < redline_rpm * 0.92:
+			shift(-1)
 
 
 func shift(direction: int) -> bool:

@@ -27,7 +27,9 @@ var weapon_slots: Label
 var vehicle_panel: Panel
 var vehicle_speed_label: Label
 var vehicle_gear_label: Label
+var vehicle_rpm_back: ColorRect
 var vehicle_rpm_fill: ColorRect
+var vehicle_tachometer: AnalogTachometer
 var vehicle_extra_label: Label
 var voice_label: Label
 var sniper_scope: SniperScopeOverlay
@@ -242,15 +244,16 @@ func _ready() -> void:
 	weapon_slots.add_theme_color_override("font_color", Color(0.83, 0.88, 0.75, 0.84))
 	add_child(weapon_slots)
 
-	# Vehicle instrument cluster: big speed, gear, RPM bar, per-kind extras.
+	# Vehicle instrument cluster: speed/gear plus a true analog crank-RPM dial
+	# for road vehicles. Jets and boats retain the compact spool/fan bar.
 	vehicle_panel = Panel.new()
 	vehicle_panel.anchor_left = 0.5
 	vehicle_panel.anchor_right = 0.5
 	vehicle_panel.anchor_top = 1.0
 	vehicle_panel.anchor_bottom = 1.0
-	vehicle_panel.offset_left = 140
-	vehicle_panel.offset_right = 420
-	vehicle_panel.offset_top = -118
+	vehicle_panel.offset_left = -190
+	vehicle_panel.offset_right = 190
+	vehicle_panel.offset_top = -148
 	vehicle_panel.offset_bottom = -20
 	vehicle_panel.add_theme_stylebox_override("panel",
 		_panel_style(Color(0.05, 0.08, 0.05, 0.72), Color(0.95, 0.76, 0.24)))
@@ -258,27 +261,32 @@ func _ready() -> void:
 	add_child(vehicle_panel)
 	vehicle_speed_label = _label(30)
 	vehicle_speed_label.position = Vector2(16, 8)
-	vehicle_speed_label.size = Vector2(170, 40)
+	vehicle_speed_label.size = Vector2(160, 40)
 	vehicle_panel.add_child(vehicle_speed_label)
 	vehicle_gear_label = _label(22)
-	vehicle_gear_label.position = Vector2(196, 12)
-	vehicle_gear_label.size = Vector2(70, 34)
+	vehicle_gear_label.position = Vector2(166, 12)
+	vehicle_gear_label.size = Vector2(74, 34)
 	vehicle_gear_label.add_theme_color_override("font_color",
 		Color(0.95, 0.86, 0.45))
 	vehicle_panel.add_child(vehicle_gear_label)
-	var rpm_back := ColorRect.new()
-	rpm_back.color = Color(0.12, 0.16, 0.12, 0.9)
-	rpm_back.position = Vector2(16, 52)
-	rpm_back.size = Vector2(248, 10)
-	vehicle_panel.add_child(rpm_back)
+	vehicle_rpm_back = ColorRect.new()
+	vehicle_rpm_back.color = Color(0.12, 0.16, 0.12, 0.9)
+	vehicle_rpm_back.position = Vector2(16, 52)
+	vehicle_rpm_back.size = Vector2(218, 10)
+	vehicle_panel.add_child(vehicle_rpm_back)
 	vehicle_rpm_fill = ColorRect.new()
 	vehicle_rpm_fill.color = Color(0.55, 0.88, 0.35)
 	vehicle_rpm_fill.position = Vector2(16, 52)
 	vehicle_rpm_fill.size = Vector2(0, 10)
 	vehicle_panel.add_child(vehicle_rpm_fill)
+	vehicle_tachometer = AnalogTachometer.new()
+	vehicle_tachometer.name = "AnalogTachometer"
+	vehicle_tachometer.position = Vector2(252, 4)
+	vehicle_tachometer.size = Vector2(116, 116)
+	vehicle_panel.add_child(vehicle_tachometer)
 	vehicle_extra_label = _label(13)
 	vehicle_extra_label.position = Vector2(16, 66)
-	vehicle_extra_label.size = Vector2(248, 26)
+	vehicle_extra_label.size = Vector2(218, 56)
 	vehicle_extra_label.add_theme_color_override("font_color",
 		Color(0.80, 0.88, 0.80, 0.9))
 	vehicle_panel.add_child(vehicle_extra_label)
@@ -626,13 +634,26 @@ func _update_vehicle_cluster() -> void:
 	var v: Vehicle = player.vehicle if player else null
 	if v == null or not is_instance_valid(v):
 		vehicle_panel.visible = false
+		hint.offset_top = -70
+		hint.offset_bottom = 0
 		return
 	vehicle_panel.visible = true
+	# Vehicle instructions sit above the instruments instead of running through
+	# the cluster and the bottom-right weapon panel.
+	hint.offset_top = -190
+	hint.offset_bottom = -150
 	vehicle_speed_label.text = "%3.0f MPH" % v.speed_mph()
 	var rpm_frac: float = clampf(v.engine.rpm_fraction(), 0.0, 1.0)
-	vehicle_rpm_fill.size.x = 248.0 * rpm_frac
+	var analog_rpm := v.kind == Vehicle.Kind.JEEP or v.kind == Vehicle.Kind.BIKE
+	vehicle_tachometer.visible = analog_rpm
+	vehicle_rpm_back.visible = not analog_rpm
+	vehicle_rpm_fill.visible = not analog_rpm
+	vehicle_rpm_fill.size.x = 218.0 * rpm_frac
 	vehicle_rpm_fill.color = Color(0.9, 0.25, 0.2) if rpm_frac > 0.92 \
 		else Color(0.55, 0.88, 0.35)
+	if analog_rpm:
+		vehicle_tachometer.set_reading(v.engine.rpm, v.engine.redline_rpm,
+			v.engine.limiter_rpm)
 	match v.kind:
 		Vehicle.Kind.JET:
 			var jet := v as FighterJet
@@ -650,22 +671,28 @@ func _update_vehicle_cluster() -> void:
 		Vehicle.Kind.BOAT:
 			vehicle_gear_label.text = "FAN"
 			vehicle_extra_label.text = "W fan · S fast idle/coast · A/D rudders"
-		_:
+		Vehicle.Kind.BIKE:
 			vehicle_gear_label.text = "GEAR %s" % v.engine.gear_label()
-			var extra := "W drive · S brake/reverse · SPACE handbrake"
+			vehicle_extra_label.text = ("AUTO · W THROTTLE · S BRAKES\n"
+				+ "CTRL WHEELIE · SHIFT TUCK")
+		Vehicle.Kind.JEEP:
+			vehicle_gear_label.text = "GEAR %s" % v.engine.gear_label()
+			var extra := "AUTO · W DRIVE · S BRAKE/REV\nSPACE HANDBRAKE"
 			if v is SafariJeep and (v as SafariJeep).low_range:
-				extra = "LOW RANGE · " + extra
+				extra += " · LOW RANGE"
 			vehicle_extra_label.text = extra
 
 
 func _vehicle_hint(v: Vehicle) -> String:
 	match v.kind:
 		Vehicle.Kind.JET:
-			return "W/S throttle · aim to steer · SHIFT burner · G gear · F flaps · SPACE airbrake · CTRL brakes · E exit"
+			return "%s NOSE UP · %s NOSE DOWN · W/S THROTTLE · A/D ROLL · MOUSE AIM\nSHIFT BURNER · G/F GEAR/FLAPS · SPACE AIRBRAKE · CTRL BRAKES · E EXIT" % [
+				Settings.binding_text(&"vehicle_pitch_up"),
+				Settings.binding_text(&"vehicle_pitch_down")]
 		Vehicle.Kind.BOAT:
 			return "W fan · S fast idle/coast · A/D rudders · no reverse · E step off"
 		Vehicle.Kind.BIKE:
-			return "W throttle · S brakes · A/D lean · SPACE rear brake · SHIFT tuck · E dismount"
+			return "W THROTTLE · S BRAKES · A/D TURN · %s WHEELIE · SPACE REAR BRAKE · SHIFT TUCK · E DISMOUNT" % Settings.binding_text(&"crouch")
 		_:
 			return "W drive · S brake/reverse · A/D steer · SPACE handbrake · SHIFT low range · E exit"
 

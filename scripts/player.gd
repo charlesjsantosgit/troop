@@ -151,7 +151,8 @@ var ti := {"dir": Vector2.ZERO, "jump_just": false, "jump_held": false, "sprint"
 	"shoot_just": false, "shoot_held": false, "reload_just": false,
 	"melee_toggle_just": false, "scope_zoom_just": false,
 	"interact_just": false, "use_bandage_just": false,
-	"vehicle_gear_just": false, "vehicle_flaps_just": false}
+	"vehicle_gear_just": false, "vehicle_flaps_just": false,
+	"vehicle_pitch": 0.0}
 
 var _send_t := 0.0
 var _now := 0.0
@@ -328,6 +329,7 @@ func _gather() -> Dictionary:
 			"use_bandage_just": ti.use_bandage_just,
 			"vehicle_gear_just": ti.vehicle_gear_just,
 			"vehicle_flaps_just": ti.vehicle_flaps_just,
+			"vehicle_pitch": ti.vehicle_pitch,
 		}
 		ti.jump_just = false
 		ti.crouch_just = false
@@ -358,6 +360,7 @@ func _gather() -> Dictionary:
 			"weapon_3_just": false, "weapon_4_just": false,
 			"scope_zoom_just": false,
 			"vehicle_gear_just": false, "vehicle_flaps_just": false,
+			"vehicle_pitch": 0.0,
 		}
 	return {
 		"dir": Input.get_vector("move_left", "move_right", "move_fwd", "move_back"),
@@ -382,6 +385,7 @@ func _gather() -> Dictionary:
 		"scope_zoom_just": Input.is_action_just_pressed("scope_zoom"),
 		"vehicle_gear_just": Input.is_action_just_pressed("vehicle_gear"),
 		"vehicle_flaps_just": Input.is_action_just_pressed("vehicle_flaps"),
+		"vehicle_pitch": Input.get_axis("vehicle_pitch_down", "vehicle_pitch_up"),
 	}
 
 

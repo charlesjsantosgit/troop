@@ -6,14 +6,16 @@ extends Vehicle
 ## pulls toward the pilot's camera aim under AoA and G limiters, coordinated
 ## rudder, retractable tricycle gear on oleo struts, flaps, an airbrake, and
 ## an afterburner with a spooling turbine. W/S move the throttle setpoint,
-## SHIFT lights the burner, A/D roll (nosewheel steering on the ground),
-## SPACE is the airbrake, CTRL wheel brakes, G gear, F flaps.
+## UP/DOWN command nose up/down, SHIFT lights the burner, A/D roll (nosewheel
+## steering on the ground), SPACE is the airbrake, CTRL wheel brakes, G gear,
+## F flaps. Mouse pursuit remains available for precision flying.
 
 const WING_AREA := 27.9
 const WING_SPAN := 9.45
 const CHORD := 3.2
 const CL_ALPHA := 3.8              # lift slope per radian
 const CL0 := 0.06
+const CL_FLAPS := 0.40             # takeoff/landing high-lift increment
 const ALPHA_STALL := 0.42          # ~24 deg with leading-edge flaps
 const ALPHA_LIMIT := 0.38          # FBW limiter
 const INDUCED_K := 0.124
@@ -25,9 +27,13 @@ const WAVE_DRAG_K := 36.6
 const MACH_DRAG_RISE := 0.88
 const SOUND_SPEED := 340.0
 const G_LIMIT := 9.0
-const THRUST_MIL := 76000.0
-const THRUST_AB_EXTRA := 52000.0
+const THRUST_MIL := 84000.0
+const THRUST_AB_EXTRA := 44000.0
 const THRUST_IDLE := 3800.0
+const TAKEOFF_PITCH_LIMIT := 0.24       # ~14° protected rotation
+const ASSISTED_CLIMB_PITCH := 0.24      # Up holds a useful, non-stalling climb
+const ASSISTED_DESCENT_PITCH := -0.16   # Down lowers the nose without a dive
+const CONTROL_AUTHORITY_Q := 3500.0     # Pa for full control-surface response
 
 var throttle_setpoint := 0.0       # persistent 0..1 (W raises, S lowers)
 var spool := 0.0                   # turbine response toward the setpoint
@@ -41,6 +47,7 @@ var stalled := false
 var _gear_position := 1.0          # 1 = down/locked, 0 = tucked away
 var _flap_position := 1.0
 var _aim := Vector3.FORWARD
+var _pitch_input := 0.0             # arrows: +1 nose up, -1 nose down
 var _wheel_brakes := false
 var _roll_override := 0.0
 var _stall_beep_t := 0.0
@@ -155,6 +162,7 @@ func _wheels_grounded_count() -> int:
 func set_driver_view(aim: Vector3, inp: Dictionary) -> void:
 	if aim.length_squared() > 0.01:
 		_aim = aim.normalized()
+	_pitch_input = clampf(float(inp.get("vehicle_pitch", 0.0)), -1.0, 1.0)
 	_wheel_brakes = bool(inp.get("crouch_held", false))
 	if bool(inp.get("vehicle_gear_just", false)):
 		_toggle_gear()
@@ -191,6 +199,7 @@ func _simulate(dt: float) -> void:
 	else:
 		throttle_setpoint = 0.0
 		afterburner = false
+		_pitch_input = 0.0
 	spool = move_toward(spool, throttle_setpoint, 0.42 * dt)
 	engine.rpm = lerpf(62.0, 100.0, spool)
 	airbrake = move_toward(airbrake, 1.0 if input_handbrake else 0.0,
@@ -234,7 +243,7 @@ func _simulate(dt: float) -> void:
 		var q := 0.5 * density * airspeed * airspeed
 		# Lift with stall: linear to ALPHA_STALL, then the wing lets go.
 		var cl := CL0 + CL_ALPHA * clampf(alpha, -ALPHA_STALL, ALPHA_STALL) \
-			+ 0.30 * _flap_position
+			+ CL_FLAPS * _flap_position
 		stalled = absf(alpha) > ALPHA_STALL and not grounded
 		if stalled:
 			cl *= clampf(1.0 - (absf(alpha) - ALPHA_STALL) * 2.4, 0.25, 1.0)
@@ -257,6 +266,10 @@ func _simulate(dt: float) -> void:
 		stalled = false
 	if grounded:
 		_apply_ground_run_stability()
+	elif driver and absf(_pitch_input) > 0.04:
+		# Easy keyboard flight keeps the selected compass heading as well as the
+		# requested pitch. Mouse yaw and A/D still deliberately change that heading.
+		_apply_heading_hold(10.0, 5.0)
 
 	_warn_stall(dt)
 	if grounded and not _was_grounded and driver:
@@ -272,6 +285,15 @@ func _simulate(dt: float) -> void:
 ## damp yaw, and keep the wings level until rotation. Manual A/D progressively
 ## releases heading hold, preserving deliberate taxi steering.
 func _apply_ground_run_stability() -> void:
+	_apply_heading_hold(18.0, 7.0)
+	var forward_axis := global_basis.z.normalized()
+	var level_axis := global_basis.y.normalized().cross(Vector3.UP)
+	var roll_error := level_axis.dot(forward_axis)
+	var roll_rate := angular_velocity.dot(forward_axis)
+	apply_torque(forward_axis * mass * (roll_error * 9.8 - roll_rate * 4.0))
+
+
+func _apply_heading_hold(error_gain: float, damping_gain: float) -> void:
 	var flat_forward := Vector3(global_basis.z.x, 0.0, global_basis.z.z)
 	var flat_aim := Vector3(_aim.x, 0.0, _aim.z)
 	if flat_forward.length_squared() > 0.001 \
@@ -281,13 +303,8 @@ func _apply_ground_run_stability() -> void:
 		var heading_error := flat_forward.signed_angle_to(flat_aim, Vector3.UP)
 		var heading_hold := 1.0 - absf(input_steer)
 		var yaw_rate := angular_velocity.dot(Vector3.UP)
-		apply_torque(Vector3.UP * mass * (heading_error * 12.0 * heading_hold
-			- yaw_rate * 5.0))
-	var forward_axis := global_basis.z.normalized()
-	var level_axis := global_basis.y.normalized().cross(Vector3.UP)
-	var roll_error := level_axis.dot(forward_axis)
-	var roll_rate := angular_velocity.dot(forward_axis)
-	apply_torque(forward_axis * mass * (roll_error * 9.8 - roll_rate * 4.0))
+		apply_torque(Vector3.UP * mass * (heading_error * error_gain * heading_hold
+			- yaw_rate * damping_gain))
 
 
 ## Fly-by-wire pursuit of the camera aim: roll to put the target in the pull
@@ -295,7 +312,10 @@ func _apply_ground_run_stability() -> void:
 ## exactly like a real FBW jet protects itself. A/D add manual roll.
 func _apply_flight_controls(dt: float, q: float, grounded: bool,
 		beta: float) -> void:
-	var authority := clampf(q / 18000.0, 0.0, 1.0)
+	# Control-surface moment already scales with q below. A low dynamic-pressure
+	# response curve keeps taxi inputs gentle without the old q-squared suppression
+	# that made the elevator nearly powerless throughout a normal takeoff roll.
+	var authority := clampf(q / CONTROL_AUTHORITY_Q, 0.0, 1.0)
 	if grounded:
 		authority *= clampf(speed() / 65.0, 0.0, 1.0)
 	var local_aim := global_basis.inverse() * _aim
@@ -304,7 +324,13 @@ func _apply_flight_controls(dt: float, q: float, grounded: bool,
 	var pitch_error := atan2(local_aim.y,
 		maxf(local_aim.z, 0.05))
 	var roll_error := 0.0
-	if not grounded:
+	if not grounded and absf(_pitch_input) > 0.04:
+		# Arrow-pitch mode is intentionally self-contained: hold the wings level
+		# unless A/D is also pressed instead of letting a stale mouse aim bank the
+		# aircraft underneath a keyboard-commanded climb.
+		roll_error = clampf(
+			global_basis.get_euler(EULER_ORDER_YXZ).z * 1.4, -1.0, 1.0)
+	elif not grounded:
 		var pull_magnitude := Vector2(local_aim.x, local_aim.y).length()
 		if pull_magnitude > 0.04 and absf(pitch_error) < 1.2:
 			roll_error = atan2(local_aim.x, maxf(local_aim.y, 0.02)) \
@@ -315,7 +341,27 @@ func _apply_flight_controls(dt: float, q: float, grounded: bool,
 	roll_error = clampf(roll_error - _roll_override * 2.2, -3.2, 3.2)
 
 	# Limiters: never command past the AoA limit or the G ceiling.
+	# Arrow pitch is direct and predictable even when the chase camera is looking
+	# elsewhere. Releasing both arrows hands control back to mouse pursuit.
 	var pitch_cmd := clampf(pitch_error * 2.2, -1.0, 1.0)
+	if absf(_pitch_input) > 0.04:
+		if grounded:
+			pitch_cmd = _pitch_input
+		else:
+			# Keyboard pitch is an assisted attitude command. A raw held elevator
+			# input kept pulling until the jet exchanged all of its airspeed for a
+			# stall; Up/Down now settle at useful climb/descent attitudes and are
+			# therefore comfortable to hold. Mouse pursuit remains the unrestricted
+			# precision control for aerobatics.
+			var aircraft_pitch := asin(clampf(global_basis.z.y, -1.0, 1.0))
+			var target_pitch := ASSISTED_CLIMB_PITCH \
+				if _pitch_input > 0.0 else ASSISTED_DESCENT_PITCH
+			pitch_cmd = clampf((target_pitch - aircraft_pitch) * 5.0,
+				-1.0, 1.0) * absf(_pitch_input)
+	if grounded and pitch_cmd > 0.0:
+		var aircraft_pitch := asin(clampf(global_basis.z.y, -1.0, 1.0))
+		pitch_cmd = minf(pitch_cmd,
+			clampf((TAKEOFF_PITCH_LIMIT - aircraft_pitch) * 7.0, 0.0, 1.0))
 	if alpha > ALPHA_LIMIT and pitch_cmd > 0.0:
 		pitch_cmd = minf(pitch_cmd, (ALPHA_LIMIT - alpha) * 8.0)
 	if alpha < -ALPHA_LIMIT * 0.6 and pitch_cmd < 0.0:
@@ -328,7 +374,14 @@ func _apply_flight_controls(dt: float, q: float, grounded: bool,
 	# above are in "aim" terms (positive = nose up / bank right), so pitch and
 	# roll negate at application; coordination chases beta with +Y.
 	var rates := global_basis.inverse() * angular_velocity
-	var pitch_torque := (-pitch_cmd * 2.1 - rates.x * 2.9) \
+	# On the runway the stabilators must rotate the airframe about the main gear,
+	# not merely its free-flight centre of mass. Use their realistic high-deflection
+	# takeoff authority until the wheels unload, with extra rate damping so holding
+	# Up produces one smooth rotation instead of a pitch jerk. Airborne response
+	# remains deliberately softer for easy formation and landing control.
+	var pitch_gain := 14.0 if grounded else 2.1
+	var pitch_damping := 8.0 if grounded else 2.9
+	var pitch_torque := (-pitch_cmd * pitch_gain - rates.x * pitch_damping) \
 		* q * WING_AREA * CHORD * 0.052 * authority
 	var roll_torque := (-clampf(roll_error, -1.0, 1.0) * 2.6 - rates.z * 2.1) \
 		* q * WING_AREA * WING_SPAN * 0.012 * authority

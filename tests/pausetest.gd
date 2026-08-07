@@ -18,7 +18,7 @@ func run(main) -> void:
 		"solo pause freezes the world on an always-processing menu layer")
 	_check(Input.mouse_mode == Input.MOUSE_MODE_VISIBLE,
 		"pause releases the cursor")
-	_check(main.pause_menu._binding_buttons.size() == 24,
+	_check(main.pause_menu._binding_buttons.size() == 26,
 		"controls page exposes every player-facing keyboard and mouse action")
 	_check(AudioServer.get_bus_index(&"SFX") >= 0 \
 		and AudioServer.get_bus_index(&"Ambience") >= 0 \
@@ -26,8 +26,13 @@ func run(main) -> void:
 		"separate effects, ambience, and voice buses are available")
 	_check(not Settings.binding_text(&"shoot").is_empty() \
 		and not Settings.binding_text(&"move_fwd").is_empty() \
-		and not Settings.binding_text(&"push_to_talk").is_empty(),
+		and not Settings.binding_text(&"push_to_talk").is_empty() \
+		and not Settings.binding_text(&"vehicle_pitch_up").is_empty() \
+		and not Settings.binding_text(&"vehicle_pitch_down").is_empty(),
 		"saved key and mouse bindings have readable labels")
+	_check(_has_key_binding(&"vehicle_pitch_up", KEY_UP) \
+		and _has_key_binding(&"vehicle_pitch_down", KEY_DOWN),
+		"jet nose controls default to the Up and Down arrow keys")
 
 	var escape := InputEventKey.new()
 	escape.keycode = KEY_ESCAPE
@@ -70,3 +75,10 @@ func _check(condition: bool, label: String) -> void:
 		print("  [ok] " + label)
 	else:
 		print("  [FAIL] " + label)
+
+
+func _has_key_binding(action: StringName, key: Key) -> bool:
+	for event in InputMap.action_get_events(action):
+		if event is InputEventKey and event.physical_keycode == key:
+			return true
+	return false

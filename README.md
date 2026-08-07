@@ -218,10 +218,11 @@ jet mid-air if you must):
 |---|---|---|
 | W / S | bike/jeep throttle / brake (hold S stopped to reverse the jeep) · airboat fan / fan chop | throttle setpoint up / down |
 | A / D | steer (the bike leans itself into the corner) | roll (nosewheel steering on the runway) |
-| mouse | free look | **fly-by-wire pursuit** — the jet banks and pulls toward your aim, limited to 9 g / 25° AoA |
+| ↑ / ↓ | — | **nose up / nose down** — hold ↑ with W for an easy takeoff |
+| mouse | free look | optional precision **fly-by-wire pursuit** — the jet banks and pulls toward your aim, limited to 9 g / 25° AoA |
 | SPACE | handbrake (bike: rear-brake slide) | airbrake |
 | SHIFT | bike: tuck (that's where 110 mph lives) · jeep: low-range toggle | afterburner |
-| CTRL | — | wheel brakes |
+| CTRL | bike: pop a short controlled wheelie | wheel brakes |
 | G / F | — | landing gear / flaps |
 | C | cycle chase / cockpit / front camera | same — front view never reverses the flight-control aim |
 
@@ -356,13 +357,15 @@ hold SHIFT for a stronger stroke.
 - Wheel raycasts fall back to the analytic `Gen.height` field when chunk
   colliders haven't streamed yet, so a jet at 313 m/s can outrun the
   streaming ring without ever falling through the world.
-- The motorcycle's balance is the *outcome* of counter-steering: a
-  speed-scaled roll controller drives the machine to the kinematically exact
+- The motorcycle's balance is the *outcome* of counter-steering: corrected
+  A/D steering and matching camber thrust now lean and turn into the same side;
+  a speed-scaled roll controller drives the machine to the kinematically exact
   corner lean `atan(v²/Rg)`, camber thrust pushes the contact patches around
   the corner, a "feet down" stabilizer holds it below walking pace, and
   sliding both patches past recovery lowsides the rider off. Pitch damping
-  and an anti-loop throttle instinct shape wheelies; the forks and swingarm
-  visually stroke with their wheels.
+  and an anti-loop throttle instinct shape wheelies. CTRL adds a brief
+  balance-point wheelie assist and reduces steering while the front is raised;
+  the forks and swingarm visually stroke with their wheels.
 - The jet flies on `q = ½ρv²`: lift slope 3.8/rad to a 24° stall,
   induced + gear + flap + airbrake drag, and a wave-drag wall past Mach 0.88
   that pins sea-level top speed at ~313 m/s (700 mph). Static pitch/yaw
@@ -529,6 +532,7 @@ godot --path . res://scenes/main.tscn -- shot airstrip /tmp/airstrip.png
 godot --path . res://scenes/main.tscn -- shot debug-vehicles /tmp/vehicles.png
 godot --path . res://scenes/main.tscn -- shot debug-jet /tmp/jet.png
 godot --path . res://scenes/main.tscn -- shot debug-ride /tmp/ride.png
+godot --path . res://scenes/main.tscn -- shot debug-dashboard /tmp/dashboard.png
 # deterministic two-second locomotion frame review (play, first, side, or front):
 godot --resolution 960x540 --path . res://scenes/main.tscn -- shot clip-sprint-first /tmp/sprint.png
 godot --resolution 960x540 --path . res://scenes/main.tscn -- shot clip-swim-first /tmp/swim.png

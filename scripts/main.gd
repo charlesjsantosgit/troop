@@ -239,6 +239,8 @@ func _register_inputs() -> void:
 	_add_key("minimap_zoom_in", KEY_BRACKETRIGHT)
 	_add_key("vehicle_gear", KEY_G)
 	_add_key("vehicle_flaps", KEY_F)
+	_add_key("vehicle_pitch_up", KEY_UP)
+	_add_key("vehicle_pitch_down", KEY_DOWN)
 
 
 func _add_key(action: String, key: Key) -> void:
@@ -1487,6 +1489,23 @@ func _do_debug_shot(what: String, out: String) -> void:
 				+ ride.global_basis * Vector3(0, 0.7, 2.0))
 			cam.make_current()
 			for i in range(8):
+				await get_tree().process_frame
+		"debug-dashboard":
+			# Integrated instrument regression: the real mounted-player HUD at a
+			# stable, unmistakable mid-dial Jeep reading.
+			world.set_time_of_day_override(12.0)
+			var dashboard_jeep := world.vehicle_by_id("v:debug#jeep")
+			p.enter_vehicle(dashboard_jeep)
+			for i in range(12):
+				await get_tree().physics_frame
+			dashboard_jeep.set_physics_process(false)
+			dashboard_jeep.linear_velocity = dashboard_jeep.global_basis.z * 22.35
+			dashboard_jeep.angular_velocity = Vector3.ZERO
+			dashboard_jeep.engine.gear = 3
+			for i in range(12):
+				dashboard_jeep.engine.rpm = 3200.0
+				if hud:
+					hud._update_vehicle_cluster()
 				await get_tree().process_frame
 	if what != "debug-wings" and what != "debug-course" \
 			and what != "debug-vehicles" and what != "debug-ride" \

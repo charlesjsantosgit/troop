@@ -15,11 +15,21 @@ const REAR_RADIUS := 0.315
 const RAKE := 0.45                    # steering-head angle, rad (~26 deg)
 const MAX_LEAN := 0.83                # ~48 deg on knobbies
 const LOWSIDE_LEAN_ERROR := 0.55
+const WHEELIE_DURATION := 1.20
+const WHEELIE_COOLDOWN := 1.65
+const WHEELIE_TARGET_PITCH := -0.39   # ~22° balance-point target
+const WHEELIE_STEER_SCALE := 0.15
+const WHEELIE_MIN_SPEED := 4.0
+const WHEELIE_MAX_SPEED := 34.0
+const MAX_ASSISTED_LEAN := 0.66       # ~38°: quick without a snap lowside
 
 var lean_target := 0.0
 var _lean_integral := 0.0
 var _tuck := 0.0                      # 0 upright .. 1 full tuck (SHIFT)
 var _lowside_t := 0.0
+var wheelie_remaining := 0.0
+var _wheelie_elapsed := 0.0
+var _wheelie_cooldown := 0.0
 var _steer_head: Node3D
 var _front_fork_tubes: Array[MeshInstance3D] = []
 var _front_sliders: Array[MeshInstance3D] = []
@@ -39,7 +49,7 @@ func _init() -> void:
 	center_of_mass = Vector3(0, -0.02, 0.02)
 	drag_area = 0.55
 	max_steer_angle = 0.62
-	steer_speed = 4.2
+	steer_speed = 4.5
 	seat_offset = Vector3(0, 0.62, -0.18)
 	# Rig origin that puts the 0.48 m seated pelvis directly into the saddle.
 	rider_root_offset = Vector3(0, 0.21, -0.12)
@@ -137,9 +147,48 @@ func _total_brake_torque() -> float:
 	return 1350.0
 
 
+func set_driver_view(_aim: Vector3, inp: Dictionary) -> void:
+	# Ctrl is contextual: crouch/dive on foot, jet wheel brakes in the fighter,
+	# and a one-shot balance-point assist on the motorcycle.
+	if bool(inp.get("crouch_just", false)) and _wheelie_cooldown <= 0.0 \
+			and driver != null and forward_speed() >= WHEELIE_MIN_SPEED \
+			and forward_speed() <= WHEELIE_MAX_SPEED \
+			and wheels[1].in_contact \
+			and global_basis.y.y > 0.75 \
+			and global_basis.get_euler(EULER_ORDER_YXZ).x > -0.12:
+		wheelie_remaining = WHEELIE_DURATION
+		_wheelie_elapsed = 0.0
+		_wheelie_cooldown = WHEELIE_COOLDOWN
+
+
+func wheelie_active() -> bool:
+	return wheelie_remaining > 0.0
+
+
+func _advance_steering(dt: float) -> void:
+	# A motorcycle needs only a few degrees of bar angle once moving; the prior
+	# car-oriented 9.5/v lock could rotate the bike more than 90° in one second.
+	# This speed curve stays responsive while producing a readable, controllable
+	# arc instead of an instant pivot.
+	var v := absf(forward_speed())
+	var speed_lock := clampf(1.35 / maxf(v, 2.0), 0.02, 1.0)
+	_steer_target = input_steer * max_steer_angle * speed_lock
+	_steer_current = move_toward(_steer_current, _steer_target,
+		steer_speed * max_steer_angle * dt)
+	for wheel in wheels:
+		if wheel.steerable:
+			wheel.steer_angle = _steer_current
+
+
 func _simulate(dt: float) -> void:
 	_tuck = move_toward(_tuck, 1.0 if input_aux else 0.0, 3.0 * dt)
 	drag_area = lerpf(0.55, 0.40, _tuck)
+	_wheelie_cooldown = maxf(_wheelie_cooldown - dt, 0.0)
+	var unscaled_steer := input_steer
+	if wheelie_active():
+		# A raised front contact cannot generate normal steering force. Keep a small
+		# amount of rider body English, but prevent sharp airborne direction changes.
+		input_steer *= WHEELIE_STEER_SCALE
 	# Paddle backward at a stop: no reverse gear on a bike, just monkey feet.
 	if driver and input_brake > 0.4 and speed() < 0.9 \
 			and _wheels_grounded() == 2:
@@ -150,6 +199,8 @@ func _simulate(dt: float) -> void:
 	if anti_loop_active():
 		input_throttle = 0.0
 	super(dt)
+	input_steer = unscaled_steer
+	_advance_wheelie(dt)
 	_advance_lean(dt)
 	_check_lowside(dt)
 
@@ -166,6 +217,26 @@ func _wheels_grounded() -> int:
 		if wheel.in_contact:
 			n += 1
 	return n
+
+
+## A short PD attitude assist represents the monkey shifting rearward and
+## feeding power to the balance point. It eases both in and out, remains below
+## the anti-loop cutoff, and leaves tire contact/landing to the rigid body.
+func _advance_wheelie(dt: float) -> void:
+	if not wheelie_active() or driver == null:
+		wheelie_remaining = 0.0 if driver == null else wheelie_remaining
+		return
+	_wheelie_elapsed = minf(_wheelie_elapsed + dt, WHEELIE_DURATION)
+	wheelie_remaining = maxf(WHEELIE_DURATION - _wheelie_elapsed, 0.0)
+	var phase := _wheelie_elapsed / WHEELIE_DURATION
+	var envelope := smoothstep(0.0, 0.18, phase) \
+		* (1.0 - smoothstep(0.70, 1.0, phase))
+	var target_pitch := WHEELIE_TARGET_PITCH * envelope
+	var pitch := global_basis.get_euler(EULER_ORDER_YXZ).x
+	var pitch_rate := angular_velocity.dot(global_basis.x)
+	var command := clampf((target_pitch - pitch) * 20.0
+		- pitch_rate * 5.0, -6.0, 6.0)
+	apply_torque(global_basis.x * command * mass)
 
 
 ## The rider's balance. A bike stays up because steering places the contact
@@ -188,11 +259,16 @@ func _advance_lean(dt: float) -> void:
 	# Kinematic corner radius from the front wheel's steer angle.
 	var effective_steer := _steer_current
 	var curvature := tan(effective_steer) / (WHEELBASE_FRONT - WHEELBASE_REAR)
-	var desired_lean := clampf(atan(v * v * curvature / 9.8),
-		-MAX_LEAN, MAX_LEAN) if absf(v) > 0.5 else 0.0
+	# With local +Z forward, positive steer is vehicle-left but a left bank is
+	# negative Z roll. The old same-sign lean banked away from its tire path,
+	# making A/D feel inverted and cancelling much of the corner force.
+	var desired_lean := clampf(-atan(v * v * curvature / 9.8),
+		-MAX_ASSISTED_LEAN, MAX_ASSISTED_LEAN) if absf(v) > 0.5 else 0.0
+	if wheelie_active():
+		desired_lean *= WHEELIE_STEER_SCALE
 	# A rider first counter-steers and then settles into the bank; an immediate
 	# 48-degree command made a full-speed A/D tap behave like a crash impulse.
-	lean_target = move_toward(lean_target, desired_lean, 1.1 * dt)
+	lean_target = move_toward(lean_target, desired_lean, 0.90 * dt)
 	# At walking pace the rider simply holds it upright with their feet.
 	var authority := lerpf(26.0, 15.0,
 		clampf(absf(v) / 14.0, 0.0, 1.0))
@@ -203,21 +279,37 @@ func _advance_lean(dt: float) -> void:
 		authority = 4.0   # airborne body English only
 	var error := angle_difference(roll, lean_target)
 	var roll_rate := angular_velocity.dot(global_basis.z)
-	apply_torque(global_basis.z * (error * authority - roll_rate * authority
-		* 0.32) * mass * 0.62)
+	var roll_command := clampf(error * authority - roll_rate * authority
+		* 0.32, -10.0, 10.0)
+	apply_torque(global_basis.z * roll_command * mass * 0.62)
 	# Camber thrust: leaned motorcycle tires push the bike around the corner
 	# even before slip angles build. Both contacts, proportional to load.
 	if grounded:
 		for wheel in wheels:
 			if not wheel.in_contact:
 				continue
-			var side := global_basis.x
-			apply_force(side * -sin(roll) * wheel.load * 0.88,
+			# Camber thrust acts in the road plane. Using the raw rolled chassis X
+			# axis injected a downward force while banked and duplicated almost a
+			# full tire's grip outside the friction ellipse.
+			var side := global_basis.x - wheel.contact_normal \
+				* global_basis.x.dot(wheel.contact_normal)
+			if side.length_squared() < 0.001:
+				continue
+			side = side.normalized()
+			var wheelie_corner_scale := WHEELIE_STEER_SCALE \
+				if wheelie_active() else 1.0
+			# Bottom-out loads can spike for one integration step. Tire cornering
+			# already observes that transient load; cap the authored camber assist
+			# to keep a hard landing from becoming an unbounded sideways launch.
+			var supported_load := minf(wheel.load, mass * 9.8 * 0.85)
+			apply_force(side * -sin(roll) * supported_load * 0.20 \
+				* wheelie_corner_scale,
 				wheel.contact_point - global_position)
 	# Rider pitch damping: soften wheelie/stoppie rotation like a real body
 	# hanging off the pegs, and close the throttle past the balance point.
 	var pitch_rate := angular_velocity.dot(global_basis.x)
-	apply_torque(-global_basis.x * pitch_rate * mass * 0.85)
+	apply_torque(-global_basis.x * clampf(pitch_rate, -8.0, 8.0)
+		* mass * 0.85)
 
 
 ## Sliding out both contact patches while leaned past recovery is a lowside:
