@@ -202,6 +202,14 @@ func set_aiming(enabled: bool) -> void:
 		_zero_movement_output()
 
 
+## The world stretches the far plane with player altitude (up to a 15-mile
+## view). Fixture cameras manage their own far settings; this only drives the
+## live gameplay camera.
+func set_far_distance(distance: float) -> void:
+	if _cam:
+		_cam.far = clampf(distance, 1200.0, 30000.0)
+
+
 func set_sensitivity(multiplier: float) -> void:
 	sensitivity_multiplier = clampf(multiplier, 0.25, 2.5)
 

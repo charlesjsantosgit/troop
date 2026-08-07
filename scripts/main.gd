@@ -116,7 +116,14 @@ func _ready() -> void:
 		"perftest":
 			mode = "perftest"
 			_start_solo("PerfMonkey", 2026, 2)
-			if args.size() > 1 and str(args[1]).to_lower() == "night":
+			if args.size() > 1 and str(args[1]).to_lower() == "altitude":
+				# Peak-view benchmark: fly high over the world so the far
+				# plane stretches to the full 15-mile horizon while moving.
+				world.set_time_of_day_override(12.0)
+				var flyer := world.local_player
+				flyer.set_fly_mode(true)
+				flyer.admin_teleport(Vector3(0, 120, 0))
+			elif args.size() > 1 and str(args[1]).to_lower() == "night":
 				world.set_season_override(SeasonalCycle.Season.SUMMER)
 				world.set_time_of_day_override(0.0)
 			elif args.size() > 1 and str(args[1]).to_lower() == "spring":
@@ -215,6 +222,9 @@ func _register_inputs() -> void:
 	_add_key("camera_mode", KEY_C)
 	_add_key("chat", KEY_ENTER)
 	_add_key("admin_panel", KEY_F8)
+	_add_key("minimap", KEY_M)
+	_add_key("minimap_zoom_out", KEY_BRACKETLEFT)
+	_add_key("minimap_zoom_in", KEY_BRACKETRIGHT)
 
 
 func _add_key(action: String, key: Key) -> void:
@@ -840,7 +850,8 @@ func _show_menu() -> void:
 	setup_column.add_child(setup_head)
 
 	name_edit = LineEdit.new()
-	name_edit.text = _rand_name()
+	name_edit.text = Settings.player_name \
+		if not Settings.player_name.is_empty() else _rand_name()
 	name_edit.placeholder_text = "Choose a name"
 	name_edit.add_theme_stylebox_override("normal", _menu_input_style())
 	name_edit.add_theme_stylebox_override("focus", _menu_input_style(true))
@@ -1108,8 +1119,13 @@ func _refresh_menu_scale() -> void:
 
 
 func _pname() -> String:
-	var n := name_edit.text.strip_edges() if name_edit else ""
-	return n if n != "" else _rand_name()
+	var chosen := name_edit.text.strip_edges() if name_edit else ""
+	if chosen.is_empty():
+		chosen = Settings.player_name \
+			if not Settings.player_name.is_empty() else _rand_name()
+	Settings.set_player_name(chosen)
+	Settings.save()
+	return chosen
 
 
 func _close_menu() -> void:
@@ -1206,6 +1222,19 @@ func _unhandled_input(e: InputEvent) -> void:
 			hud.show_camera_mode(_camera_mode_preference)
 		get_viewport().set_input_as_handled()
 		return
+	if world and menu == null and not pause_menu and hud and hud.minimap:
+		if e.is_action_pressed("minimap"):
+			hud.minimap.cycle_size()
+			get_viewport().set_input_as_handled()
+			return
+		if e.is_action_pressed("minimap_zoom_in"):
+			hud.minimap.zoom_step(1)
+			get_viewport().set_input_as_handled()
+			return
+		if e.is_action_pressed("minimap_zoom_out"):
+			hud.minimap.zoom_step(-1)
+			get_viewport().set_input_as_handled()
+			return
 	if e.is_action_pressed("chat") and world and menu == null \
 			and not pause_menu and chat_box and not chat_box.is_open() \
 			and (not admin_panel or not admin_panel.visible) \
@@ -2229,6 +2258,29 @@ func _do_shot(args: Array) -> void:
 		print("BIOME_VISTA %s position=(%.1f,%.1f) horizon=%.0fm" % [
 			Gen.biome_name(requested_biome), vista.x, vista.z,
 			Gen.HORIZON_DISTANCE])
+	elif what == "highview":
+		# The 15-mile shot: fly high, let the far plane and stratos ring grow
+		# in, then frame the horizon with the HUD (and minimap) visible.
+		world.set_season_override(SeasonalCycle.Season.SUMMER)
+		world.set_time_of_day_override(12.5)
+		var p := world.local_player
+		p.test_mode = true
+		p.set_fly_mode(true)
+		p.admin_teleport(Vector3(0, 115.0, 0))
+		for i in range(760):
+			await get_tree().process_frame
+		var peak := Vector3.ZERO
+		for gx in range(-21, 22):
+			for gz in range(-21, 22):
+				var h := Gen.height(float(gx) * 96.0, float(gz) * 96.0)
+				if h > peak.y:
+					peak = Vector3(float(gx) * 96.0, h, float(gz) * 96.0)
+		cam.fov = 62.0
+		cam.far = 30000.0
+		cam.global_position = p.global_position + Vector3(0, 2.0, 0)
+		cam.look_at(Vector3(peak.x, 40.0, peak.z))
+		print("HIGHVIEW far=%.0f stratos=%d" % [world.current_view_distance,
+			world.stratos_chunks.size()])
 	elif what == "mountains":
 		# Find the tallest peak within skyline range, stand in its foothills,
 		# and frame the range: verifies ridged relief, snow bands, and the

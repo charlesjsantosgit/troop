@@ -729,6 +729,17 @@ static func far_ground_material() -> ShaderMaterial:
 	return _shared.far_ground
 
 
+## Fourth-tier stratos material: same shader again, handoff pushed inside the
+## skyline ring with a very wide dither band to match its 192 m cells.
+static func stratos_ground_material() -> ShaderMaterial:
+	if not _shared.has("stratos_ground"):
+		_shared.stratos_ground = _material(FAR_GROUND_SHADER,
+			{"near_fade": Gen.STRATOS_NEAR_FADE,
+				"fade_band": 220.0,
+				"snow_amount": _snow_amount})
+	return _shared.stratos_ground
+
+
 ## Ultra-far skyline tier: the same shader as the horizon shell but with its
 ## dithered handoff pushed out to the horizon-ring edge and widened to match
 ## the 48 m skyline cells, so mountain silhouettes take over seamlessly.
@@ -767,7 +778,8 @@ static func set_far_focus(position: Vector3) -> void:
 		return
 	_far_focus = focus
 	for material in [far_ground_material(), far_jungle_material(),
-			far_water_material(), skyline_ground_material()]:
+			far_water_material(), skyline_ground_material(),
+			stratos_ground_material()]:
 		material.set_shader_parameter("focus_xz", focus)
 
 
@@ -780,7 +792,8 @@ static func set_season(season: SeasonalCycle.Season) -> void:
 	_snow_amount = 1.0 if season == SeasonalCycle.Season.WINTER else 0.0
 
 	for material in [ground_material(), trunk_material(), grass_material(),
-			rock_material(), far_ground_material(), skyline_ground_material()]:
+			rock_material(), far_ground_material(), skyline_ground_material(),
+			stratos_ground_material()]:
 		material.set_shader_parameter("snow_amount", _snow_amount)
 	for material in [foliage_lod_material(), far_jungle_material()]:
 		_apply_foliage_season(material)

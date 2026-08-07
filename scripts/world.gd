@@ -4,6 +4,7 @@ extends Node3D
 
 const HorizonChunkScript = preload("res://scripts/horizon_chunk.gd")
 const SkylineChunkScript = preload("res://scripts/skyline_chunk.gd")
+const StratosChunkScript = preload("res://scripts/stratos_chunk.gd")
 const FriendlyMonkeyScript = preload("res://scripts/friendly_monkey.gd")
 
 signal combat_score_changed
@@ -42,6 +43,12 @@ var skyline_chunks: Dictionary = {}  # Vector2i -> SkylineChunk mountain vista
 var _skyline_queue: Array = []
 var _skyline_pending: Dictionary = {}
 var _skyline_center := Vector2i(0x3fffffff, 0x3fffffff)
+var stratos_chunks: Dictionary = {}  # Vector2i -> StratosChunk (altitude tier)
+var _stratos_queue: Array = []
+var _stratos_center := Vector2i(0x3fffffff, 0x3fffffff)
+var _stratos_ring := -1
+var current_view_distance := Gen.VIEW_BASE_DISTANCE
+var _altitude_quality_low := false
 var _stream_center := Vector2i(0x3fffffff, 0x3fffffff)
 var _prefetch_center := Vector2i(0x3fffffff, 0x3fffffff)
 var _horizon_center := Vector2i(0x3fffffff, 0x3fffffff)
@@ -145,6 +152,7 @@ func build() -> void:
 	env.adjustment_brightness = 0.96
 	env.adjustment_contrast = 1.13
 	env.adjustment_saturation = 1.08
+	Visuals.stratos_ground_material()
 	var we := WorldEnvironment.new()
 	we.environment = env
 	add_child(we)
@@ -849,6 +857,23 @@ func _update_biome_ambience(dt: float) -> void:
 				_biome_fog_target = Color(0.43, 0.61, 0.43)
 				_biome_density_target = 0.00100
 				_biome_saturation_target = 1.08
+	# Altitude buys horizon: fog thins as the far plane stretches so distant
+	# sectors materialize inside haze (seamless), and near-field quality that
+	# is invisible from the air steps down to pay for the extra kilometres.
+	var altitude: float = local_player.global_position.y
+	var target_far := Gen.view_distance_for_altitude(altitude)
+	current_view_distance = lerpf(current_view_distance, target_far,
+		1.0 - exp(-0.55 * dt))
+	if local_player.cam:
+		local_player.cam.set_far_distance(current_view_distance * 1.15)
+	if altitude > 50.0 and not _altitude_quality_low:
+		_altitude_quality_low = true
+		_sun.directional_shadow_max_distance = 45.0
+		_environment.ssao_enabled = false
+	elif altitude < 40.0 and _altitude_quality_low:
+		_altitude_quality_low = false
+		_sun.directional_shadow_max_distance = 70.0
+		_environment.ssao_enabled = true
 	var night_fog := Color(0.055, 0.075, 0.13)
 	var fog_target := night_fog.lerp(_biome_fog_target,
 		0.16 + daylight_amount * 0.84)
@@ -869,7 +894,7 @@ func _update_biome_ambience(dt: float) -> void:
 	_environment.fog_light_color = _environment.fog_light_color.lerp(
 		fog_target, 1.0 - exp(-0.42 * dt))
 	_environment.fog_density = lerpf(_environment.fog_density,
-		_biome_density_target * density_multiplier,
+		minf(_biome_density_target, 3.2 / current_view_distance) * density_multiplier,
 		1.0 - exp(-0.42 * dt))
 	_environment.adjustment_saturation = lerpf(
 		_environment.adjustment_saturation,
@@ -994,6 +1019,14 @@ func _stream(budget: int) -> void:
 	var sc := center_skyline_sector()
 	if sc != _skyline_center:
 		_refresh_skyline_targets(sc)
+	var stratos_sector_size := Gen.CHUNK * Gen.STRATOS_SECTOR_CHUNKS
+	var player_pos := local_player.global_position if local_player \
+		else Vector3.ZERO
+	var stc := Vector2i(floori(player_pos.x / stratos_sector_size),
+		floori(player_pos.z / stratos_sector_size))
+	var ring := clampi(ceili(current_view_distance / stratos_sector_size), 1, 4)
+	if stc != _stratos_center or ring != _stratos_ring:
+		_refresh_stratos_targets(stc, ring)
 	var did_heavy_work := false
 	if not _queue.is_empty():
 		var n := mini(budget, _queue.size())
@@ -1057,6 +1090,17 @@ func _stream(budget: int) -> void:
 				_chunk_detail_queue.append(detail_chunk)
 			did_heavy_work = true
 			break
+
+	# Stratos altitude sectors: only queued while elevation demands them;
+	# each is one mesh, so a single build token per frame fills the ring fast.
+	if not did_heavy_work and not _stratos_queue.is_empty():
+		var stk: Vector2i = _stratos_queue.pop_front()
+		if not stratos_chunks.has(stk):
+			var sector: Node3D = StratosChunkScript.new()
+			add_child(sector)
+			sector.setup(stk)
+			stratos_chunks[stk] = sector
+			did_heavy_work = true
 
 	# Skyline mountain sectors: huge, rare, and purely scenic. They outrank the
 	# horizon's decorative tree silhouettes so distant ranges appear promptly,
@@ -1182,6 +1226,28 @@ func _refresh_horizon_targets(hc: Vector2i) -> void:
 		_horizon_detail_queue.erase(sector)
 		sector.queue_free()
 		horizon_chunks.erase(k)
+
+
+func _refresh_stratos_targets(stc: Vector2i, ring: int) -> void:
+	_stratos_center = stc
+	_stratos_ring = ring
+	_stratos_queue.clear()
+	for dx in range(-ring, ring + 1):
+		for dz in range(-ring, ring + 1):
+			var k := stc + Vector2i(dx, dz)
+			if not stratos_chunks.has(k):
+				_stratos_queue.append(k)
+	_stratos_queue.sort_custom(func(a, b):
+		return Vector2(a - stc).length_squared() \
+			< Vector2(b - stc).length_squared())
+	var dead: Array = []
+	for k in stratos_chunks:
+		var d: Vector2i = (k - stc).abs()
+		if maxi(d.x, d.y) > ring + 1:
+			dead.append(k)
+	for k in dead:
+		stratos_chunks[k].queue_free()
+		stratos_chunks.erase(k)
 
 
 func _refresh_skyline_targets(sc: Vector2i) -> void:
