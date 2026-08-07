@@ -62,7 +62,27 @@ const BIOME_NAMES := {
 	Biome.HIGHLAND: "Cloud Highland",
 }
 
+const AIRSTRIP_LENGTH := 420.0
+const AIRSTRIP_WIDTH := 26.0
+const AIRSTRIP_APRON_RADIUS := 30.0
+const AIRSTRIP_BLEND := 30.0
+
 var world_seed: int = 1337
+# Deterministic bush airstrip: a per-seed search picks the flattest,
+# driest, least mountainous strip corridor near the origin, then the height
+# field grades a 420 m runway plus parking apron into the jungle. Every
+# client computes the identical placement from the seed alone.
+var airstrip_valid := false
+var airstrip_center := Vector2.ZERO
+var airstrip_heading := 0.0
+var airstrip_elevation := 4.0
+var _strip_dir := Vector2.RIGHT
+var _strip_perp := Vector2.DOWN
+var _strip_bounds := Rect2()
+# Deterministic lakeside boat dock nearest the origin.
+var boat_dock_valid := false
+var boat_dock_pos := Vector3.ZERO
+var boat_dock_yaw := 0.0
 # Debug playground: a flat plane with no procedural content, used by the
 # `debugworld` mode. Layout math short-circuits so streaming stays cheap and
 # the authored parkour/range props own the space.
@@ -126,6 +146,124 @@ func setup(seed_v: int) -> void:
 	_n_mountain_mask.seed = seed_v + 909
 	_n_mountain_mask.noise_type = FastNoiseLite.TYPE_SIMPLEX_SMOOTH
 	_n_mountain_mask.frequency = 0.00042
+	_locate_airstrip()
+	_locate_boat_dock()
+
+
+## Score candidate runway corridors around the origin and keep the driest,
+## flattest, least mountainous one. Pure noise-field math: every peer lands on
+## the same strip for a given seed. airstrip_valid stays false during the
+## search so the sampled heights are the raw, ungraded terrain.
+func _locate_airstrip() -> void:
+	airstrip_valid = false
+	if debug_world:
+		return
+	var best_score := INF
+	var best_center := Vector2.ZERO
+	var best_heading := 0.0
+	var best_height := 4.0
+	for angle_index in range(20):
+		var angle := TAU * float(angle_index) / 20.0
+		for radius_option in [205.0, 245.0, 290.0]:
+			var radius := float(radius_option)
+			var center := Vector2(cos(angle), sin(angle)) * radius
+			var heading := angle + PI * 0.5
+			var direction := Vector2(sin(heading), cos(heading))
+			var score := 0.0
+			var height_sum := 0.0
+			for s in range(-10, 11):
+				var p := center + direction * (float(s) * 22.0)
+				var mountain := mountain_influence(p.x, p.y)
+				var lake := lake_influence(p.x, p.y)
+				var h := height(p.x, p.y)
+				score += mountain * 34.0 + lake * 26.0 \
+					+ absf(h - 4.2) * 0.30
+				height_sum += clampf(h, WATER_Y + 2.2, 12.0)
+			if score < best_score:
+				best_score = score
+				best_center = center
+				best_heading = heading
+				best_height = height_sum / 21.0
+	airstrip_center = best_center
+	airstrip_heading = best_heading
+	airstrip_elevation = clampf(best_height, WATER_Y + 2.2, 12.0)
+	_strip_dir = Vector2(sin(best_heading), cos(best_heading))
+	# Keep the apron end of the runway pointing back toward the origin.
+	if airstrip_center.dot(_strip_dir) < 0.0:
+		_strip_dir = -_strip_dir
+		airstrip_heading += PI
+	_strip_perp = Vector2(_strip_dir.y, -_strip_dir.x)
+	var reach := AIRSTRIP_LENGTH * 0.5 + AIRSTRIP_APRON_RADIUS \
+		+ AIRSTRIP_WIDTH + AIRSTRIP_BLEND + 24.0
+	_strip_bounds = Rect2(airstrip_center - Vector2(reach, reach),
+		Vector2(reach * 2.0, reach * 2.0))
+	airstrip_valid = true
+
+
+## March outward in rings until a lake wide enough for the airboat appears,
+## then park the boat just off the shore, bow pointing across the water.
+func _locate_boat_dock() -> void:
+	boat_dock_valid = false
+	if debug_world:
+		return
+	for radius in range(4, 24):
+		var r := float(radius) * 22.0
+		for angle_index in range(28):
+			var angle := TAU * float(angle_index) / 28.0
+			var p := Vector2(cos(angle), sin(angle)) * r
+			if lake_influence(p.x, p.y) < 0.72:
+				continue
+			if height(p.x, p.y) > WATER_Y - 0.8:
+				continue
+			# Walk back toward the origin to find the shoreline.
+			var toward := -p.normalized()
+			var shore := p
+			for step in range(40):
+				var candidate := shore + toward * 4.0
+				if height(candidate.x, candidate.y) > WATER_Y + 0.1:
+					break
+				shore = candidate
+			var float_spot := shore - toward * 7.0
+			if height(float_spot.x, float_spot.y) > WATER_Y - 0.5:
+				continue
+			boat_dock_pos = Vector3(float_spot.x, WATER_Y, float_spot.y)
+			boat_dock_yaw = atan2(-toward.x, -toward.y)
+			boat_dock_valid = true
+			return
+
+
+## 0..1 membership in the graded runway/apron footprint.
+func airstrip_grade(x: float, z: float) -> float:
+	if not airstrip_valid:
+		return 0.0
+	var p := Vector2(x, z)
+	if not _strip_bounds.has_point(p):
+		return 0.0
+	var rel := p - airstrip_center
+	var u := rel.dot(_strip_dir)
+	var v := rel.dot(_strip_perp)
+	var du := maxf(absf(u) - AIRSTRIP_LENGTH * 0.5, 0.0)
+	var dv := maxf(absf(v) - AIRSTRIP_WIDTH * 0.5, 0.0)
+	var d := Vector2(du, dv).length()
+	var apron := airstrip_apron_local()
+	var apron_d := maxf(Vector2(u, v).distance_to(apron)
+		- AIRSTRIP_APRON_RADIUS, 0.0)
+	d = minf(d, apron_d)
+	return 1.0 - smoothstep(0.0, AIRSTRIP_BLEND, d)
+
+
+func airstrip_apron_local() -> Vector2:
+	return Vector2(-AIRSTRIP_LENGTH * 0.5 + 14.0,
+		AIRSTRIP_WIDTH * 0.5 + AIRSTRIP_APRON_RADIUS + 4.0)
+
+
+func airstrip_apron_world() -> Vector2:
+	var apron := airstrip_apron_local()
+	return airstrip_center + _strip_dir * apron.x + _strip_perp * apron.y
+
+
+func point_on_airstrip(x: float, z: float) -> bool:
+	return airstrip_grade(x, z) > 0.22
 
 
 ## Elevation buys horizon: standing on a tall peak (or flying) stretches the
@@ -190,6 +328,15 @@ func _height_with_lake(x: float, z: float, lake: float) -> float:
 		var arena_floor := 3.25 + _n_detail.get_noise_2d(
 			x * 0.62, z * 0.62) * 0.10
 		h = lerpf(h, arena_floor, arena_grade)
+	# Grade the bush airstrip: a dead-flat packed-dirt runway and apron carved
+	# into whatever the corridor search found, blending back into procedural
+	# jungle over 30 m. Every LOD tier, the minimap, collision, and the
+	# analytic wheel fallback agree because they all pass through here.
+	var strip_grade := airstrip_grade(x, z)
+	if strip_grade > 0.0:
+		var strip_floor := airstrip_elevation \
+			+ _n_detail.get_noise_2d(x * 0.44, z * 0.44) * 0.05
+		h = lerpf(h, strip_floor, strip_grade)
 	return h
 
 
@@ -265,6 +412,11 @@ func ground_color(h: float, x: float, z: float) -> Color:
 		c = c.lerp(Color(0.83, 0.87, 0.91), snow_band)
 	if jit > 0.42:
 		c = c.darkened(0.22)
+	# Packed-dirt runway/apron surface, baked into every tier and the minimap.
+	var strip := airstrip_grade(x, z)
+	if strip > 0.3:
+		c = c.lerp(Color(0.44 + jit * 0.03, 0.385, 0.265),
+			smoothstep(0.3, 0.75, strip))
 	return Color(c.r + jit * 0.04, c.g + jit * 0.04, c.b)
 
 
@@ -531,6 +683,8 @@ func chunk_layout(cx: int, cz: int, include_decorations := true) -> Dictionary:
 			continue
 		if local_height > TREE_LINE:
 			continue  # bare rock and snow above the canopy line
+		if point_on_airstrip(px, pz):
+			continue  # nothing grows through packed runway dirt
 		tree_points.append(point)
 		var generated_tree := _make_tree(rng, Vector3(px, 0, pz), 0.0,
 			local_biome, include_decorations)
@@ -571,7 +725,7 @@ func chunk_layout(cx: int, cz: int, include_decorations := true) -> Dictionary:
 		if height(rx, rz) > WATER_Y + 0.4 and Vector2(rx, rz).length() > 12.0:
 			var rock_radius := rng.randf_range(0.8, 1.9)
 			if not _point_in_structure_clearance(Vector2(rx, rz),
-					occupied_clearances):
+					occupied_clearances) and not point_on_airstrip(rx, rz):
 				rocks.append({"pos": Vector3(rx, height(rx, rz), rz), "r": rock_radius})
 
 	# Dense, collision-free understory is cheap to draw as three MultiMeshes.
@@ -602,6 +756,8 @@ func chunk_layout(cx: int, cz: int, include_decorations := true) -> Dictionary:
 			continue
 		if fh > TREE_LINE:
 			continue  # no undergrowth on the bare rock and snow bands
+		if point_on_airstrip(fx, fz):
+			continue
 		var kind := 0
 		if fb == Biome.WETLAND:
 			kind = 2 if foliage_rng.randf() < 0.72 else 0
@@ -677,6 +833,8 @@ func _supply_hut_layout(cx: int, cz: int) -> Dictionary:
 		maximum_height = maxf(maximum_height, float(sample))
 	if minimum_height < WATER_Y + 0.72 or maximum_height - minimum_height > 1.05:
 		return {}
+	if point_on_airstrip(px, pz):
+		return {}
 
 	var ammo_kind := rng.randi_range(SUPPLY_AMMO_REVOLVER, SUPPLY_AMMO_SNIPER)
 	var ammo_amount := 6
@@ -743,6 +901,131 @@ func biome_foliage_color(biome: int, shade: float) -> Color:
 				0.185 + shade * 0.15)
 	return Color.from_hsv(0.27 + shade * 0.07, 0.70,
 		0.205 + shade * 0.175)
+
+
+## Deterministic vehicle spawn definitions for one chunk. Curated machines sit
+## at the origin motor pool, on the airstrip apron, and at the nearest lake
+## dock; rare wilderness finds use their own RNG salt so adding them never
+## reshuffles any existing layout. World spawns each id at most once per
+## session, so re-streamed chunks cannot duplicate a driven-away machine.
+## Kind ints match Vehicle.Kind (avoiding a script dependency from Gen).
+const VEHICLE_BIKE := 0
+const VEHICLE_JEEP := 1
+const VEHICLE_BOAT := 2
+const VEHICLE_JET := 3
+
+func vehicle_layout(cx: int, cz: int) -> Array:
+	if debug_world:
+		return []
+	var defs: Array = []
+	# Origin motor pool: a dual-sport and a jeep parked just east of the duel
+	# arena's graded rim, noses pointed out into the jungle.
+	if cx == 0 and cz == 0:
+		defs.append({"kind": VEHICLE_BIKE, "id": "v:pool#bike",
+			"pos": Vector3(41.5, height(41.5, 6.0), 6.0),
+			"yaw": atan2(1.0, 0.15)})
+		defs.append({"kind": VEHICLE_JEEP, "id": "v:pool#jeep",
+			"pos": Vector3(44.0, height(44.0, 2.0), 2.0),
+			"yaw": atan2(1.0, -0.1)})
+	if airstrip_valid:
+		var apron := airstrip_apron_world()
+		if floori(apron.x / CHUNK) == cx and floori(apron.y / CHUNK) == cz:
+			defs.append({"kind": VEHICLE_JET, "id": "v:strip#jet",
+				"pos": Vector3(apron.x, airstrip_elevation, apron.y),
+				"yaw": airstrip_heading})
+	if boat_dock_valid:
+		if floori(boat_dock_pos.x / CHUNK) == cx \
+				and floori(boat_dock_pos.z / CHUNK) == cz:
+			defs.append({"kind": VEHICLE_BOAT, "id": "v:dock#boat",
+				"pos": boat_dock_pos, "yaw": boat_dock_yaw})
+	# Wilderness finds: about one machine per twenty jungle chunks, on ground
+	# flat and dry enough to have plausibly been ridden there.
+	var rng := _chunk_rng(cx, cz, 1601)
+	var px := float(cx) * CHUNK + rng.randf_range(6.0, CHUNK - 6.0)
+	var pz := float(cz) * CHUNK + rng.randf_range(6.0, CHUNK - 6.0)
+	var kind_roll := rng.randf()
+	var yaw := rng.randf() * TAU
+	if Vector2(px, pz).length() < 150.0 or point_on_airstrip(px, pz):
+		return defs
+	var h := height(px, pz)
+	var biome := biome_at_height(px, pz, h)
+	if kind_roll < 0.016 and biome != Biome.WETLAND:
+		var flat := true
+		for offset in [Vector2(-2.4, -2.4), Vector2(2.4, -2.4),
+				Vector2(-2.4, 2.4), Vector2(2.4, 2.4)]:
+			var sample := height(px + offset.x, pz + offset.y)
+			if absf(sample - h) > 1.1 or sample < WATER_Y + 0.7:
+				flat = false
+		if flat and h > WATER_Y + 0.7:
+			var kind := VEHICLE_BIKE if kind_roll < 0.011 else VEHICLE_JEEP
+			defs.append({"kind": kind, "id": "v:%d,%d#0" % [cx, cz],
+				"pos": Vector3(px, h, pz), "yaw": yaw})
+	elif kind_roll < 0.048 and biome == Biome.WETLAND \
+			and lake_influence(px, pz) > 0.55 and h < WATER_Y - 0.3:
+		defs.append({"kind": VEHICLE_BOAT, "id": "v:%d,%d#0" % [cx, cz],
+			"pos": Vector3(px, WATER_Y, pz), "yaw": yaw})
+	return defs
+
+
+## Decorative skyline-tier tree crowns for one 48 m chunk: a deliberately
+## cheap, independent deterministic draw (its own RNG salt, ~8 noise samples)
+## rather than the canonical chunk layout. Beyond the 672 m horizon ring,
+## per-tree correspondence with the near jungle is invisible, but enumerating
+## 256 canonical layouts per 768 m skyline sector was measurably expensive.
+## Every RNG draw below is unconditional so the sequence stays deterministic
+## regardless of which candidates the terrain gates reject.
+func skyline_tree_layout(cx: int, cz: int) -> Array:
+	if debug_world:
+		return []
+	var rng := _chunk_rng(cx, cz, 1801)
+	var trees: Array = []
+	var x0 := float(cx) * CHUNK
+	var z0 := float(cz) * CHUNK
+	for attempt in range(8):
+		var px := x0 + rng.randf_range(1.5, CHUNK - 1.5)
+		var pz := z0 + rng.randf_range(1.5, CHUNK - 1.5)
+		var shade := rng.randf()
+		var trunk_h := rng.randf_range(11.0, 24.0)
+		var crown_r := rng.randf_range(3.4, 5.6)
+		var density_roll := rng.randf()
+		var h := height(px, pz)
+		if h < WATER_Y + 0.6 or h > TREE_LINE:
+			continue
+		if point_on_airstrip(px, pz):
+			continue
+		var biome := biome_at_height(px, pz, h)
+		if density_roll > _tree_density(biome) * 0.82:
+			continue
+		trees.append({
+			"pos": Vector3(px, h, pz),
+			"trunk_h": trunk_h,
+			"crown_r": crown_r,
+			"color": biome_foliage_color(biome, shade),
+		})
+	return trees
+
+
+## How completely the jungle canopy covers the ground at this point (0..1).
+## Used by the far LOD tiers to tint terrain toward foliage color where trees
+## grow, so forests still read as forests kilometres past the last instanced
+## tree silhouette. Purely a function of existing deterministic fields.
+func canopy_cover(h: float, x: float, z: float) -> float:
+	if debug_world:
+		return 0.0
+	if h < WATER_Y + 0.5 or h > TREE_LINE:
+		return 0.0
+	var shore := smoothstep(WATER_Y + 0.5, WATER_Y + 1.6, h)
+	var tree_line_fade := 1.0 - smoothstep(TREE_LINE - 5.0, TREE_LINE, h)
+	var density := _tree_density(biome_at_height(x, z, h))
+	return shore * tree_line_fade * density
+
+
+## Representative mid-shade canopy color for far-tier ground tinting, with a
+## little spatial variation from the shared color-jitter noise field.
+func canopy_color(x: float, z: float, h: float) -> Color:
+	var shade := 0.32 + clampf(_n_color.get_noise_2d(x * 0.5, z * 0.5)
+		* 0.5 + 0.5, 0.0, 1.0) * 0.30
+	return biome_foliage_color(biome_at_height(x, z, h), shade)
 
 
 func _make_tree(rng: RandomNumberGenerator, p: Vector3, force_h: float,

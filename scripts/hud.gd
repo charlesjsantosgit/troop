@@ -24,6 +24,11 @@ var crosshair: CombatCrosshair
 var spread_label: Label
 var camera_badge: Label
 var weapon_slots: Label
+var vehicle_panel: Panel
+var vehicle_speed_label: Label
+var vehicle_gear_label: Label
+var vehicle_rpm_fill: ColorRect
+var vehicle_extra_label: Label
 var voice_label: Label
 var sniper_scope: SniperScopeOverlay
 var _help_t := 12.0
@@ -236,6 +241,47 @@ func _ready() -> void:
 	weapon_slots.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
 	weapon_slots.add_theme_color_override("font_color", Color(0.83, 0.88, 0.75, 0.84))
 	add_child(weapon_slots)
+
+	# Vehicle instrument cluster: big speed, gear, RPM bar, per-kind extras.
+	vehicle_panel = Panel.new()
+	vehicle_panel.anchor_left = 0.5
+	vehicle_panel.anchor_right = 0.5
+	vehicle_panel.anchor_top = 1.0
+	vehicle_panel.anchor_bottom = 1.0
+	vehicle_panel.offset_left = 140
+	vehicle_panel.offset_right = 420
+	vehicle_panel.offset_top = -118
+	vehicle_panel.offset_bottom = -20
+	vehicle_panel.add_theme_stylebox_override("panel",
+		_panel_style(Color(0.05, 0.08, 0.05, 0.72), Color(0.95, 0.76, 0.24)))
+	vehicle_panel.visible = false
+	add_child(vehicle_panel)
+	vehicle_speed_label = _label(30)
+	vehicle_speed_label.position = Vector2(16, 8)
+	vehicle_speed_label.size = Vector2(170, 40)
+	vehicle_panel.add_child(vehicle_speed_label)
+	vehicle_gear_label = _label(22)
+	vehicle_gear_label.position = Vector2(196, 12)
+	vehicle_gear_label.size = Vector2(70, 34)
+	vehicle_gear_label.add_theme_color_override("font_color",
+		Color(0.95, 0.86, 0.45))
+	vehicle_panel.add_child(vehicle_gear_label)
+	var rpm_back := ColorRect.new()
+	rpm_back.color = Color(0.12, 0.16, 0.12, 0.9)
+	rpm_back.position = Vector2(16, 52)
+	rpm_back.size = Vector2(248, 10)
+	vehicle_panel.add_child(rpm_back)
+	vehicle_rpm_fill = ColorRect.new()
+	vehicle_rpm_fill.color = Color(0.55, 0.88, 0.35)
+	vehicle_rpm_fill.position = Vector2(16, 52)
+	vehicle_rpm_fill.size = Vector2(0, 10)
+	vehicle_panel.add_child(vehicle_rpm_fill)
+	vehicle_extra_label = _label(13)
+	vehicle_extra_label.position = Vector2(16, 66)
+	vehicle_extra_label.size = Vector2(248, 26)
+	vehicle_extra_label.add_theme_color_override("font_color",
+		Color(0.80, 0.88, 0.80, 0.9))
+	vehicle_panel.add_child(vehicle_extra_label)
 
 	damage_overlay = ColorRect.new()
 	damage_overlay.mouse_filter = Control.MOUSE_FILTER_IGNORE
@@ -536,14 +582,23 @@ func _process(dt: float) -> void:
 		+ ("4  SNIPER   " if player.weapon_slot == 4 else "4  Sniper   ")
 		+ ("[Q] MELEE" if player.melee_mode else "Q  Melee"))
 
+	_update_vehicle_cluster()
 	var nearby_hut: SupplyHut = player.world.nearby_supply_chest(player) \
 		if player.world is World else null
-	if player.supply_notice_remaining > 0.0:
+	var nearby_ride: Vehicle = null
+	if player.vehicle == null and player.world is World:
+		nearby_ride = player.world.nearby_vehicle(player)
+	if player.vehicle != null:
+		hint.text = _vehicle_hint(player.vehicle)
+	elif player.supply_notice_remaining > 0.0:
 		hint.text = player.supply_notice
 	elif player.is_healing():
 		hint.text = "WRAPPING BANDAGE  ·  HOLD STEADY"
 	elif nearby_hut:
 		hint.text = "SUPPLY CHEST  ·  TAP E TO OPEN"
+	elif nearby_ride:
+		hint.text = "%s  ·  TAP E TO %s" % [nearby_ride.display_name(),
+			nearby_ride.mount_verb()]
 	elif _camera_notice_t > 0.0:
 		if _camera_notice_mode == CameraRig.ViewMode.FRONT:
 			hint.text = "FRONT VIEW  •  C TO RETURN"
@@ -565,6 +620,54 @@ func _process(dt: float) -> void:
 		hint.text = "WASD run · E vine/chest · LMB fire · H bandage · RMB aim · C camera · 1/2/3/4 weapons · R reload"
 	else:
 		hint.text = ""
+
+
+func _update_vehicle_cluster() -> void:
+	var v: Vehicle = player.vehicle if player else null
+	if v == null or not is_instance_valid(v):
+		vehicle_panel.visible = false
+		return
+	vehicle_panel.visible = true
+	vehicle_speed_label.text = "%3.0f MPH" % v.speed_mph()
+	var rpm_frac: float = clampf(v.engine.rpm_fraction(), 0.0, 1.0)
+	vehicle_rpm_fill.size.x = 248.0 * rpm_frac
+	vehicle_rpm_fill.color = Color(0.9, 0.25, 0.2) if rpm_frac > 0.92 \
+		else Color(0.55, 0.88, 0.35)
+	match v.kind:
+		Vehicle.Kind.JET:
+			var jet := v as FighterJet
+			vehicle_gear_label.text = "%d%%" % int(jet.spool * 100.0)
+			var status := "GEAR %s · FLAPS %s · ALT %dm" % [
+				"DN" if jet.gear_down else "UP",
+				"DN" if jet.flaps_down else "UP",
+				int(v.global_position.y - Gen.height(v.global_position.x,
+					v.global_position.z))]
+			if jet.afterburner:
+				status += " · AFTERBURNER"
+			if jet.stalled:
+				status = "◤ STALL ◥ " + status
+			vehicle_extra_label.text = status
+		Vehicle.Kind.BOAT:
+			vehicle_gear_label.text = "FAN"
+			vehicle_extra_label.text = "W fan · A/D rudders · no brakes on water"
+		_:
+			vehicle_gear_label.text = "GEAR %s" % v.engine.gear_label()
+			var extra := "W drive · S brake/reverse · SPACE handbrake"
+			if v is SafariJeep and (v as SafariJeep).low_range:
+				extra = "LOW RANGE · " + extra
+			vehicle_extra_label.text = extra
+
+
+func _vehicle_hint(v: Vehicle) -> String:
+	match v.kind:
+		Vehicle.Kind.JET:
+			return "W/S throttle · aim to steer · SHIFT burner · G gear · F flaps · SPACE airbrake · CTRL brakes · E exit"
+		Vehicle.Kind.BOAT:
+			return "W fan · A/D rudders · slides over grass · E step off"
+		Vehicle.Kind.BIKE:
+			return "W throttle · S brakes · A/D lean · SPACE rear brake · SHIFT tuck · E dismount"
+		_:
+			return "W drive · S brake/reverse · A/D steer · SPACE handbrake · SHIFT low range · E exit"
 
 
 func _aim_distance(maximum: float) -> float:

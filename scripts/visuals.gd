@@ -256,6 +256,7 @@ render_mode diffuse_burley, specular_schlick_ggx;
 
 uniform vec2 focus_xz = vec2(0.0);
 uniform float near_fade = 108.0;
+uniform float fade_band = 18.0;
 uniform float spring_amount : hint_range(0.0, 1.0) = 0.0;
 uniform float autumn_amount : hint_range(0.0, 1.0) = 0.0;
 uniform float snow_amount : hint_range(0.0, 1.0) = 0.0;
@@ -275,7 +276,7 @@ void vertex() {
 
 void fragment() {
 	float distance_to_focus = distance(world_pos.xz, focus_xz);
-	float coverage = smoothstep(near_fade - 18.0, near_fade + 18.0,
+	float coverage = smoothstep(near_fade - fade_band, near_fade + fade_band,
 		distance_to_focus);
 	if (hash21(floor(world_pos.xz * 0.42)) > coverage) { discard; }
 	vec3 bark = vec3(0.27, 0.18, 0.095);
@@ -762,6 +763,20 @@ static func far_jungle_material() -> ShaderMaterial:
 	return _shared.far_jungle
 
 
+## Skyline-tier tree silhouettes: same jungle shader, but the dithered handoff
+## sits at the horizon ring's guaranteed tree coverage so skyline crowns take
+## over exactly where the denser horizon silhouettes are retired.
+static func skyline_jungle_material() -> ShaderMaterial:
+	if not _shared.has("skyline_jungle"):
+		_shared.skyline_jungle = _material(FAR_JUNGLE_SHADER,
+			{"near_fade": Gen.HORIZON_DISTANCE - 12.0,
+				"fade_band": 44.0,
+				"spring_amount": _spring_amount,
+				"autumn_amount": _autumn_amount,
+				"snow_amount": _snow_amount})
+	return _shared.skyline_jungle
+
+
 static func far_water_material() -> ShaderMaterial:
 	if not _shared.has("far_water"):
 		_shared.far_water = _material(FAR_WATER_SHADER,
@@ -779,7 +794,7 @@ static func set_far_focus(position: Vector3) -> void:
 	_far_focus = focus
 	for material in [far_ground_material(), far_jungle_material(),
 			far_water_material(), skyline_ground_material(),
-			stratos_ground_material()]:
+			skyline_jungle_material(), stratos_ground_material()]:
 		material.set_shader_parameter("focus_xz", focus)
 
 
@@ -795,7 +810,8 @@ static func set_season(season: SeasonalCycle.Season) -> void:
 			rock_material(), far_ground_material(), skyline_ground_material(),
 			stratos_ground_material()]:
 		material.set_shader_parameter("snow_amount", _snow_amount)
-	for material in [foliage_lod_material(), far_jungle_material()]:
+	for material in [foliage_lod_material(), far_jungle_material(),
+			skyline_jungle_material()]:
 		_apply_foliage_season(material)
 	for material in _foliage.values():
 		_apply_foliage_season(material)

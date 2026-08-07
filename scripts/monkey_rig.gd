@@ -5,7 +5,7 @@ extends Node3D
 ## solved onto the rope and the weapon arm stays aimed; an unarmed pose can
 ## still use both paws. The unused remainder of the vine trails below the grip.
 
-enum Anim { IDLE, RUN, SPRINT, AIR, DIVE, WALLSLIDE, SWING, SLIDE, ROLL, FLIP_F, FLIP_B, SWIM, SKID }
+enum Anim { IDLE, RUN, SPRINT, AIR, DIVE, WALLSLIDE, SWING, SLIDE, ROLL, FLIP_F, FLIP_B, SWIM, SKID, RIDE, PILOT }
 # SPRINT slot = quadruped gallop (entered by landing fast off a vine).
 # FLIP_F/FLIP_B = airborne tucked front/backflips after fast vine releases.
 
@@ -95,6 +95,7 @@ var _sniper_rope_pose := false
 var _sniper_rope_blend := 0.0
 var _sniper_support_grip: Node3D
 var _melee_mode := false
+var _ride_lean := 0.0
 var _melee_attack_active := false
 var _melee_attack_progress := 0.0
 var _melee_combo := 0
@@ -544,6 +545,13 @@ func set_gun_aim(active: bool, direction: Vector3, recoil: float) -> void:
 func set_sniper_rope_pose(active: bool, support_grip: Node3D = null) -> void:
 	_sniper_rope_pose = active
 	_sniper_support_grip = support_grip if active else null
+
+
+## Lateral lean fed by a vehicle (motorcycle roll, airboat carve). The seated
+## poses counter-lean the head so the rider keeps a level horizon, exactly the
+## way a real rider's eyes stay upright through a corner.
+func set_ride_lean(lean: float) -> void:
+	_ride_lean = clampf(lean, -1.25, 1.25)
 
 
 func set_melee_pose(active: bool, attack_active: bool, progress: float,
@@ -1040,6 +1048,48 @@ func update_motion(dt: float, anim: int, vel: Vector3, on_floor: bool, anchor: V
 			p.fr = 0.3
 			p.tail_curl = -0.3
 			p.tail_sway = sin(_t * 9.0) * 0.4
+		Anim.RIDE:
+			# Saddle seat: thighs up on the tank/pegs, torso rolled forward to
+			# the handlebars, both paws reaching them. The body leans with the
+			# machine while the head counter-rolls to hold a level horizon.
+			p.hips_y = -0.10
+			p.hips_x = 0.06
+			p.torso = 0.34 + absf(_ride_lean) * 0.05
+			p.torso_z = -_ride_lean * 0.22
+			p.head = -0.30
+			p.head_z = _ride_lean * 0.30
+			p.al = Vector3(-0.98, 0.12, 0.34)
+			p.ar = Vector3(-0.98, -0.12, -0.34)
+			p.el = 0.78
+			p.er = 0.78
+			p.ll = -1.32
+			p.lr = -1.32
+			p.kl = -1.46
+			p.kr = -1.46
+			p.fl = 0.62
+			p.fr = 0.62
+			p.hips_z = -_ride_lean * 0.10
+			p.tail_curl = 0.18
+			p.tail_sway = -_ride_lean * 0.55 + sin(_t * 2.2) * 0.06
+		Anim.PILOT:
+			# Reclined ejection-seat posture: legs forward to the pedals, left
+			# paw on the throttle quadrant, right paw centered on the stick.
+			p.hips_y = -0.08
+			p.torso = 0.12
+			p.head = -0.10
+			p.head_z = _ride_lean * 0.10
+			p.al = Vector3(-0.52, 0.18, 0.22)
+			p.ar = Vector3(-0.80, -0.06, -0.10)
+			p.el = 0.95
+			p.er = 0.72
+			p.ll = -1.10
+			p.lr = -1.10
+			p.kl = -0.72
+			p.kr = -0.72
+			p.fl = 0.30
+			p.fr = 0.30
+			p.tail_curl = 0.36
+			p.tail_sway = sin(_t * 1.8) * 0.05
 
 	if _melee_mode and _melee_attack_active:
 		var strike_twist := _melee_pulse(

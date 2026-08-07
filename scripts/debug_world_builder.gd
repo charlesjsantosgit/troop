@@ -15,7 +15,24 @@ func build(world: Node3D) -> void:
 	_build_range(world)
 	_build_rope_garden(world)
 	_build_ammo_hut(world)
+	_build_vehicle_yard(world)
 	_build_signs()
+
+
+## ---- vehicle yard: every machine lined up north of spawn -------------------
+func _build_vehicle_yard(world: Node3D) -> void:
+	if not world.has_method("spawn_vehicle"):
+		return
+	# All parked facing +Z: the open plane north of the course, so a test
+	# drive (or an excited monkey) has kilometres of empty ground ahead.
+	world.call("spawn_vehicle", Vehicle.Kind.BIKE, "v:debug#bike",
+		Vector3(-6.0, GROUND_Y, 16.0), 0.0)
+	world.call("spawn_vehicle", Vehicle.Kind.JEEP, "v:debug#jeep",
+		Vector3(0.0, GROUND_Y, 18.0), 0.0)
+	world.call("spawn_vehicle", Vehicle.Kind.BOAT, "v:debug#boat",
+		Vector3(7.0, GROUND_Y, 18.0), 0.0)
+	world.call("spawn_vehicle", Vehicle.Kind.JET, "v:debug#jet",
+		Vector3(24.0, GROUND_Y, 34.0), 0.0)
 
 
 ## ---- parkour: a graded line of floating blocks heading +X ------------------

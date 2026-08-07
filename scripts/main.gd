@@ -183,6 +183,18 @@ func _ready() -> void:
 			var dt_node = load("res://tests/debugtest.gd").new()
 			add_child(dt_node)
 			dt_node.call_deferred("run", self)
+		"vehicletest":
+			_start_debug_world("VehicleTester")
+			mode = "vehicletest"
+			var vt_node = load("res://tests/vehicletest.gd").new()
+			add_child(vt_node)
+			vt_node.call_deferred("run", self)
+		"vehicleworldtest":
+			mode = "vehicleworldtest"
+			_start_solo("WorldTester", 1337, 2)
+			var vw_node = load("res://tests/vehicleworldtest.gd").new()
+			add_child(vw_node)
+			vw_node.call_deferred("run", self)
 		"solo":
 			mode = "solo"
 			_start_solo(_rand_name(), randi() % 1000000, 2)
@@ -225,6 +237,8 @@ func _register_inputs() -> void:
 	_add_key("minimap", KEY_M)
 	_add_key("minimap_zoom_out", KEY_BRACKETLEFT)
 	_add_key("minimap_zoom_in", KEY_BRACKETRIGHT)
+	_add_key("vehicle_gear", KEY_G)
+	_add_key("vehicle_flaps", KEY_F)
 
 
 func _add_key(action: String, key: Key) -> void:
@@ -560,11 +574,13 @@ func _on_peer_state(id: int, pos: Vector3, yaw: float, vel: Vector3,
 		anim: int, swinging: bool, anchor: Vector3, rope_tail: float,
 		wraps: PackedVector3Array, weapon_kind: int, weapon_stowed: bool,
 		melee_mode: bool, weapon_ammo: int, weapon_reloading: bool,
-		healing_progress: float, flying := false) -> void:
+		healing_progress: float, flying := false, vehicle_kind := -1,
+		vehicle_id := "", vehicle_aux := Vector3.ZERO) -> void:
 	if world and world.puppets.has(id):
 		world.puppets[id].apply_state(pos, yaw, vel, anim, swinging, anchor,
 			rope_tail, wraps, weapon_kind, weapon_stowed, melee_mode,
-			weapon_ammo, weapon_reloading, healing_progress, flying)
+			weapon_ammo, weapon_reloading, healing_progress, flying,
+			vehicle_kind, vehicle_id, vehicle_aux)
 
 
 func _on_peer_left(id: int) -> void:
@@ -1371,7 +1387,57 @@ func _do_debug_shot(what: String, out: String) -> void:
 			chat_box.add_system_line("Admin unlocked — F8 opens the console.")
 			for i in range(10):
 				await get_tree().process_frame
-	if what != "debug-wings" and what != "debug-course":
+		"debug-vehicles":
+			if hud:
+				hud.visible = false
+			p.set_physics_process(false)
+			p.global_position = Vector3(-14.0, 2.2, 22.0)
+			world.set_time_of_day_override(12.0)
+			cam.fov = 68.0
+			cam.global_position = Vector3(-13.0, 4.6, 26.0)
+			cam.look_at(Vector3(12.0, 2.0, 24.0))
+			cam.make_current()
+			for i in range(90):
+				await get_tree().process_frame
+		"debug-jet":
+			if hud:
+				hud.visible = false
+			p.set_physics_process(false)
+			p.global_position = Vector3(10.0, 2.2, 26.0)
+			world.set_time_of_day_override(12.0)
+			cam.fov = 55.0
+			cam.global_position = Vector3(14.0, 4.8, 44.0)
+			cam.look_at(Vector3(24.0, 2.6, 33.0))
+			cam.make_current()
+			for i in range(90):
+				await get_tree().process_frame
+		"debug-ride":
+			if hud:
+				hud.visible = false
+			world.set_time_of_day_override(12.0)
+			var ride = world.vehicle_by_id("v:debug#bike")
+			p.global_position = ride.interaction_position() + Vector3(1.0, 0, 0)
+			for i in range(5):
+				await get_tree().physics_frame
+			p.ti.interact_just = true
+			await get_tree().physics_frame
+			await get_tree().physics_frame
+			p.ti.interact_just = false
+			p.ti.dir = Vector2(0, -1)
+			for i in range(150):
+				await get_tree().physics_frame
+			# Camera ahead of the travel line, looking back: the bike rides
+			# through the frame during the capture instead of out of it.
+			cam.global_position = ride.global_position \
+				+ ride.global_basis * Vector3(2.4, 1.5, 8.0)
+			cam.look_at(ride.global_position
+				+ ride.global_basis * Vector3(0, 0.7, 2.0))
+			cam.make_current()
+			for i in range(8):
+				await get_tree().process_frame
+	if what != "debug-wings" and what != "debug-course" \
+			and what != "debug-vehicles" and what != "debug-ride" \
+			and what != "debug-jet":
 		cam.queue_free()
 	for i in range(8):
 		await RenderingServer.frame_post_draw
@@ -2281,6 +2347,34 @@ func _do_shot(args: Array) -> void:
 		cam.look_at(Vector3(peak.x, 40.0, peak.z))
 		print("HIGHVIEW far=%.0f stratos=%d" % [world.current_view_distance,
 			world.stratos_chunks.size()])
+	elif what == "airstrip":
+		# Aerial over the seeded bush airstrip: verifies the graded dirt
+		# runway, apron, tree exclusion, and the parked fighter jet.
+		world.set_season_override(SeasonalCycle.Season.SUMMER)
+		world.set_time_of_day_override(12.0)
+		var strip_center := Gen.airstrip_center
+		var strip_direction := Vector2(sin(Gen.airstrip_heading),
+			cos(Gen.airstrip_heading))
+		var apron_spot := Gen.airstrip_apron_world()
+		var p := world.local_player
+		p.test_mode = true
+		p.set_fly_mode(true)
+		p.admin_teleport(Vector3(apron_spot.x, Gen.airstrip_elevation + 3.0,
+			apron_spot.y))
+		for i in range(420):
+			await get_tree().process_frame
+		if hud:
+			hud.visible = false
+		cam.fov = 62.0
+		cam.far = 6000.0
+		var eye := strip_center - strip_direction * (Gen.AIRSTRIP_LENGTH * 0.72)
+		cam.global_position = Vector3(eye.x, Gen.airstrip_elevation + 60.0,
+			eye.y)
+		cam.look_at(Vector3(strip_center.x, Gen.airstrip_elevation,
+			strip_center.y))
+		print("AIRSTRIP center=(%.0f,%.0f) heading=%.2f elev=%.1f" % [
+			strip_center.x, strip_center.y, Gen.airstrip_heading,
+			Gen.airstrip_elevation])
 	elif what == "mountains":
 		# Find the tallest peak within skyline range, stand in its foothills,
 		# and frame the range: verifies ridged relief, snow bands, and the

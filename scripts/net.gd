@@ -14,7 +14,10 @@ signal peer_state(id: int, pos: Vector3, yaw: float, vel: Vector3, anim: int,
 	swinging: bool, anchor: Vector3, rope_tail: float,
 	wraps: PackedVector3Array, weapon_kind: int, weapon_stowed: bool,
 	melee_mode: bool, weapon_ammo: int, weapon_reloading: bool,
-	healing_progress: float, flying: bool)
+	healing_progress: float, flying: bool, vehicle_kind: int,
+	vehicle_id: String, vehicle_aux: Vector3)
+signal vehicle_claimed(vehicle_id: String, claimant_id: int)
+signal vehicle_released(vehicle_id: String, rest: Array)
 signal score_changed
 signal banana_taken(id: String)
 signal supply_chest_claimed(chest_id: String, claimant_id: int)
@@ -36,17 +39,21 @@ signal admin_action(action: String, args: Dictionary)
 const PORT := 30623
 const MAX_CLIENTS := 24
 const CHANNEL_COUNT := 2
-const PROTOCOL_VERSION := 4
+const PROTOCOL_VERSION := 5
 const MAX_NAME_LENGTH := 20
 const REGISTRATION_TIMEOUT_SECONDS := 5.0
 const MAX_STATE_PACKETS_PER_SECOND := 30
 const MAX_WORLD_COORDINATE := 1000000.0
-const MAX_PLAYER_SPEED := 260.0
+# The fighter jet tops out at ~313 m/s (700 mph); leave validation headroom.
+const MAX_PLAYER_SPEED := 340.0
 const MAX_WRAPS := 6
 const MAX_COLLECTED_IDS := 200000
 const MAX_CHEST_CLAIMS := 50000
 const MAX_BANANA_ID_LENGTH := 48
 const MAX_CHEST_ID_LENGTH := 64
+const MAX_VEHICLE_ID_LENGTH := 48
+const MAX_VEHICLE_CLAIMS := 4096
+const MAX_VEHICLE_KIND := 3
 const MAX_VOICE_PACKET_BYTES := VoiceCodec.MAX_PACKET_BYTES
 const MAX_VOICE_SEQUENCE := 0x7fffffff
 const MAX_CHAT_LENGTH := 200
@@ -72,6 +79,8 @@ var names: Dictionary = {}      # peer id -> display name (server is omitted)
 var scores: Dictionary = {}     # peer id -> banana count
 var collected: Dictionary = {}  # stable banana id -> true
 var claimed_supply_chests: Dictionary = {} # stable chest id -> winning peer id
+var claimed_vehicles: Dictionary = {}   # stable vehicle id -> driving peer id
+var vehicle_rests: Dictionary = {}      # vehicle id -> [pos, yaw, pitch, roll]
 
 var _wired := false
 var _registered: Dictionary = {}
@@ -158,6 +167,8 @@ func host(pname: String, seed_v: int, port := PORT) -> Error:
 	scores = {1: 0}
 	collected = {}
 	claimed_supply_chests = {}
+	claimed_vehicles = {}
+	vehicle_rests = {}
 	_registered = {1: true}
 	_rate_windows = {}
 	_admins = {}
@@ -197,6 +208,8 @@ func start_dedicated(seed_v: int, port := PORT, bind_ip := "*",
 	scores = {}
 	collected = {}
 	claimed_supply_chests = {}
+	claimed_vehicles = {}
+	vehicle_rests = {}
 	_registered = {}
 	_rate_windows = {}
 	_load_bans()
@@ -223,6 +236,8 @@ func join(address: String, pname: String, port := PORT) -> Error:
 	scores = {}
 	collected = {}
 	claimed_supply_chests = {}
+	claimed_vehicles = {}
+	vehicle_rests = {}
 	_registered = {}
 	_rate_windows = {}
 	_cycle_initialized = false
@@ -240,6 +255,8 @@ func solo(pname: String, seed_v: int) -> void:
 	scores = {1: 0}
 	collected = {}
 	claimed_supply_chests = {}
+	claimed_vehicles = {}
+	vehicle_rests = {}
 	_registered = {}
 	_rate_windows = {}
 	_admins = {}
@@ -344,6 +361,7 @@ func _enforce_registration_timeout(id: int, epoch: int) -> void:
 
 func _on_peer_disconnected(id: int) -> void:
 	var was_registered := _registered.has(id) or names.has(id)
+	_release_vehicles_of_peer(id)
 	_registered.erase(id)
 	names.erase(id)
 	scores.erase(id)
@@ -387,7 +405,7 @@ func srv_register(pname: String, protocol: int, game_version: String,
 	rpc("cl_roster", names, scores)
 	rpc_id(id, "cl_world", world_seed, collected.keys(),
 		claimed_supply_chests, authoritative_cycle_hour(),
-		effective_game_version())
+		effective_game_version(), claimed_vehicles, vehicle_rests)
 	roster_changed.emit()
 
 
@@ -418,7 +436,8 @@ func cl_roster(new_names: Dictionary, new_scores: Dictionary) -> void:
 
 @rpc("authority", "call_remote", "reliable", 0)
 func cl_world(seed_v: int, taken: Array, supply_claims: Dictionary,
-		cycle_hour: float, _server_version: String) -> void:
+		cycle_hour: float, _server_version: String,
+		vehicle_claims := {}, vehicle_rest_states := {}) -> void:
 	if not is_finite(cycle_hour):
 		net_error.emit("server sent invalid day-cycle state")
 		call_deferred("shutdown")
@@ -439,6 +458,25 @@ func cl_world(seed_v: int, taken: Array, supply_claims: Dictionary,
 		if _valid_supply_chest_id(stable_id):
 			claimed_supply_chests[stable_id] = int(supply_claims[chest_id])
 			copied += 1
+	claimed_vehicles = {}
+	var vehicle_copied := 0
+	for vid in vehicle_claims:
+		if vehicle_copied >= MAX_VEHICLE_CLAIMS:
+			break
+		var stable_vid := str(vid)
+		if _valid_vehicle_id(stable_vid):
+			claimed_vehicles[stable_vid] = int(vehicle_claims[vid])
+			vehicle_copied += 1
+	vehicle_rests = {}
+	vehicle_copied = 0
+	for vid in vehicle_rest_states:
+		if vehicle_copied >= MAX_VEHICLE_CLAIMS:
+			break
+		var stable_vid := str(vid)
+		if _valid_vehicle_id(stable_vid) \
+				and _valid_vehicle_rest(vehicle_rest_states[vid]):
+			vehicle_rests[stable_vid] = vehicle_rest_states[vid]
+			vehicle_copied += 1
 	world_ready.emit()
 
 
@@ -448,17 +486,20 @@ func send_state(pos: Vector3, yaw: float, vel: Vector3, anim: int,
 		swinging: bool, anchor: Vector3, rope_tail: float,
 		wraps: PackedVector3Array, weapon_kind: int, weapon_stowed: bool,
 		melee_mode: bool, weapon_ammo: int, weapon_reloading: bool,
-		healing_progress: float, flying := false) -> void:
+		healing_progress: float, flying := false, vehicle_kind := -1,
+		vehicle_id := "", vehicle_aux := Vector3.ZERO) -> void:
 	if not active:
 		return
 	if is_host:
 		rpc("cl_state", local_id(), pos, yaw, vel, anim, swinging, anchor,
 			rope_tail, wraps, weapon_kind, weapon_stowed, melee_mode,
-			weapon_ammo, weapon_reloading, healing_progress, flying)
+			weapon_ammo, weapon_reloading, healing_progress, flying,
+			vehicle_kind, vehicle_id, vehicle_aux)
 	else:
 		rpc_id(1, "srv_state", pos, yaw, vel, anim, swinging, anchor,
 			rope_tail, wraps, weapon_kind, weapon_stowed, melee_mode,
-			weapon_ammo, weapon_reloading, healing_progress, flying)
+			weapon_ammo, weapon_reloading, healing_progress, flying,
+			vehicle_kind, vehicle_id, vehicle_aux)
 
 
 @rpc("any_peer", "call_remote", "unreliable_ordered", 0)
@@ -466,20 +507,23 @@ func srv_state(pos: Vector3, yaw: float, vel: Vector3, anim: int,
 		swinging: bool, anchor: Vector3, rope_tail: float,
 		wraps: PackedVector3Array, weapon_kind: int, weapon_stowed: bool,
 		melee_mode: bool, weapon_ammo: int, weapon_reloading: bool,
-			healing_progress: float, flying := false) -> void:
+			healing_progress: float, flying := false, vehicle_kind := -1,
+			vehicle_id := "", vehicle_aux := Vector3.ZERO) -> void:
 	var sender := multiplayer.get_remote_sender_id()
 	if not _registered_peer(sender) \
 			or not _allow_rate(sender, "state", MAX_STATE_PACKETS_PER_SECOND) \
 			or not _valid_state(pos, yaw, vel, anim,
 			swinging, anchor, rope_tail, wraps, weapon_kind, weapon_ammo,
-			healing_progress):
+			healing_progress, vehicle_kind, vehicle_id, vehicle_aux):
 		return
 	peer_state.emit(sender, pos, yaw, vel, anim, swinging, anchor, rope_tail,
 		wraps, weapon_kind, weapon_stowed, melee_mode, weapon_ammo,
-		weapon_reloading, healing_progress, flying)
+		weapon_reloading, healing_progress, flying, vehicle_kind, vehicle_id,
+		vehicle_aux)
 	rpc("cl_state", sender, pos, yaw, vel, anim, swinging, anchor, rope_tail,
 		wraps, weapon_kind, weapon_stowed, melee_mode, weapon_ammo,
-		weapon_reloading, healing_progress, flying)
+		weapon_reloading, healing_progress, flying, vehicle_kind, vehicle_id,
+		vehicle_aux)
 
 
 @rpc("authority", "call_remote", "unreliable_ordered", 0)
@@ -487,15 +531,18 @@ func cl_state(id: int, pos: Vector3, yaw: float, vel: Vector3, anim: int,
 		swinging: bool, anchor: Vector3, rope_tail: float,
 		wraps: PackedVector3Array, weapon_kind: int, weapon_stowed: bool,
 		melee_mode: bool, weapon_ammo: int, weapon_reloading: bool,
-		healing_progress: float, flying := false) -> void:
+		healing_progress: float, flying := false, vehicle_kind := -1,
+		vehicle_id := "", vehicle_aux := Vector3.ZERO) -> void:
 	if id == local_id() or not names.has(id):
 		return
 	if not _valid_state(pos, yaw, vel, anim, swinging, anchor, rope_tail,
-			wraps, weapon_kind, weapon_ammo, healing_progress):
+			wraps, weapon_kind, weapon_ammo, healing_progress, vehicle_kind,
+			vehicle_id, vehicle_aux):
 		return
 	peer_state.emit(id, pos, yaw, vel, anim, swinging, anchor, rope_tail,
 		wraps, weapon_kind, weapon_stowed, melee_mode, weapon_ammo,
-		weapon_reloading, healing_progress, flying)
+		weapon_reloading, healing_progress, flying, vehicle_kind, vehicle_id,
+		vehicle_aux)
 
 
 # ---- collectibles and shared world state ----------------------------------
@@ -589,6 +636,126 @@ func _apply_supply_chest_claim(chest_id: String, claimant_id: int) -> void:
 		return
 	claimed_supply_chests[chest_id] = claimant_id
 	supply_chest_claimed.emit(chest_id, claimant_id)
+
+
+# ---- vehicles --------------------------------------------------------------
+# One driver's seat per machine. The server arbitrates who holds each vehicle
+# exactly like chest claims, but a claim is released again on dismount (with a
+# resting transform every peer applies) or when the driver disconnects.
+
+func request_vehicle(vehicle_id: String) -> bool:
+	if not _valid_vehicle_id(vehicle_id) or claimed_vehicles.has(vehicle_id):
+		return false
+	if not active:
+		_apply_vehicle_claim(vehicle_id, local_id())
+		return true
+	if is_host:
+		return _host_claim_vehicle(vehicle_id, local_id())
+	rpc_id(1, "srv_request_vehicle", vehicle_id)
+	return true
+
+
+func release_vehicle(vehicle_id: String, rest: Array) -> void:
+	if not _valid_vehicle_id(vehicle_id):
+		return
+	if not active:
+		_apply_vehicle_release(vehicle_id, rest)
+	elif is_host:
+		_host_release_vehicle(vehicle_id, local_id(), rest)
+	else:
+		rpc_id(1, "srv_release_vehicle", vehicle_id, rest)
+
+
+@rpc("any_peer", "call_remote", "reliable", 0)
+func srv_request_vehicle(vehicle_id: String) -> void:
+	var sender := multiplayer.get_remote_sender_id()
+	if _registered_peer(sender) and _allow_rate(sender, "vehicle_claim", 8):
+		_host_claim_vehicle(vehicle_id, sender)
+
+
+@rpc("any_peer", "call_remote", "reliable", 0)
+func srv_release_vehicle(vehicle_id: String, rest: Array) -> void:
+	var sender := multiplayer.get_remote_sender_id()
+	if _registered_peer(sender) and _allow_rate(sender, "vehicle_claim", 8):
+		_host_release_vehicle(vehicle_id, sender, rest)
+
+
+func _host_claim_vehicle(vehicle_id: String, claimant_id: int) -> bool:
+	if not _valid_vehicle_id(vehicle_id) or not names.has(claimant_id) \
+			or (not claimed_vehicles.has(vehicle_id)
+			and claimed_vehicles.size() >= MAX_VEHICLE_CLAIMS):
+		return false
+	if claimed_vehicles.has(vehicle_id):
+		if claimant_id != local_id():
+			rpc_id(claimant_id, "cl_vehicle_claimed", vehicle_id,
+				int(claimed_vehicles[vehicle_id]))
+		return false
+	claimed_vehicles[vehicle_id] = claimant_id
+	vehicle_rests.erase(vehicle_id)
+	vehicle_claimed.emit(vehicle_id, claimant_id)
+	rpc("cl_vehicle_claimed", vehicle_id, claimant_id)
+	return true
+
+
+func _host_release_vehicle(vehicle_id: String, releasing_id: int,
+		rest: Array) -> void:
+	if not _valid_vehicle_id(vehicle_id) \
+			or not claimed_vehicles.has(vehicle_id) \
+			or int(claimed_vehicles[vehicle_id]) != releasing_id:
+		return
+	if not _valid_vehicle_rest(rest):
+		rest = []
+	claimed_vehicles.erase(vehicle_id)
+	if not rest.is_empty():
+		vehicle_rests[vehicle_id] = rest
+	vehicle_released.emit(vehicle_id, rest)
+	rpc("cl_vehicle_released", vehicle_id, rest)
+
+
+## The host clears every vehicle a disconnecting driver still held so the
+## machine is not locked forever where they dropped.
+func _release_vehicles_of_peer(id: int) -> void:
+	if not is_host:
+		return
+	var held: Array = []
+	for vid in claimed_vehicles:
+		if int(claimed_vehicles[vid]) == id:
+			held.append(vid)
+	for vid in held:
+		claimed_vehicles.erase(vid)
+		vehicle_released.emit(vid, [])
+		rpc("cl_vehicle_released", vid, [])
+
+
+@rpc("authority", "call_remote", "reliable", 0)
+func cl_vehicle_claimed(vehicle_id: String, claimant_id: int) -> void:
+	_apply_vehicle_claim(vehicle_id, claimant_id)
+
+
+@rpc("authority", "call_remote", "reliable", 0)
+func cl_vehicle_released(vehicle_id: String, rest: Array) -> void:
+	_apply_vehicle_release(vehicle_id, rest)
+
+
+func _apply_vehicle_claim(vehicle_id: String, claimant_id: int) -> void:
+	if not _valid_vehicle_id(vehicle_id) \
+			or claimed_vehicles.has(vehicle_id) \
+			or claimed_vehicles.size() >= MAX_VEHICLE_CLAIMS:
+		return
+	claimed_vehicles[vehicle_id] = claimant_id
+	vehicle_rests.erase(vehicle_id)
+	vehicle_claimed.emit(vehicle_id, claimant_id)
+
+
+func _apply_vehicle_release(vehicle_id: String, rest: Array) -> void:
+	if not _valid_vehicle_id(vehicle_id):
+		return
+	if not _valid_vehicle_rest(rest):
+		rest = []
+	claimed_vehicles.erase(vehicle_id)
+	if not rest.is_empty():
+		vehicle_rests[vehicle_id] = rest
+	vehicle_released.emit(vehicle_id, rest)
 
 
 # ---- vines and emotes ------------------------------------------------------
@@ -1028,7 +1195,8 @@ func _sanitize_name(value: String, id: int) -> String:
 func _valid_state(pos: Vector3, yaw: float, vel: Vector3, anim: int,
 		_swinging: bool, anchor: Vector3, rope_tail: float,
 		wraps: PackedVector3Array, weapon_kind: int, weapon_ammo: int,
-		healing_progress: float) -> bool:
+		healing_progress: float, vehicle_kind := -1, vehicle_id := "",
+		vehicle_aux := Vector3.ZERO) -> bool:
 	if not _finite_vec(pos) or not _finite_vec(vel) or not is_finite(yaw) \
 			or not is_finite(rope_tail) or not is_finite(healing_progress):
 		return false
@@ -1045,6 +1213,13 @@ func _valid_state(pos: Vector3, yaw: float, vel: Vector3, anim: int,
 	for point in wraps:
 		if not _finite_vec(point) or _outside_world(point):
 			return false
+	if vehicle_kind < -1 or vehicle_kind > MAX_VEHICLE_KIND \
+			or not _finite_vec(vehicle_aux):
+		return false
+	if vehicle_kind >= 0 and not _valid_vehicle_id(vehicle_id):
+		return false
+	if vehicle_kind < 0 and not vehicle_id.is_empty():
+		return false
 	return true
 
 
@@ -1054,6 +1229,24 @@ func _valid_banana_id(id: String) -> bool:
 
 func _valid_supply_chest_id(chest_id: String) -> bool:
 	return _valid_stable_id(chest_id, "s:", MAX_CHEST_ID_LENGTH)
+
+
+func _valid_vehicle_id(vehicle_id: String) -> bool:
+	return _valid_stable_id(vehicle_id, "v:", MAX_VEHICLE_ID_LENGTH)
+
+
+## Rest payload: [pos: Vector3, yaw: float, pitch: float, roll: float].
+func _valid_vehicle_rest(rest) -> bool:
+	if not (rest is Array) or rest.size() != 4:
+		return false
+	if not (rest[0] is Vector3) or not _finite_vec(rest[0]) \
+			or _outside_world(rest[0]):
+		return false
+	for i in range(1, 4):
+		if not (rest[i] is float or rest[i] is int) \
+				or not is_finite(float(rest[i])):
+			return false
+	return true
 
 
 func _valid_stable_id(id: String, prefix: String, maximum_length: int) -> bool:

@@ -130,6 +130,45 @@ Run the offline in-engine signature, tamper, version, size, and hash tests with:
 godot --headless --path . --script res://tests/updatetest.gd
 ```
 
+## macOS Gatekeeper: removing the "couldn't verify" dialog
+
+macOS quarantines apps downloaded by a browser and, because the preview DMG is
+only ad-hoc signed, Gatekeeper shows *"TROOP" Not Opened — Apple could not
+verify…* and the player has to visit Privacy & Security → **Open Anyway**.
+There are three levels of fix, from zero-cost to fully warning-free:
+
+1. **Terminal install/update (works today, no Apple account).**
+   `packaging/update-troop.sh` (the README one-liner) downloads the DMG with
+   `curl`, verifies the release SHA-256 itself, installs, and strips the
+   quarantine attribute. Apps installed this way launch from Finder with **no
+   Gatekeeper dialog at all**. This is the recommended path until releases are
+   notarized.
+2. **One-time manual approval (nothing to build).** A player who used the
+   browser-downloaded DMG approves once in System Settings → Privacy &
+   Security → Open Anyway; in-game PCK updates never re-trigger the dialog.
+3. **Developer ID + notarization (the real fix, $99/yr Apple Developer
+   Program).** `build_installers.sh` fully automates it once credentials
+   exist:
+
+   ```bash
+   # one-time: enroll at developer.apple.com, create a "Developer ID
+   # Application" certificate in Xcode/Keychain, then store notary credentials:
+   xcrun notarytool store-credentials troop-notary \
+     --apple-id you@example.com --team-id TEAMID10CH
+
+   # every release:
+   TROOP_MAC_SIGN_IDENTITY="Developer ID Application: Your Name (TEAMID10CH)" \
+   TROOP_MAC_NOTARY_PROFILE="troop-notary" \
+   ./packaging/build_installers.sh
+   ```
+
+   With both variables set the builder re-signs `TROOP.app` with the hardened
+   runtime and `packaging/macos/entitlements.plist` (JIT + microphone for
+   voice chat), notarizes and staples the app, then signs, notarizes, and
+   staples the DMG, and finishes with a `spctl` Gatekeeper assessment. The
+   resulting DMG opens on any Mac with no warning. Without the variables the
+   build keeps the ad-hoc preview behavior.
+
 ## Trust and installer caveat
 
 The signed update manifest prevents a changed GitHub response, mirror, CDN, or
@@ -141,13 +180,15 @@ every boot.
 
 This does not replace operating-system code signing. The checked-in presets
 contain no credentials: Windows game/installer outputs remain unsigned and the
-Mac app uses Godot's ad-hoc signature. Preview users will still see SmartScreen
-or Gatekeeper warnings on the first full install. A public warning-free release
-must Authenticode-sign and timestamp both `TROOP.exe` and Setup, and must use a
-Developer ID Application identity, hardened runtime, Apple notarization, and a
-stapled ticket for macOS. Store those credentials only in protected CI secret
-storage. PCK-only updates avoid repeating an installer warning, but they do not
-make an unsigned base executable equivalent to a properly signed one.
+Mac app uses Godot's ad-hoc signature unless the environment variables above
+are provided. Preview users will still see SmartScreen or Gatekeeper warnings
+on the first full install (macOS players can avoid them entirely via the
+terminal installer). A public warning-free release must Authenticode-sign and
+timestamp both `TROOP.exe` and Setup on Windows, and on macOS use the
+Developer ID + notarization flow documented above. Store those credentials
+only in protected CI secret storage. PCK-only updates avoid repeating an
+installer warning, but they do not make an unsigned base executable equivalent
+to a properly signed one.
 
 GitHub release immutability and Actions attestations provide useful additional
 provenance. The installed client still relies on the embedded RSA key because
