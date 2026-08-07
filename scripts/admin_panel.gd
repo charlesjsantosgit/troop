@@ -88,6 +88,27 @@ func _ready() -> void:
 		tp_row.add_child(b)
 	column.add_child(tp_row)
 
+	column.add_child(_section("VEHICLES"))
+	var vehicle_row := HBoxContainer.new()
+	vehicle_row.add_theme_constant_override("separation", 6)
+	vehicle_row.add_child(_tag("DELIVER:"))
+	for entry in [["🏍 BIKE", "bike"], ["🚙 JEEP", "jeep"],
+			["🛥 AIRBOAT", "boat"], ["✈ JET", "jet"]]:
+		var b := _button(entry[0])
+		b.pressed.connect(func() -> void: controller.spawn_vehicle(entry[1]))
+		vehicle_row.add_child(b)
+	column.add_child(vehicle_row)
+	var vehicle_tp_row := HBoxContainer.new()
+	vehicle_tp_row.add_theme_constant_override("separation", 6)
+	vehicle_tp_row.add_child(_tag("GO TO:"))
+	for entry in [["🛫 AIRSTRIP", "airstrip"], ["🅿 MOTOR POOL", "pool"],
+			["⚓ LAKE DOCK", "dock"], ["🔎 NEAREST WILD", "machine"]]:
+		var b := _button(entry[0])
+		b.pressed.connect(func() -> void:
+			controller.teleport_to_vehicle_spot(entry[1]))
+		vehicle_tp_row.add_child(b)
+	column.add_child(vehicle_tp_row)
+
 	var time_row := HBoxContainer.new()
 	time_row.add_theme_constant_override("separation", 6)
 	time_row.add_child(_tag("TIME:"))

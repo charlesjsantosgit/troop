@@ -1758,6 +1758,8 @@ func admin_heal() -> void:
 
 
 func admin_teleport(destination: Vector3) -> void:
+	if vehicle:
+		exit_vehicle()
 	if state == S.SWING:
 		_release(false)
 	global_position = destination
