@@ -11,10 +11,11 @@ const WHEELBASE_FRONT := 1.40
 const WHEELBASE_REAR := -1.39
 const WHEEL_RADIUS := 0.38
 const LOW_RANGE_MULTIPLIER := 2.72
+const LOW_RANGE_MAX_SPEED := 0.8
 
 var low_range := false
 var _aux_was_down := false
-var _steering_wheel: MeshInstance3D
+var _steering_wheel: Node3D
 var _front_axle: Node3D
 var _rear_axle: Node3D
 var _headlights: Array[SpotLight3D] = []
@@ -30,6 +31,9 @@ func _init() -> void:
 	max_steer_angle = 0.58
 	steer_speed = 2.6
 	seat_offset = Vector3(-0.36, 0.78, 0.30)
+	# Rig origin chosen from the actual front cushion top (y=0.58), rather
+	# than the motorcycle's old universal sink, which left the driver hovering.
+	rider_root_offset = Vector3(-0.36, 0.16, 0.22)
 	fp_camera_offset = Vector3(-0.36, 1.34, 0.30)
 	exit_offsets = [Vector3(-1.6, 0.4, 0.3), Vector3(1.6, 0.4, 0.3),
 		Vector3(0, 0.6, -3.0)]
@@ -105,9 +109,16 @@ func _total_brake_torque() -> float:
 	return 5600.0
 
 
-## SHIFT toggles the low-range transfer case (rising edge, near standstill).
+func low_range_shift_available() -> bool:
+	return driver != null and speed() < LOW_RANGE_MAX_SPEED \
+		and input_throttle < 0.1 and input_brake < 0.1
+
+
+## SHIFT toggles the low-range transfer case on a rising edge, only while truly
+## stopped with both pedals released so the ratio cannot jump under forward or
+## reverse driveline load (S becomes reverse throttle once reverse is engaged).
 func _simulate(dt: float) -> void:
-	if input_aux and not _aux_was_down and speed() < 4.0:
+	if input_aux and not _aux_was_down and low_range_shift_available():
 		low_range = not low_range
 		engine.final_drive = 4.10 * (LOW_RANGE_MULTIPLIER if low_range else 1.0)
 		Sfx.play_at("gear_clunk", global_position, -6.0,
@@ -184,9 +195,39 @@ func _build_body() -> void:
 	add_box(body, Vector3(1.40, 0.24, 0.24), Vector3(0, 0.62, 0.52), trim)
 	add_cylinder(body, 0.025, 0.025, 0.34, Vector3(-0.36, 0.78, 0.44), trim,
 		Vector3(1.05, 0, 0))
-	_steering_wheel = add_cylinder(body, 0.17, 0.17, 0.035,
-		Vector3(-0.36, 0.885, 0.36), paint_material(Color(0.08, 0.08, 0.08), 0.1, 0.7),
-		Vector3(1.05, 0, 0), 12)
+	# A real open rim, hub, and three spokes make steering rotation readable. The
+	# paw markers live on the same pivot, so the driver visibly feeds the wheel
+	# through a turn instead of holding two fixed points while a solid disc spins.
+	_steering_wheel = Node3D.new()
+	_steering_wheel.name = "SteeringWheel"
+	_steering_wheel.position = Vector3(-0.36, 0.885, 0.36)
+	_steering_wheel.rotation = Vector3(1.05, 0, 0)
+	body.add_child(_steering_wheel)
+	var wheel_mat := paint_material(Color(0.08, 0.08, 0.08), 0.1, 0.7)
+	var rim_mesh := TorusMesh.new()
+	rim_mesh.inner_radius = 0.142
+	rim_mesh.outer_radius = 0.18
+	rim_mesh.rings = 18
+	rim_mesh.ring_segments = 8
+	var rim := MeshInstance3D.new()
+	rim.name = "SteeringRim"
+	rim.mesh = rim_mesh
+	rim.material_override = wheel_mat
+	_steering_wheel.add_child(rim)
+	add_cylinder(_steering_wheel, 0.045, 0.045, 0.035,
+		Vector3.ZERO, trim, Vector3.ZERO, 12)
+	for spoke_angle in [0.0, TAU / 3.0, TAU * 2.0 / 3.0]:
+		var spoke_root := Node3D.new()
+		spoke_root.rotation.y = spoke_angle
+		_steering_wheel.add_child(spoke_root)
+		add_box(spoke_root, Vector3(0.024, 0.022, 0.145),
+			Vector3(0, 0, -0.078), trim)
+	# Anatomical left is positive vehicle X. Contacts sit just inside the rim so
+	# paw spheres wrap it without hovering beyond the rubber.
+	add_rider_target(_steering_wheel, &"hand_left", Vector3(0.145, 0.018, 0))
+	add_rider_target(_steering_wheel, &"hand_right", Vector3(-0.145, 0.018, 0))
+	add_rider_target(body, &"foot_left", Vector3(-0.22, 0.27, 0.62))
+	add_rider_target(body, &"foot_right", Vector3(-0.49, 0.27, 0.62))
 
 	# Bull bar + winch.
 	for side in [-0.55, 0.55]:
@@ -268,7 +309,9 @@ func _build_body() -> void:
 func _update_extra_visuals(_dt: float) -> void:
 	if _steering_wheel:
 		_steering_wheel.rotation = Vector3(1.05, 0, 0)
-		_steering_wheel.rotate_object_local(Vector3.UP, _steer_current * 6.0)
+		# Roughly eighty degrees lock-to-lock keeps both paws attached without an
+		# unmodelled hand-over-hand swap while still reading clearly from outside.
+		_steering_wheel.rotate_object_local(Vector3.UP, _steer_current * 2.4)
 	# Live axles: the tube follows each wheel pair's compression so the
 	# suspension articulates visibly over rough ground.
 	if _front_axle and wheels.size() >= 4:

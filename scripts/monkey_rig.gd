@@ -96,6 +96,7 @@ var _sniper_rope_blend := 0.0
 var _sniper_support_grip: Node3D
 var _melee_mode := false
 var _ride_lean := 0.0
+var _vehicle_pose = null
 var _melee_attack_active := false
 var _melee_attack_progress := 0.0
 var _melee_combo := 0
@@ -554,6 +555,13 @@ func set_ride_lean(lean: float) -> void:
 	_ride_lean = clampf(lean, -1.25, 1.25)
 
 
+## The occupied machine supplies the exact cushion/root placement and moving
+## control contacts. Keeping this on the rig lets local players and network
+## puppets share one final-pass seated pose instead of maintaining two copies.
+func set_vehicle_pose(vehicle) -> void:
+	_vehicle_pose = vehicle if is_instance_valid(vehicle) else null
+
+
 func set_melee_pose(active: bool, attack_active: bool, progress: float,
 		combo: int) -> void:
 	_melee_mode = active
@@ -791,6 +799,7 @@ func update_motion(dt: float, anim: int, vel: Vector3, on_floor: bool, anchor: V
 		"el": 0.25, "er": 0.25,
 		"ll": 0.0, "lr": 0.0, "kl": -0.12, "kr": -0.12, "fl": 0.0, "fr": 0.0,
 		"tail_curl": 0.45, "tail_sway": sin(_t * 2.5) * 0.15,
+		"tail_root_x": 0.0, "tail_root_y": 0.0, "tail_root_z": 0.0,
 	}
 	match anim:
 		Anim.IDLE:
@@ -1049,46 +1058,99 @@ func update_motion(dt: float, anim: int, vel: Vector3, on_floor: bool, anchor: V
 			p.tail_curl = -0.3
 			p.tail_sway = sin(_t * 9.0) * 0.4
 		Anim.RIDE:
-			# Saddle seat: thighs up on the tank/pegs, torso rolled forward to
-			# the handlebars, both paws reaching them. The body leans with the
-			# machine while the head counter-rolls to hold a level horizon.
-			p.hips_y = -0.10
-			p.hips_x = 0.06
-			p.torso = 0.34 + absf(_ride_lean) * 0.05
+			var ride_kind := Vehicle.Kind.BIKE
+			if is_instance_valid(_vehicle_pose):
+				ride_kind = int(_vehicle_pose.kind)
+			match ride_kind:
+				Vehicle.Kind.JEEP:
+					# Upright bucket-seat posture. Final-pass IK below plants both
+					# paws on the wheel and both feet on the pedals.
+					p.hips_y = -0.08
+					p.torso = 0.10
+					p.head = -0.06
+					p.al = Vector3(0.72, 0.10, 0.18)
+					p.ar = Vector3(0.72, -0.10, -0.18)
+					p.el = 0.88
+					p.er = 0.88
+					p.ll = 0.92
+					p.lr = 0.92
+					p.kl = -1.30
+					p.kr = -1.30
+					p.fl = 0.45
+					p.fr = 0.45
+					# Route the tail outboard and down around the bucket instead of
+					# sending its straight root through the seat back.
+					p.tail_curl = 0.92
+					p.tail_root_x = 0.42
+					p.tail_root_y = 1.52
+				Vehicle.Kind.BOAT:
+					# Raised airboat bench: one paw works the tiller while the
+					# other braces on the rail; knees sit naturally over the rest.
+					p.hips_y = -0.08
+					p.torso = 0.15
+					p.head = -0.10
+					p.al = Vector3(0.62, 0.16, 0.24)
+					p.ar = Vector3(0.58, -0.12, -0.18)
+					p.el = 0.82
+					p.er = 0.90
+					p.ll = 0.82
+					p.lr = 0.82
+					p.kl = -1.22
+					p.kr = -1.22
+					p.fl = 0.38
+					p.fr = 0.38
+					# The fan hub sits directly behind the bench at tail height. Coil
+					# forward across the safe starboard quarter so no segment can enter
+					# the propeller disc, even while the hull pitches over a wave.
+					p.tail_curl = 1.02
+					p.tail_root_x = 0.18
+					p.tail_root_y = 2.12
+				_:
+					# Motorcycle saddle: shoulders reach forward (positive local
+					# X) while thighs fold onto the pegs. The previous negative arm
+					# angles pointed both paws behind the monkey.
+					p.hips_y = -0.10
+					p.hips_x = 0.12
+					p.torso = -0.50 - absf(_ride_lean) * 0.03
+					p.head = 0.40
+					p.al = Vector3(1.02, 0.12, 0.28)
+					p.ar = Vector3(1.02, -0.12, -0.28)
+					p.el = 0.72
+					p.er = 0.72
+					p.ll = 1.08
+					p.lr = 1.08
+					p.kl = -1.48
+					p.kr = -1.48
+					p.fl = 0.56
+					p.fr = 0.56
+					p.tail_curl = 0.18
 			p.torso_z = -_ride_lean * 0.22
-			p.head = -0.30
 			p.head_z = _ride_lean * 0.30
-			p.al = Vector3(-0.98, 0.12, 0.34)
-			p.ar = Vector3(-0.98, -0.12, -0.34)
-			p.el = 0.78
-			p.er = 0.78
-			p.ll = -1.32
-			p.lr = -1.32
-			p.kl = -1.46
-			p.kr = -1.46
-			p.fl = 0.62
-			p.fr = 0.62
 			p.hips_z = -_ride_lean * 0.10
-			p.tail_curl = 0.18
 			p.tail_sway = -_ride_lean * 0.55 + sin(_t * 2.2) * 0.06
 		Anim.PILOT:
 			# Reclined ejection-seat posture: legs forward to the pedals, left
 			# paw on the throttle quadrant, right paw centered on the stick.
 			p.hips_y = -0.08
-			p.torso = 0.12
-			p.head = -0.10
+			p.hips_x = 0.08
+			p.torso = -0.08
+			p.head = 0.08
 			p.head_z = _ride_lean * 0.10
-			p.al = Vector3(-0.52, 0.18, 0.22)
-			p.ar = Vector3(-0.80, -0.06, -0.10)
+			p.al = Vector3(0.68, 0.18, 0.22)
+			p.ar = Vector3(0.86, -0.06, -0.10)
 			p.el = 0.95
 			p.er = 0.72
-			p.ll = -1.10
-			p.lr = -1.10
-			p.kl = -0.72
-			p.kr = -0.72
+			p.ll = 0.92
+			p.lr = 0.92
+			p.kl = -1.08
+			p.kr = -1.08
 			p.fl = 0.30
 			p.fr = 0.30
-			p.tail_curl = 0.36
+			# Drop the root below the ejection-seat back, then curl it beside the
+			# cushion. A straight rearward tail pierced both the seat and canopy.
+			p.tail_curl = 1.08
+			p.tail_root_x = 1.18
+			p.tail_root_y = 0.30
 			p.tail_sway = sin(_t * 1.8) * 0.05
 
 	if _melee_mode and _melee_attack_active:
@@ -1148,18 +1210,21 @@ func update_motion(dt: float, anim: int, vel: Vector3, on_floor: bool, anchor: V
 	_blend_hinge_pose(kn_r, p.kr, w)
 	_blend_hinge_pose(foot_l, p.fl, w)
 	_blend_hinge_pose(foot_r, p.fr, w)
-	# The tail root is mounted behind the upright pelvis. Counter-rotate that
-	# mount when the whole body becomes horizontal so the chain trails behind
-	# the animal instead of pointing vertically out of the water/ground plane.
-	var tail_root_x := 0.0
+	# The tail root is mounted behind the upright pelvis. Most locomotion keeps it
+	# straight, while enclosed seats author a safe first segment before the chain
+	# curls. This matters because changing only tail_curl cannot move the rigid
+	# bridge between the rump and the first articulated joint.
+	var tail_root_x: float = p.tail_root_x
+	var tail_root_y: float = p.tail_root_y
+	var tail_root_z: float = p.tail_root_z
 	if anim == Anim.SPRINT:
 		tail_root_x = 0.34
 	elif anim == Anim.SWIM:
 		tail_root_x = 1.62
 	var tail_root: Node3D = tail_segs[0]
 	tail_root.rotation.x = lerp_angle(tail_root.rotation.x, tail_root_x, w)
-	tail_root.rotation.y = lerp_angle(tail_root.rotation.y, 0.0, w)
-	tail_root.rotation.z = lerp_angle(tail_root.rotation.z, 0.0, w)
+	tail_root.rotation.y = lerp_angle(tail_root.rotation.y, tail_root_y, w)
+	tail_root.rotation.z = lerp_angle(tail_root.rotation.z, tail_root_z, w)
 	for i in range(1, tail_segs.size()):
 		var seg: Node3D = tail_segs[i]
 		var tail_x: float = -p.tail_curl * 0.5
@@ -1233,6 +1298,34 @@ func update_motion(dt: float, anim: int, vel: Vector3, on_floor: bool, anchor: V
 			_melee_combo)
 	elif _healing_pose:
 		_pose_healing_arms(_healing_progress)
+	if anim == Anim.RIDE or anim == Anim.PILOT:
+		_pose_vehicle_controls()
+
+
+## Plant all four limbs onto the machine after FK blending. Targets live under
+## the actual steering/control nodes, so a turning wheel or bar carries the paws
+## with it and the pose remains seated through body roll and pitch.
+func _pose_vehicle_controls() -> void:
+	if not is_instance_valid(_vehicle_pose):
+		return
+	var yb := yaw_node.global_transform.basis
+	var target: Vector3
+	if _vehicle_pose.has_rider_target(&"hand_left"):
+		target = _vehicle_pose.rider_target_global(&"hand_left")
+		_ik_limb(sh_l, el_l, ARM_A, ARM_B, target,
+			yb * Vector3(-1.0, -0.22, 0.62))
+	if _vehicle_pose.has_rider_target(&"hand_right"):
+		target = _vehicle_pose.rider_target_global(&"hand_right")
+		_ik_limb(sh_r, el_r, ARM_A, ARM_B, target,
+			yb * Vector3(1.0, -0.22, 0.62))
+	if _vehicle_pose.has_rider_target(&"foot_left"):
+		target = _vehicle_pose.rider_target_global(&"foot_left")
+		_ik_limb(hip_l, kn_l, LEG_A, LEG_B, target,
+			yb * Vector3(-0.72, -0.12, -0.82))
+	if _vehicle_pose.has_rider_target(&"foot_right"):
+		target = _vehicle_pose.rider_target_global(&"foot_right")
+		_ik_limb(hip_r, kn_r, LEG_A, LEG_B, target,
+			yb * Vector3(0.72, -0.12, -0.82))
 
 
 ## Aim the fluffy articulated tail into a broad coil below the support hand,

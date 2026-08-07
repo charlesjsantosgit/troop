@@ -19,7 +19,9 @@ const LOWSIDE_LEAN_ERROR := 0.55
 var lean_target := 0.0
 var _lean_integral := 0.0
 var _tuck := 0.0                      # 0 upright .. 1 full tuck (SHIFT)
+var _lowside_t := 0.0
 var _steer_head: Node3D
+var _front_fork_tubes: Array[MeshInstance3D] = []
 var _front_sliders: Array[MeshInstance3D] = []
 var _front_wheel_visual: Node3D
 var _front_fender: Node3D
@@ -39,6 +41,8 @@ func _init() -> void:
 	max_steer_angle = 0.62
 	steer_speed = 4.2
 	seat_offset = Vector3(0, 0.62, -0.18)
+	# Rig origin that puts the 0.48 m seated pelvis directly into the saddle.
+	rider_root_offset = Vector3(0, 0.21, -0.12)
 	fp_camera_offset = Vector3(0, 1.06, -0.10)
 	exit_offsets = [Vector3(-1.1, 0.3, 0), Vector3(1.1, 0.3, 0),
 		Vector3(0, 0.5, -1.8)]
@@ -47,6 +51,9 @@ func _init() -> void:
 	camera_bank_factor = 0.42
 	speed_for_max_fov = 44.0
 	driver_mass = 38.0
+	# A tucked monkey carries most of its mass near the saddle/tank, not at the
+	# upright torso height used by the enclosed vehicles.
+	driver_center_offset = Vector3(0, 0.38, 0.04)
 	engine_stream = "engine_single"
 	engine_pitch_base = 0.5
 	engine_pitch_span = 1.6
@@ -137,9 +144,20 @@ func _simulate(dt: float) -> void:
 	if driver and input_brake > 0.4 and speed() < 0.9 \
 			and _wheels_grounded() == 2:
 		apply_central_force(-global_basis.z * 620.0)
+	# Cut torque before Vehicle._simulate advances the drivetrain. Doing this
+	# after super() only changed the HUD/audio value; the rear wheel had already
+	# received the full engine impulse for the frame.
+	if anti_loop_active():
+		input_throttle = 0.0
 	super(dt)
 	_advance_lean(dt)
-	_check_lowside()
+	_check_lowside(dt)
+
+
+func anti_loop_active() -> bool:
+	var pitch := global_basis.get_euler(EULER_ORDER_YXZ).x
+	# This project drives along local +Z, so nose-up is negative X pitch.
+	return pitch < -0.55 and input_throttle > 0.0
 
 
 func _wheels_grounded() -> int:
@@ -170,16 +188,20 @@ func _advance_lean(dt: float) -> void:
 	# Kinematic corner radius from the front wheel's steer angle.
 	var effective_steer := _steer_current
 	var curvature := tan(effective_steer) / (WHEELBASE_FRONT - WHEELBASE_REAR)
-	lean_target = clampf(atan(v * v * curvature / 9.8), -MAX_LEAN, MAX_LEAN) \
-		if absf(v) > 0.5 else 0.0
+	var desired_lean := clampf(atan(v * v * curvature / 9.8),
+		-MAX_LEAN, MAX_LEAN) if absf(v) > 0.5 else 0.0
+	# A rider first counter-steers and then settles into the bank; an immediate
+	# 48-degree command made a full-speed A/D tap behave like a crash impulse.
+	lean_target = move_toward(lean_target, desired_lean, 1.1 * dt)
 	# At walking pace the rider simply holds it upright with their feet.
-	var authority := lerpf(26.0, 15.0, clampf(absf(v) / 14.0, 0.0, 1.0))
+	var authority := lerpf(26.0, 15.0,
+		clampf(absf(v) / 14.0, 0.0, 1.0))
 	if absf(v) < 2.5:
 		lean_target = 0.0
 		authority = 34.0
 	if not grounded:
 		authority = 4.0   # airborne body English only
-	var error := lean_target - roll
+	var error := angle_difference(roll, lean_target)
 	var roll_rate := angular_velocity.dot(global_basis.z)
 	apply_torque(global_basis.z * (error * authority - roll_rate * authority
 		* 0.32) * mass * 0.62)
@@ -196,23 +218,30 @@ func _advance_lean(dt: float) -> void:
 	# hanging off the pegs, and close the throttle past the balance point.
 	var pitch_rate := angular_velocity.dot(global_basis.x)
 	apply_torque(-global_basis.x * pitch_rate * mass * 0.85)
-	var pitch := global_basis.get_euler(EULER_ORDER_YXZ).x
-	if pitch > 0.55 and input_throttle > 0.0:
-		input_throttle = 0.0   # anti-loop instinct
 
 
 ## Sliding out both contact patches while leaned past recovery is a lowside:
 ## the machine goes down and the rider tumbles off (Vehicle.driver_impact →
 ## the player ejects and ragdolls the damage).
-func _check_lowside() -> void:
+func _check_lowside(dt: float) -> void:
 	if driver == null or _wheels_grounded() == 0 or speed() < 6.0:
+		_lowside_t = 0.0
 		return
 	var roll := global_basis.get_euler(EULER_ORDER_YXZ).z
 	var sliding := true
 	for wheel in wheels:
 		if wheel.in_contact and absf(wheel.slip_angle) < 0.34:
 			sliding = false
-	if sliding and absf(roll - lean_target) > LOWSIDE_LEAN_ERROR:
+	if sliding and absf(angle_difference(roll, lean_target)) \
+			> LOWSIDE_LEAN_ERROR:
+		_lowside_t += dt
+	else:
+		_lowside_t = maxf(_lowside_t - dt * 2.0, 0.0)
+	# Require a sustained loss of both contact patches. Short slip spikes while
+	# braking or initiating a turn now feel lively without unfairly ejecting the
+	# rider; a committed slide still produces the physical lowside.
+	if _lowside_t > 0.65:
+		_lowside_t = 0.0
 		driver_impact.emit(16.0)
 		linear_velocity *= 0.82
 
@@ -272,10 +301,11 @@ func _build_body() -> void:
 	_steer_head.rotation = Vector3(-RAKE, 0, 0)
 	body.add_child(_steer_head)
 	for side in [-0.095, 0.095]:
-		add_cylinder(_steer_head, 0.022, 0.022, 0.46,
-			Vector3(side, -0.10, 0), alloy)
-		var slider := add_cylinder(_steer_head, 0.028, 0.028, 0.42,
-			Vector3(side, -0.48, 0), frame_mat)
+		var tube := add_cylinder(_steer_head, 0.022, 0.022, 1.0,
+			Vector3.ZERO, alloy)
+		_front_fork_tubes.append(tube)
+		var slider := add_cylinder(_steer_head, 0.028, 0.028, 1.0,
+			Vector3.ZERO, frame_mat)
 		_front_sliders.append(slider)
 	for clamp_y in [0.04, -0.12]:
 		add_box(_steer_head, Vector3(0.26, 0.04, 0.09),
@@ -292,6 +322,10 @@ func _build_body() -> void:
 			Vector3(0, 0, PI / 2.0))
 		add_box(_handlebar, Vector3(0.015, 0.015, 0.12),
 			Vector3(side * 0.72, 0.05, 0.02), alloy)
+	# Anatomical left is +X while the monkey faces vehicle-forward (+Z). Keeping
+	# these markers on the steering node makes both paws follow the real bars.
+	add_rider_target(_handlebar, &"hand_left", Vector3(0.30, 0.03, -0.02))
+	add_rider_target(_handlebar, &"hand_right", Vector3(-0.30, 0.03, -0.02))
 	add_box(_steer_head, Vector3(0.17, 0.20, 0.05), Vector3(0, 0.02, 0.09),
 		paint)
 	var lamp_mesh := add_cylinder(_steer_head, 0.065, 0.065, 0.04,
@@ -308,12 +342,12 @@ func _build_body() -> void:
 	_headlight.light_color = Color(1.0, 0.95, 0.82)
 	_steer_head.add_child(_headlight)
 	_front_fender = Node3D.new()
-	_steer_head.add_child(_front_fender)
+	body.add_child(_front_fender)
 	add_box(_front_fender, Vector3(0.22, 0.03, 0.55), Vector3.ZERO, paint,
 		Vector3(0.1, 0, 0))
 	_front_wheel_visual = build_knobby_wheel(FRONT_RADIUS, 0.115, 16,
 		Color(0.2, 0.2, 0.22))
-	_steer_head.add_child(_front_wheel_visual)
+	body.add_child(_front_wheel_visual)
 	wheels[0].visual = null   # posed manually along the fork axis
 
 	# Swingarm, monoshock, chain run, rear wheel.
@@ -325,10 +359,17 @@ func _build_body() -> void:
 			Vector3(side, 0, -0.28), frame_mat)
 	_rear_wheel_visual = build_knobby_wheel(REAR_RADIUS, 0.13, 16,
 		Color(0.2, 0.2, 0.22))
-	_swingarm.add_child(_rear_wheel_visual)
-	_rear_wheel_visual.position = Vector3(0, 0, -0.57)
+	body.add_child(_rear_wheel_visual)
 	add_cylinder(_swingarm, 0.055, 0.055, 0.03,
 		Vector3(0.085, 0, -0.57), alloy, Vector3(0, 0, PI / 2.0))
+	# Real peg geometry and matching rider contacts. Both are within 0.47 m of
+	# the seated hips, leaving IK room for suspension pitch and rider lean.
+	for side in [-1.0, 1.0]:
+		var peg := add_cylinder(body, 0.025, 0.025, 0.18,
+			Vector3(side * 0.22, 0.28, -0.02), frame_mat,
+			Vector3(0, 0, PI / 2.0), 10)
+		add_rider_target(peg, &"foot_left" if side > 0.0 else &"foot_right",
+			Vector3.ZERO)
 	_shock_spring = add_cylinder(body, 0.045, 0.045, 0.26,
 		Vector3(0, 0.50, -0.26), paint_material(Color(0.85, 0.15, 0.12), 0.3, 0.5),
 		Vector3(0.35, 0, 0), 8)
@@ -350,23 +391,40 @@ func _update_extra_visuals(_dt: float) -> void:
 	_steer_head.rotation = Vector3(-RAKE, 0, 0)
 	_steer_head.rotate_object_local(Vector3.UP, _steer_current)
 	var front := wheels[0]
-	# Wheel center along the fork axis: attach - remaining extension.
-	var fork_extension := (front.travel - front.compression)
-	_front_wheel_visual.position = Vector3(0, -0.67 - fork_extension * 0.92,
-		0.02)
+	# The visible hub now occupies the exact raycast suspension centre. Fork
+	# members bridge the raked steering head to that point, so compression and
+	# steering can never make the tire hover above (or tunnel through) its patch.
+	var fork_extension := front.travel - front.compression
+	var front_center := front.local_pos - Vector3(0, fork_extension, 0)
+	_front_wheel_visual.position = front_center
 	_front_wheel_visual.rotation = Vector3.ZERO
+	_front_wheel_visual.rotate_object_local(Vector3.UP, _steer_current)
 	_front_wheel_visual.rotate_object_local(Vector3.RIGHT, front.spin_angle)
-	_front_fender.position = _front_wheel_visual.position \
+	_front_fender.position = front_center \
 		+ Vector3(0, FRONT_RADIUS + 0.06, 0)
-	for slider in _front_sliders:
-		slider.position.y = -0.48 - fork_extension * 0.5
+	_front_fender.rotation = Vector3(0, _steer_current, 0)
+	var hub_in_head := _steer_head.to_local(to_global(front_center))
+	for i in range(_front_sliders.size()):
+		var side := -0.095 if i == 0 else 0.095
+		var fork_top := Vector3(side, 0.10, 0)
+		var fork_bottom := hub_in_head + Vector3(side, 0, 0)
+		var split := fork_top.lerp(fork_bottom, 0.57)
+		_pose_fork_member(_front_fork_tubes[i], fork_top,
+			split + (fork_bottom - fork_top).normalized() * 0.06)
+		_pose_fork_member(_front_sliders[i], fork_top.lerp(fork_bottom, 0.42),
+			fork_bottom)
 	var rear := wheels[1]
-	# Swingarm angle from the rear wheel's vertical travel about its pivot.
-	var rear_drop := 0.35 + (rear.travel - rear.compression)
-	var arm_angle := asin(clampf((rear_drop - 0.35) / 0.62, -0.6, 0.6))
-	_swingarm.rotation = Vector3(arm_angle, 0, 0)
+	var rear_center := rear.local_pos \
+		- Vector3(0, rear.travel - rear.compression, 0)
+	_rear_wheel_visual.position = rear_center
 	_rear_wheel_visual.rotation = Vector3.ZERO
 	_rear_wheel_visual.rotate_object_local(Vector3.RIGHT, rear.spin_angle)
+	# Aim the live swingarm directly at the same physical hub and lengthen only
+	# its longitudinal members to meet it. The prior positive-angle estimate put
+	# the visible rear wheel roughly 0.7 m above its actual contact patch.
+	var arm_delta := rear_center - _swingarm.position
+	_swingarm.rotation = Vector3(atan2(arm_delta.y, -arm_delta.z), 0, 0)
+	_swingarm.scale = Vector3(1, 1, arm_delta.length() / 0.57)
 	if _shock_spring:
 		_shock_spring.scale.y = clampf(
 			1.0 - rear.compression / maxf(rear.travel, 0.01) * 0.35, 0.6, 1.0)
@@ -378,3 +436,20 @@ func _update_extra_visuals(_dt: float) -> void:
 		_headlight.light_energy = lerpf(_headlight.light_energy,
 			4.5 if (driver != null or remote_controlled) and night else 0.0,
 			0.2)
+
+
+func _pose_fork_member(member: MeshInstance3D, a: Vector3, b: Vector3) -> void:
+	var delta := b - a
+	var length := delta.length()
+	if length < 0.001:
+		member.visible = false
+		return
+	member.visible = true
+	var y_axis := delta / length
+	var reference := Vector3.RIGHT
+	if absf(reference.dot(y_axis)) > 0.92:
+		reference = Vector3.FORWARD
+	var x_axis := (reference - y_axis * reference.dot(y_axis)).normalized()
+	var z_axis := x_axis.cross(y_axis).normalized()
+	member.transform = Transform3D(Basis(x_axis, y_axis, z_axis).scaled(
+		Vector3(1.0, length, 1.0)), (a + b) * 0.5)

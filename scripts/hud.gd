@@ -649,7 +649,7 @@ func _update_vehicle_cluster() -> void:
 			vehicle_extra_label.text = status
 		Vehicle.Kind.BOAT:
 			vehicle_gear_label.text = "FAN"
-			vehicle_extra_label.text = "W fan · A/D rudders · no brakes on water"
+			vehicle_extra_label.text = "W fan · S fast idle/coast · A/D rudders"
 		_:
 			vehicle_gear_label.text = "GEAR %s" % v.engine.gear_label()
 			var extra := "W drive · S brake/reverse · SPACE handbrake"
@@ -663,7 +663,7 @@ func _vehicle_hint(v: Vehicle) -> String:
 		Vehicle.Kind.JET:
 			return "W/S throttle · aim to steer · SHIFT burner · G gear · F flaps · SPACE airbrake · CTRL brakes · E exit"
 		Vehicle.Kind.BOAT:
-			return "W fan · A/D rudders · slides over grass · E step off"
+			return "W fan · S fast idle/coast · A/D rudders · no reverse · E step off"
 		Vehicle.Kind.BIKE:
 			return "W throttle · S brakes · A/D lean · SPACE rear brake · SHIFT tuck · E dismount"
 		_:

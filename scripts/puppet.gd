@@ -219,11 +219,12 @@ func _process(dt: float) -> void:
 	if riding_vehicle:
 		# Seated: hard-follow the interpolated vehicle's saddle and adopt its
 		# full attitude; the RIDE/PILOT anim arrives in the state stream.
-		global_position = riding_vehicle.seat_global()
+		global_position = riding_vehicle.seat_render_global()
+		rig.physics_interpolation_mode = Node.PHYSICS_INTERPOLATION_MODE_OFF
+		rig.top_level = true
 		rig.set_yaw(0.0)
-		rig.global_transform.basis = riding_vehicle.global_basis \
-			* Basis(Vector3.UP, PI)
-		rig.position = Vector3(0, -0.44, 0)
+		rig.set_vehicle_pose(riding_vehicle.rider_render_pose())
+		rig.global_transform = riding_vehicle.rider_render_transform()
 		rig.set_ride_lean(_vehicle_aux.y)
 		rig.set_rope(false, Vector3.ZERO, Vector3.ZERO)
 		rig.set_gun_aim(false, _gun_direction, 0.0)
@@ -232,6 +233,13 @@ func _process(dt: float) -> void:
 		rig.update_motion(dt, _anim, _vel, true, _anchor)
 		_update_water_effects()
 		return
+	if rig.top_level \
+			or rig.physics_interpolation_mode == Node.PHYSICS_INTERPOLATION_MODE_OFF:
+		rig.top_level = false
+		rig.physics_interpolation_mode = Node.PHYSICS_INTERPOLATION_MODE_INHERIT
+		rig.transform = Transform3D.IDENTITY
+		rig.reset_physics_interpolation()
+	rig.set_vehicle_pose(null)
 	if rig.rotation != Vector3.ZERO:
 		rig.rotation = rig.rotation.lerp(Vector3.ZERO, 1.0 - exp(-10.0 * dt))
 		rig.set_ride_lean(0.0)

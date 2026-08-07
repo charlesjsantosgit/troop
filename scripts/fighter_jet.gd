@@ -47,7 +47,7 @@ var _stall_beep_t := 0.0
 var _was_grounded := true
 var _nozzle_flame: MeshInstance3D
 var _nozzle_glow: StandardMaterial3D
-var _gear_struts: Array[Node3D] = []
+var _gear_assemblies: Array[Dictionary] = []
 var _flap_surfaces: Array[MeshInstance3D] = []
 var _airbrake_panel: MeshInstance3D
 var _nav_lights: Array[MeshInstance3D] = []
@@ -64,6 +64,9 @@ func _init() -> void:
 	inertia = Vector3(75674.0, 85552.0, 12875.0)
 	drag_area = 0.0                 # aero handled entirely by the flight model
 	seat_offset = Vector3(0, 0.72, 3.55)
+	# The pilot rig sits low in the ejection seat; its head remains beneath the
+	# framed bubble while the 0.50 m seated pelvis rests in the cushion.
+	rider_root_offset = Vector3(0, 0.10, 3.34)
 	fp_camera_offset = Vector3(0, 1.02, 3.9)
 	exit_offsets = [Vector3(-2.4, -0.4, 2.0), Vector3(2.4, -0.4, 2.0),
 		Vector3(0, -0.4, 6.5)]
@@ -153,13 +156,9 @@ func set_driver_view(aim: Vector3, inp: Dictionary) -> void:
 	if aim.length_squared() > 0.01:
 		_aim = aim.normalized()
 	_wheel_brakes = bool(inp.get("crouch_held", false))
-	if bool(inp.get("vehicle_gear_just", false)) \
-			or (InputMap.has_action("vehicle_gear")
-			and Input.is_action_just_pressed("vehicle_gear")):
+	if bool(inp.get("vehicle_gear_just", false)):
 		_toggle_gear()
-	if bool(inp.get("vehicle_flaps_just", false)) \
-			or (InputMap.has_action("vehicle_flaps")
-			and Input.is_action_just_pressed("vehicle_flaps")):
+	if bool(inp.get("vehicle_flaps_just", false)):
 		_toggle_flaps()
 
 
@@ -184,7 +183,6 @@ func mach() -> float:
 
 ## Full flight-model replacement for the ground-vehicle _simulate.
 func _simulate(dt: float) -> void:
-	var grounded := _wheels_grounded_count() > 0
 	# Throttle setpoint: W raises, S lowers; SHIFT holds the burner lit.
 	if driver:
 		throttle_setpoint = clampf(throttle_setpoint
@@ -201,6 +199,25 @@ func _simulate(dt: float) -> void:
 		0.7 * dt)
 	_flap_position = move_toward(_flap_position, 1.0 if flaps_down else 0.0,
 		1.4 * dt)
+
+	# Raycast tires only exist once the oleos are almost down and locked. The old
+	# half-travel cut-over left the final grounded state latched forever after a
+	# takeoff retraction, so flight controls and exit logic could still believe a
+	# clean jet was sitting on the runway.
+	var gear_supports_weight := _gear_position > 0.94
+	var grounded := gear_supports_weight and _wheels_grounded_count() > 0
+	if gear_supports_weight:
+		_advance_ground_steering(dt, grounded)
+		for wheel in wheels:
+			wheel.drive_torque = 0.0
+			wheel.brake_torque = 24000.0 \
+				if (_wheel_brakes or driver == null) else 0.0
+			wheel.handbrake = false
+		_step_wheels(dt)
+		_apply_anti_roll()
+		grounded = _wheels_grounded_count() > 0
+	else:
+		_clear_gear_contacts()
 
 	var density := air_density()
 	var thrust := THRUST_IDLE + THRUST_MIL * spool * pow(density / 1.225, 0.7)
@@ -238,23 +255,39 @@ func _simulate(dt: float) -> void:
 		alpha = 0.0
 		g_load = 1.0
 		stalled = false
+	if grounded:
+		_apply_ground_run_stability()
 
-	# Ground handling: gear contact, nosewheel steering, wheel brakes.
-	if _gear_position > 0.5:
-		_advance_ground_steering(dt, grounded)
-		for wheel in wheels:
-			wheel.drive_torque = 0.0
-			wheel.brake_torque = 24000.0 \
-				if (_wheel_brakes or driver == null) else 0.0
-			wheel.handbrake = false
-		_step_wheels(dt)
-		_apply_anti_roll()
 	_warn_stall(dt)
 	if grounded and not _was_grounded and driver:
 		Sfx.play_at("touchdown", global_position, -6.0, 1.0)
 	_was_grounded = grounded
 	if driver:
 		_assist_recovery(dt)
+
+
+## A tricycle-gear jet naturally weathercocks down the runway and its wide main
+## gear resists rolling over. Raycast contact noise lacks some of that passive
+## geometry, so provide the same bounded outcome: follow the pilot's flat aim,
+## damp yaw, and keep the wings level until rotation. Manual A/D progressively
+## releases heading hold, preserving deliberate taxi steering.
+func _apply_ground_run_stability() -> void:
+	var flat_forward := Vector3(global_basis.z.x, 0.0, global_basis.z.z)
+	var flat_aim := Vector3(_aim.x, 0.0, _aim.z)
+	if flat_forward.length_squared() > 0.001 \
+			and flat_aim.length_squared() > 0.001:
+		flat_forward = flat_forward.normalized()
+		flat_aim = flat_aim.normalized()
+		var heading_error := flat_forward.signed_angle_to(flat_aim, Vector3.UP)
+		var heading_hold := 1.0 - absf(input_steer)
+		var yaw_rate := angular_velocity.dot(Vector3.UP)
+		apply_torque(Vector3.UP * mass * (heading_error * 12.0 * heading_hold
+			- yaw_rate * 5.0))
+	var forward_axis := global_basis.z.normalized()
+	var level_axis := global_basis.y.normalized().cross(Vector3.UP)
+	var roll_error := level_axis.dot(forward_axis)
+	var roll_rate := angular_velocity.dot(forward_axis)
+	apply_torque(forward_axis * mass * (roll_error * 9.8 - roll_rate * 4.0))
 
 
 ## Fly-by-wire pursuit of the camera aim: roll to put the target in the pull
@@ -346,18 +379,25 @@ func _build_body() -> void:
 	surface_skin.roughness = 0.62
 	surface_skin.cull_mode = BaseMaterial3D.CULL_DISABLED
 	var dark := dark_metal_material()
+	var radome := paint_material(Color(0.24, 0.27, 0.29), 0.05, 0.74)
+	var cockpit_trim := paint_material(Color(0.075, 0.085, 0.095), 0.35, 0.52)
 
-	# Lofted fuselage: elliptical stations nose to nozzle.
+	# Lofted fuselage: a capped, indexed 18-sided shell. The original ten-sided
+	# open loft read as a long triangular needle in profile; the denser stations
+	# preserve a crisp radome while blending the cockpit shoulders and tail pipe.
 	var stations: Array = [
-		[7.4, 0.06, 0.06, 0.0], [6.4, 0.22, 0.24, 0.05],
-		[5.2, 0.38, 0.42, 0.12], [3.9, 0.52, 0.60, 0.22],
-		[2.4, 0.62, 0.72, 0.24], [0.6, 0.70, 0.78, 0.18],
-		[-1.4, 0.72, 0.76, 0.12], [-3.4, 0.68, 0.70, 0.08],
-		[-5.2, 0.58, 0.58, 0.04], [-6.6, 0.44, 0.44, 0.0],
+		[7.6, 0.035, 0.035, 0.02], [7.18, 0.11, 0.12, 0.04],
+		[6.48, 0.24, 0.25, 0.07], [5.60, 0.38, 0.40, 0.12],
+		[4.72, 0.49, 0.52, 0.18], [3.62, 0.59, 0.66, 0.22],
+		[2.28, 0.66, 0.74, 0.21], [0.55, 0.72, 0.80, 0.15],
+		[-1.35, 0.74, 0.77, 0.10], [-3.30, 0.68, 0.70, 0.06],
+		[-5.05, 0.58, 0.58, 0.03], [-6.45, 0.44, 0.44, 0.0],
+		[-6.90, 0.38, 0.38, 0.0],
 	]
 	var loft := SurfaceTool.new()
 	loft.begin(Mesh.PRIMITIVE_TRIANGLES)
-	var ring_count := 10
+	loft.set_smooth_group(0)
+	var ring_count := 18
 	for s in range(stations.size() - 1):
 		var a: Array = stations[s]
 		var b: Array = stations[s + 1]
@@ -370,23 +410,98 @@ func _build_body() -> void:
 			var b1 := Vector3(cos(t1) * b[1], sin(t1) * b[2] + b[3], b[0])
 			for p in [a0, b0, b1, a0, b1, a1]:
 				loft.add_vertex(p)
+	# Close both ends so a low camera never sees through the radome or nozzle.
+	loft.set_smooth_group(-1)
+	for end_index in [0, stations.size() - 1]:
+		var station: Array = stations[end_index]
+		var center := Vector3(0, station[3], station[0])
+		for i in range(ring_count):
+			var t0 := TAU * float(i) / ring_count
+			var t1 := TAU * float(i + 1) / ring_count
+			var p0 := Vector3(cos(t0) * station[1],
+				sin(t0) * station[2] + station[3], station[0])
+			var p1 := Vector3(cos(t1) * station[1],
+				sin(t1) * station[2] + station[3], station[0])
+			var cap_points := [center, p1, p0] \
+				if end_index == 0 else [center, p0, p1]
+			for p in cap_points:
+				loft.add_vertex(p)
+	loft.index()
 	loft.generate_normals()
 	var fuselage := MeshInstance3D.new()
 	fuselage.mesh = loft.commit()
 	fuselage.material_override = skin
 	body.add_child(fuselage)
 
-	# Chin intake.
-	add_box(body, Vector3(0.72, 0.5, 1.7), Vector3(0, -0.62, 2.5), dark)
-	# Canopy.
-	var canopy := add_sphere(body, 0.52, Vector3(0, 0.78, 3.3),
-		glass_material(), 0.62)
-	canopy.scale = Vector3(0.72, 0.9, 2.1)
-	# Cockpit tub + seat + stick so first person has an office.
-	add_box(body, Vector3(0.6, 0.30, 1.5), Vector3(0, 0.42, 3.4), dark)
-	add_box(body, Vector3(0.42, 0.5, 0.16), Vector3(0, 0.62, 3.05), dark)
-	add_cylinder(body, 0.02, 0.02, 0.26, Vector3(0, 0.55, 3.85), dark)
-	add_box(body, Vector3(0.5, 0.24, 0.05), Vector3(0, 0.72, 4.15), dark)
+	# Radome break and blended shoulder chines keep the nose readable without
+	# turning the whole forward fuselage into one uninterrupted grey spike.
+	add_cylinder(body, 0.035, 0.255, 1.18, Vector3(0, 0.08, 7.01), radome,
+		Vector3(PI / 2.0, 0, 0), 18)
+	for side in [-1.0, 1.0]:
+		_add_wing_panel(body, side, Vector3(0.48 * side, 0.03, 3.45),
+			Vector3(1.36 * side, -0.04, 1.55), 0.72, 0.28, surface_skin)
+
+	# Recessed chin intake with a metal lip and a dark duct, replacing the solid
+	# rectangular block that previously hung below the nose.
+	add_box(body, Vector3(0.68, 0.30, 1.08), Vector3(0, -0.55, 2.58), dark,
+		Vector3(-0.05, 0, 0))
+	add_box(body, Vector3(0.78, 0.055, 1.18), Vector3(0, -0.37, 2.58), skin,
+		Vector3(-0.05, 0, 0))
+	for side in [-1.0, 1.0]:
+		add_box(body, Vector3(0.055, 0.34, 1.14),
+			Vector3(side * 0.39, -0.52, 2.58), skin,
+			Vector3(-0.05, 0, side * 0.035))
+	add_box(body, Vector3(0.58, 0.18, 0.12), Vector3(0, -0.54, 2.02),
+		paint_material(Color(0.025, 0.03, 0.035), 0.0, 0.95))
+
+	# Cockpit tub, ejection seat, side consoles, stick, throttle, and instrument
+	# coaming. These shapes remain visible in cockpit view and give the pilot
+	# authored contact landmarks for the rider-pose pass.
+	add_box(body, Vector3(0.68, 0.24, 1.56), Vector3(0, 0.43, 3.42), cockpit_trim)
+	add_box(body, Vector3(0.40, 0.12, 0.48), Vector3(0, 0.57, 3.35), dark)
+	add_box(body, Vector3(0.46, 0.58, 0.15), Vector3(0, 0.78, 2.98), dark,
+		Vector3(-0.12, 0, 0))
+	add_box(body, Vector3(0.34, 0.13, 0.18), Vector3(0, 1.07, 2.92), dark)
+	for side in [-1.0, 1.0]:
+		add_box(body, Vector3(0.12, 0.16, 1.12),
+			Vector3(side * 0.31, 0.61, 3.42), cockpit_trim)
+	add_cylinder(body, 0.022, 0.026, 0.30, Vector3(-0.13, 0.64, 3.63),
+		chrome_material(), Vector3(0.16, 0, 0), 10)
+	var stick_grip := add_box(body, Vector3(0.10, 0.08, 0.08),
+		Vector3(-0.13, 0.80, 3.60), dark)
+	add_cylinder(body, 0.018, 0.018, 0.22, Vector3(0.27, 0.68, 3.34),
+		chrome_material(), Vector3(0.18, 0, 0), 8)
+	var throttle_grip := add_box(body, Vector3(0.09, 0.07, 0.10),
+		Vector3(0.27, 0.78, 3.34), dark)
+	add_box(body, Vector3(0.56, 0.22, 0.08), Vector3(0, 0.78, 4.13),
+		cockpit_trim, Vector3(-0.18, 0, 0))
+	# Pedals and exact reachable control contacts for the shared rider IK. Facing
+	# +Z makes anatomical left +X, hence throttle/left pedal use positive X.
+	for side in [-1.0, 1.0]:
+		var pedal := add_box(body, Vector3(0.13, 0.055, 0.16),
+			Vector3(side * 0.16, 0.36, 3.72), cockpit_trim,
+			Vector3(-0.30, 0, 0))
+		add_rider_target(pedal,
+			&"foot_left" if side > 0.0 else &"foot_right", Vector3.ZERO)
+	add_rider_target(throttle_grip, &"hand_left", Vector3.ZERO)
+	add_rider_target(stick_grip, &"hand_right", Vector3.ZERO)
+
+	# A longer, higher bubble with distinct windscreen/bow/rear frames. The glass
+	# still uses the shared transparent material, but its silhouette now encloses
+	# a believable ejection-seat office instead of reading as a dark shoebox.
+	var canopy := add_sphere(body, 0.56, Vector3(0, 0.91, 3.32),
+		glass_material(), 0.95)
+	canopy.scale = Vector3(0.78, 1.0, 2.18)
+	add_box(body, Vector3(0.88, 0.055, 2.26), Vector3(0, 0.48, 3.32),
+		cockpit_trim)
+	for frame_z in [2.35, 3.02, 4.35]:
+		add_cylinder(body, 0.026, 0.026, 0.88,
+			Vector3(0, 0.86 if frame_z == 3.02 else 0.72, frame_z),
+			cockpit_trim, Vector3(0, 0, PI / 2.0), 8)
+	for side in [-1.0, 1.0]:
+		add_box(body, Vector3(0.035, 0.055, 2.22),
+			Vector3(side * 0.43, 0.67, 3.32), cockpit_trim,
+			Vector3(0.03 * side, 0, 0))
 
 	# Main wings: cranked trapezoid panels with thickness.
 	for side in [-1.0, 1.0]:
@@ -419,10 +534,22 @@ func _build_body() -> void:
 	tail_loft.begin(Mesh.PRIMITIVE_TRIANGLES)
 	var tail_pts := [Vector3(0, 0.5, -3.6), Vector3(0, 2.6, -5.6),
 		Vector3(0, 2.6, -6.6), Vector3(0, 0.4, -6.4)]
-	for thickness in [-0.05, 0.05]:
-		for i in [0, 1, 2, 0, 2, 3]:
+	for side_index in range(2):
+		var thickness := -0.07 if side_index == 0 else 0.07
+		var order := [0, 1, 2, 0, 2, 3] if side_index == 0 \
+			else [0, 2, 1, 0, 3, 2]
+		for i in order:
 			var p: Vector3 = tail_pts[i]
 			tail_loft.add_vertex(p + Vector3(thickness, 0, 0))
+	for edge_index in range(tail_pts.size()):
+		var edge_next := (edge_index + 1) % tail_pts.size()
+		var a: Vector3 = tail_pts[edge_index] + Vector3(-0.07, 0, 0)
+		var b: Vector3 = tail_pts[edge_next] + Vector3(-0.07, 0, 0)
+		var c: Vector3 = tail_pts[edge_next] + Vector3(0.07, 0, 0)
+		var d: Vector3 = tail_pts[edge_index] + Vector3(0.07, 0, 0)
+		for p in [a, b, c, a, c, d]:
+			tail_loft.add_vertex(p)
+	tail_loft.index()
 	tail_loft.generate_normals()
 	tail.mesh = tail_loft.commit()
 	tail.material_override = surface_skin
@@ -459,21 +586,63 @@ func _build_body() -> void:
 	_airbrake_panel = add_box(body, Vector3(0.8, 0.05, 1.1),
 		Vector3(0, 0.72, -2.6), skin)
 
-	# Landing gear: struts with wheels; whole assemblies fold on retract.
+	# Landing gear: each visual wheel uses the exact raycast-wheel centre when
+	# locked down. Oleo members bridge the physical attachment and centre, then
+	# fold into authored bays during retraction. Smooth toroidal aircraft tires
+	# replace the oversized knobby off-road wheels.
 	for i in range(wheels.size()):
 		var wheel := wheels[i]
-		var strut := Node3D.new()
-		strut.position = wheel.local_pos + Vector3(0, 0.5, 0)
-		body.add_child(strut)
-		add_cylinder(strut, 0.06, 0.05, 1.0, Vector3(0, -0.5, 0), dark)
-		add_cylinder(strut, 0.035, 0.035, 0.5, Vector3(0, -1.05, 0),
-			chrome_material())
-		var wheel_visual := build_knobby_wheel(wheel.radius, 0.20, 10,
-			Color(0.35, 0.35, 0.36))
-		wheel_visual.position = Vector3(0, -1.3, 0)
-		strut.add_child(wheel_visual)
+		var gear_root := Node3D.new()
+		gear_root.name = "NoseGear" if i == 0 else "MainGear%s" % i
+		body.add_child(gear_root)
+		var outer := add_cylinder(gear_root, 0.062 if i == 0 else 0.078,
+			0.056 if i == 0 else 0.070, 1.0, Vector3.ZERO, dark,
+			Vector3.ZERO, 12)
+		var inner := add_cylinder(gear_root, 0.034 if i == 0 else 0.043,
+			0.034 if i == 0 else 0.043, 1.0, Vector3.ZERO,
+			chrome_material(), Vector3.ZERO, 12)
+		var wheel_mount := Node3D.new()
+		wheel_mount.name = "WheelMount"
+		gear_root.add_child(wheel_mount)
+		var wheel_visual := _build_aircraft_wheel(wheel.radius,
+			0.16 if i == 0 else 0.22)
+		wheel_mount.add_child(wheel_visual)
+		var door_pos := Vector3(0, -0.66, 4.10) if i == 0 else Vector3(
+			wheel.local_pos.x * 0.72, -0.61, -0.58)
+		var door_size := Vector3(0.46, 0.035, 1.18) if i == 0 \
+			else Vector3(0.58, 0.035, 1.05)
+		# Door meshes are offset from an actual inboard edge hinge. Rotating a
+		# centered box made each panel hang like a detached airbrake because half of
+		# it crossed the bay instead of swinging cleanly away from the wheel path.
+		var door_side := signf(wheel.local_pos.x)
+		var door_hinge := Node3D.new()
+		door_hinge.name = "NoseDoorHinge" if i == 0 else "MainDoorHinge%s" % i
+		if i == 0:
+			door_hinge.position = door_pos - Vector3(door_size.x * 0.5, 0, 0)
+			gear_root.add_child(door_hinge)
+			add_box(door_hinge, door_size,
+				Vector3(door_size.x * 0.5, 0, 0), surface_skin)
+		else:
+			door_hinge.position = door_pos \
+				- Vector3(door_side * door_size.x * 0.5, 0, 0)
+			gear_root.add_child(door_hinge)
+			add_box(door_hinge, door_size,
+				Vector3(door_side * door_size.x * 0.5, 0, 0), surface_skin)
+		add_cylinder(gear_root, 0.024, 0.024, door_size.z * 0.88,
+			door_hinge.position, dark, Vector3(PI / 2.0, 0, 0), 10)
+		var retracted := Vector3(0, -0.46, 3.55) if i == 0 else Vector3(
+			wheel.local_pos.x * 0.34, -0.48, -0.62)
+		_gear_assemblies.append({
+			"wheel_index": i,
+			"outer": outer,
+			"inner": inner,
+			"wheel_mount": wheel_mount,
+			"wheel_visual": wheel_visual,
+			"door_hinge": door_hinge,
+			"door_open_angle": -1.12 if i == 0 else -door_side * 1.22,
+			"retracted": retracted,
+		})
 		wheel.visual = null
-		_gear_struts.append(strut)
 
 
 func _add_wing_panel(parent: Node3D, _side: float, root: Vector3,
@@ -497,11 +666,76 @@ func _add_wing_panel(parent: Node3D, _side: float, root: Vector3,
 				b + Vector3(0, 0.08, 0), a + Vector3(0, -0.08, 0),
 				b + Vector3(0, 0.08, 0), a + Vector3(0, 0.08, 0)]:
 			st.add_vertex(p)
+	# Root and tip caps stop the panels reading as open sheets at grazing angles.
+	for pair in [[r1, r0], [t0, t1]]:
+		var a: Vector3 = pair[0]
+		var b: Vector3 = pair[1]
+		for p in [a + Vector3(0, -0.08, 0), b + Vector3(0, -0.08, 0),
+				b + Vector3(0, 0.08, 0), a + Vector3(0, -0.08, 0),
+				b + Vector3(0, 0.08, 0), a + Vector3(0, 0.08, 0)]:
+			st.add_vertex(p)
+	st.index()
 	st.generate_normals()
 	var mi := MeshInstance3D.new()
 	mi.mesh = st.commit()
 	mi.material_override = material
 	parent.add_child(mi)
+
+
+func _build_aircraft_wheel(radius: float, width: float) -> Node3D:
+	var root := Node3D.new()
+	var tire_mesh := TorusMesh.new()
+	tire_mesh.outer_radius = radius
+	tire_mesh.inner_radius = radius * 0.56
+	tire_mesh.rings = 20
+	tire_mesh.ring_segments = 8
+	var tire := MeshInstance3D.new()
+	tire.mesh = tire_mesh
+	tire.rotation = Vector3(0, 0, PI / 2.0)
+	# Torus section width follows radius; trim its wheel-axis depth to the real
+	# tire width while keeping the round loaded-aircraft sidewall silhouette.
+	tire.scale.y = width / maxf(radius * 0.44, 0.01)
+	tire.material_override = rubber_material()
+	root.add_child(tire)
+	var hub_mesh := CylinderMesh.new()
+	hub_mesh.top_radius = radius * 0.34
+	hub_mesh.bottom_radius = radius * 0.34
+	hub_mesh.height = width * 0.78
+	hub_mesh.radial_segments = 14
+	var hub := MeshInstance3D.new()
+	hub.mesh = hub_mesh
+	hub.rotation = Vector3(0, 0, PI / 2.0)
+	hub.material_override = paint_material(Color(0.52, 0.54, 0.56), 0.72, 0.30)
+	root.add_child(hub)
+	var axle := add_cylinder(root, radius * 0.09, radius * 0.09, width * 1.06,
+		Vector3.ZERO, dark_metal_material(), Vector3(0, 0, PI / 2.0), 10)
+	axle.name = "Axle"
+	return root
+
+
+func _pose_gear_member(member: MeshInstance3D, a: Vector3, b: Vector3) -> void:
+	var delta := b - a
+	var length := delta.length()
+	if length < 0.001:
+		member.visible = false
+		return
+	member.visible = true
+	var y_axis := delta / length
+	var reference := Vector3.RIGHT
+	if absf(reference.dot(y_axis)) > 0.92:
+		reference = Vector3.FORWARD
+	var x_axis := (reference - y_axis * reference.dot(y_axis)).normalized()
+	var z_axis := x_axis.cross(y_axis).normalized()
+	member.transform = Transform3D(Basis(x_axis, y_axis, z_axis).scaled(
+		Vector3(1.0, length, 1.0)), (a + b) * 0.5)
+
+
+func _clear_gear_contacts() -> void:
+	for wheel in wheels:
+		wheel.in_contact = false
+		wheel.load = 0.0
+		wheel.slip_ratio = 0.0
+		wheel.slip_angle = 0.0
 
 
 func _make_wingtip_trail() -> GPUParticles3D:
@@ -548,11 +782,48 @@ func _build_burner_audio() -> void:
 
 
 func _update_extra_visuals(dt: float) -> void:
-	# Gear fold: struts swing up into the belly as _gear_position drops.
-	for strut in _gear_struts:
-		strut.rotation = Vector3((1.0 - _gear_position) * 1.9, 0, 0)
-		strut.scale = Vector3.ONE * clampf(_gear_position + 0.02, 0.02, 1.0)
-	_gear_struts[0].rotation.y = _steer_current
+	# Exact deployed wheel centres come from the same raycast suspension used by
+	# physics. Retraction follows a short arcing path into each bay while the oleo
+	# members continuously bridge the moving hinge and wheel hub.
+	var deploy := smoothstep(0.0, 1.0, _gear_position)
+	# Doors lead the extension and lag the retraction: wheels begin moving only
+	# after the bays have opened, and are fully home before the panels close.
+	var wheel_deploy := smoothstep(0.14, 1.0, deploy)
+	var door_open := smoothstep(0.0, 0.24, deploy)
+	for assembly in _gear_assemblies:
+		var wheel_index := int(assembly["wheel_index"])
+		var wheel: VehicleWheel = wheels[wheel_index]
+		var wheel_mount := assembly["wheel_mount"] as Node3D
+		var wheel_visual := assembly["wheel_visual"] as Node3D
+		var outer := assembly["outer"] as MeshInstance3D
+		var inner := assembly["inner"] as MeshInstance3D
+		var door_hinge := assembly["door_hinge"] as Node3D
+		var deployed_center := wheel.local_pos \
+			- Vector3(0, wheel.travel - wheel.compression, 0)
+		var retracted: Vector3 = assembly["retracted"]
+		var wheel_center := retracted.lerp(deployed_center, wheel_deploy)
+		wheel_center.y += sin(wheel_deploy * PI) * 0.18
+		wheel_mount.position = wheel_center
+		var side := signf(wheel.local_pos.x)
+		if wheel_index == 0:
+			wheel_mount.rotation = Vector3(-(1.0 - wheel_deploy) * 1.35,
+				_steer_current * wheel_deploy, 0)
+		else:
+			wheel_mount.rotation = Vector3(0, 0,
+				(1.0 - wheel_deploy) * side * 1.45)
+		wheel_visual.rotation = Vector3(wheel.spin_angle, 0, 0)
+
+		var deployed_attach := wheel.local_pos
+		var bay_attach := Vector3(0, -0.48, 4.12) if wheel_index == 0 \
+			else Vector3(wheel.local_pos.x * 0.44, -0.48, -0.58)
+		var visual_attach := bay_attach.lerp(deployed_attach, wheel_deploy)
+		var oleo_split := visual_attach.lerp(wheel_center, 0.58)
+		_pose_gear_member(outer, visual_attach, oleo_split +
+			(wheel_center - visual_attach).normalized() * 0.08)
+		_pose_gear_member(inner, visual_attach.lerp(wheel_center, 0.42), wheel_center)
+
+		door_hinge.rotation = Vector3(0, 0,
+			float(assembly["door_open_angle"]) * door_open)
 	for flap in _flap_surfaces:
 		flap.rotation = Vector3(_flap_position * 0.5, 0, 0)
 	if _airbrake_panel:

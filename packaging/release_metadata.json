@@ -2,6 +2,7 @@
   "godot_compatibility": "4.7",
   "minimum_bootstrap": 1,
   "network_protocol": 5,
-  "notes": "Vehicle Update follow-up: admins can now deliver any machine on the spot (/vehicle bike|jeep|boat|jet, any session) and teleport to every vehicle spawn (/tp airstrip|pool|dock|machine), with matching F8 panel buttons.",
+  "release_title": "TROOP 0.3",
+  "notes": "TROOP 0.3 vehicle polish: rebuilt fighter silhouette and landing gear, exact seated monkey poses and control contacts in every machine, safer and more approachable handling, deterministic vehicle controls, and multiplayer vehicle-state validation.",
   "requires_installer": false
 }

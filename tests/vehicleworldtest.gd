@@ -135,7 +135,10 @@ func run(main) -> void:
 			boat.set_inputs(1.0, 0.0, 0.0, false, false)
 			await sim(1)
 		check("prop thrust drives the airboat across the lake",
-			boat.speed() > 6.0, "%.1f m/s" % boat.speed())
+			boat.speed() > 6.0,
+			"speed=%.2f fwd=%.2f spool=%.2f water=%s pos=%s" % [boat.speed(),
+				boat.forward_speed(), boat.spool, str(boat._in_water),
+				boat.global_position])
 		boat.driver = null
 	else:
 		print("  (no lake within dock search range for this seed — float "
