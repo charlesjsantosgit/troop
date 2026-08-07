@@ -123,8 +123,10 @@ func _build_ammo_hut(world: Node3D) -> void:
 		"biome": Gen.Biome.RAINFOREST,
 	}, false)
 	world.add_child(hut)
-	for body in hut.build_collisions():
-		hut.add_child(body)
+	# SupplyHut owns and parents its lazy collision body; the debug fixture only
+	# needs to request construction. Re-adding the returned body emitted an error
+	# before every vehicle test and could mask a real model/physics failure.
+	hut.build_collisions()
 
 
 func _build_signs() -> void:

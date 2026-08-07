@@ -514,7 +514,8 @@ func srv_state(pos: Vector3, yaw: float, vel: Vector3, anim: int,
 			or not _allow_rate(sender, "state", MAX_STATE_PACKETS_PER_SECOND) \
 			or not _valid_state(pos, yaw, vel, anim,
 			swinging, anchor, rope_tail, wraps, weapon_kind, weapon_ammo,
-			healing_progress, vehicle_kind, vehicle_id, vehicle_aux):
+			healing_progress, vehicle_kind, vehicle_id, vehicle_aux) \
+			or not _sender_owns_vehicle_state(sender, vehicle_kind, vehicle_id):
 		return
 	peer_state.emit(sender, pos, yaw, vel, anim, swinging, anchor, rope_tail,
 		wraps, weapon_kind, weapon_stowed, melee_mode, weapon_ammo,
@@ -1213,14 +1214,30 @@ func _valid_state(pos: Vector3, yaw: float, vel: Vector3, anim: int,
 	for point in wraps:
 		if not _finite_vec(point) or _outside_world(point):
 			return false
-	if vehicle_kind < -1 or vehicle_kind > MAX_VEHICLE_KIND \
-			or not _finite_vec(vehicle_aux):
-		return false
-	if vehicle_kind >= 0 and not _valid_vehicle_id(vehicle_id):
-		return false
-	if vehicle_kind < 0 and not vehicle_id.is_empty():
+	if not _finite_vec(vehicle_aux) \
+			or not _valid_vehicle_state_format(vehicle_kind, vehicle_id):
 		return false
 	return true
+
+
+func _valid_vehicle_state_format(vehicle_kind: int, vehicle_id: String) -> bool:
+	if vehicle_kind == -1:
+		return vehicle_id.is_empty()
+	return vehicle_kind >= 0 and vehicle_kind <= MAX_VEHICLE_KIND \
+		and _valid_vehicle_id(vehicle_id)
+
+
+## Server-only authorization for the vehicle portion of a peer state packet.
+## On-foot state needs no claim; mounted state must name the exact vehicle seat
+## currently held by that sender, so another client's machine cannot be moved.
+func _sender_owns_vehicle_state(sender: int, vehicle_kind: int,
+		vehicle_id: String) -> bool:
+	if not _valid_vehicle_state_format(vehicle_kind, vehicle_id):
+		return false
+	if vehicle_kind == -1:
+		return true
+	return claimed_vehicles.has(vehicle_id) \
+		and int(claimed_vehicles[vehicle_id]) == sender
 
 
 func _valid_banana_id(id: String) -> bool:

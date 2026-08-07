@@ -1332,6 +1332,35 @@ func _point_segment_distance_2d(point: Vector2, start: Vector2,
 	return point.distance_to(start + span * along)
 
 
+## Static occupied-machine mannequin for visual regression shots. It uses the
+## exact same MonkeyRig seat root, per-kind silhouette, and final-pass control
+## IK as local and replicated players, so these captures catch a broken seat or
+## floating paw before a release does.
+func _add_vehicle_preview_rider(vehicle: Vehicle,
+		display_name: String) -> MonkeyRig:
+	# Make the diagnostic composition deterministic. Unoccupied aircraft still
+	# produce idle thrust, so letting the rigid body roll after placing a static
+	# mannequin can create a false floating-seat regression in the final frame.
+	vehicle.linear_velocity = Vector3.ZERO
+	vehicle.angular_velocity = Vector3.ZERO
+	vehicle.freeze = true
+	vehicle.reset_physics_interpolation()
+	var preview := MonkeyRig.new()
+	preview.name = "PreviewRider_" + display_name
+	preview.setup(display_name, false)
+	world.add_child(preview)
+	preview.set_vehicle_pose(vehicle)
+	preview.set_yaw(0.0)
+	preview.global_transform = vehicle.rider_render_transform()
+	preview.set_ride_lean(vehicle.state_aux().y)
+	var anim := MonkeyRig.Anim.PILOT if vehicle.kind == Vehicle.Kind.JET \
+		else MonkeyRig.Anim.RIDE
+	for i in range(18):
+		preview.update_motion(1.0 / 30.0, anim, Vector3.ZERO, true,
+			Vector3.ZERO)
+	return preview
+
+
 ## Screenshot fixtures for the debug playground and admin features.
 func _do_debug_shot(what: String, out: String) -> void:
 	_start_debug_world("Bongo")
@@ -1391,11 +1420,17 @@ func _do_debug_shot(what: String, out: String) -> void:
 			if hud:
 				hud.visible = false
 			p.set_physics_process(false)
+			p.rig.visible = false
 			p.global_position = Vector3(-14.0, 2.2, 22.0)
 			world.set_time_of_day_override(12.0)
-			cam.fov = 68.0
-			cam.global_position = Vector3(-13.0, 4.6, 26.0)
-			cam.look_at(Vector3(12.0, 2.0, 24.0))
+			_add_vehicle_preview_rider(world.vehicle_by_id("v:debug#bike"), "Pip")
+			_add_vehicle_preview_rider(world.vehicle_by_id("v:debug#jeep"), "Kito")
+			_add_vehicle_preview_rider(world.vehicle_by_id("v:debug#boat"), "Mango")
+			# Face the whole occupied lineup rather than cropping the bike and
+			# overlapping the jeep/boat in an oblique view.
+			cam.fov = 55.0
+			cam.global_position = Vector3(0.5, 4.6, 31.0)
+			cam.look_at(Vector3(0.5, 1.35, 17.5))
 			cam.make_current()
 			for i in range(90):
 				await get_tree().process_frame
@@ -1403,11 +1438,16 @@ func _do_debug_shot(what: String, out: String) -> void:
 			if hud:
 				hud.visible = false
 			p.set_physics_process(false)
+			p.rig.visible = false
 			p.global_position = Vector3(10.0, 2.2, 26.0)
 			world.set_time_of_day_override(12.0)
+			_add_vehicle_preview_rider(world.vehicle_by_id("v:debug#jet"), "Ace")
 			cam.fov = 55.0
-			cam.global_position = Vector3(14.0, 4.8, 44.0)
-			cam.look_at(Vector3(24.0, 2.6, 33.0))
+			# A clean side profile makes the transparent dome visibly enclose the
+			# seated pilot; the old front-quarter angle hid its forward contour in
+			# the sky and made the same correct seat pose look perched on the nose.
+			cam.global_position = Vector3(9.0, 4.7, 34.5)
+			cam.look_at(Vector3(24.0, 2.55, 34.0))
 			cam.make_current()
 			for i in range(90):
 				await get_tree().process_frame

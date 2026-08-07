@@ -150,7 +150,8 @@ var ti := {"dir": Vector2.ZERO, "jump_just": false, "jump_held": false, "sprint"
 	"crouch_just": false, "crouch_held": false, "grab": false, "reel": 0.0,
 	"shoot_just": false, "shoot_held": false, "reload_just": false,
 	"melee_toggle_just": false, "scope_zoom_just": false,
-	"interact_just": false, "use_bandage_just": false}
+	"interact_just": false, "use_bandage_just": false,
+	"vehicle_gear_just": false, "vehicle_flaps_just": false}
 
 var _send_t := 0.0
 var _now := 0.0
@@ -325,6 +326,8 @@ func _gather() -> Dictionary:
 			"melee_toggle_just": ti.melee_toggle_just,
 			"interact_just": ti.interact_just,
 			"use_bandage_just": ti.use_bandage_just,
+			"vehicle_gear_just": ti.vehicle_gear_just,
+			"vehicle_flaps_just": ti.vehicle_flaps_just,
 		}
 		ti.jump_just = false
 		ti.crouch_just = false
@@ -334,6 +337,8 @@ func _gather() -> Dictionary:
 		ti.melee_toggle_just = false
 		ti.interact_just = false
 		ti.use_bandage_just = false
+		ti.vehicle_gear_just = false
+		ti.vehicle_flaps_just = false
 		return out
 	var wheel_delta := _wheel_reel_delta
 	_wheel_reel_delta = 0.0
@@ -352,6 +357,7 @@ func _gather() -> Dictionary:
 			"weapon_1_just": false, "weapon_2_just": false,
 			"weapon_3_just": false, "weapon_4_just": false,
 			"scope_zoom_just": false,
+			"vehicle_gear_just": false, "vehicle_flaps_just": false,
 		}
 	return {
 		"dir": Input.get_vector("move_left", "move_right", "move_fwd", "move_back"),
@@ -374,6 +380,8 @@ func _gather() -> Dictionary:
 		"weapon_3_just": Input.is_action_just_pressed("weapon_3"),
 		"weapon_4_just": Input.is_action_just_pressed("weapon_4"),
 		"scope_zoom_just": Input.is_action_just_pressed("scope_zoom"),
+		"vehicle_gear_just": Input.is_action_just_pressed("vehicle_gear"),
+		"vehicle_flaps_just": Input.is_action_just_pressed("vehicle_flaps"),
 	}
 
 
@@ -1563,17 +1571,30 @@ func _process(dt: float) -> void:
 		# root takes the vehicle basis (flipped to the rig's -Z facing) and
 		# the pose branch handles lean/counter-lean. The rig's own yaw node
 		# must sit at zero or a stale pre-mount heading skews the rider.
+		# This root is authored every render frame from an already-interpolated
+		# transform. Detach it from the raw physics parent and disable a second
+		# interpolation pass while seated.
+		rig.physics_interpolation_mode = Node.PHYSICS_INTERPOLATION_MODE_OFF
+		rig.top_level = true
 		rig.set_yaw(0.0)
-		rig.global_transform.basis = vehicle.global_basis \
-			* Basis(Vector3.UP, PI)
-		# The rig origin is the monkey's feet; sink it so the folded hips
-		# (HIP_Y minus the seated tuck) meet the saddle instead of hovering.
-		rig.position = Vector3(0, -0.44, 0)
+		rig.set_vehicle_pose(vehicle.rider_render_pose())
+		# Each machine owns an authored rig root at its real cushion/saddle. Use
+		# the render-interpolated chassis transform and contact adapter so the
+		# monkey stays welded to it between physics ticks as well as through lean,
+		# pitch, and inverted flight.
+		rig.global_transform = vehicle.rider_render_transform()
 		rig.set_ride_lean(vehicle.state_aux().y)
 		rig.set_rope(false, Vector3.ZERO, Vector3.ZERO)
 		rig.update_motion(dt, _anim(), velocity, true, _active_pivot())
 		_update_motion_effects(_anim())
 		return
+	if rig.top_level \
+			or rig.physics_interpolation_mode == Node.PHYSICS_INTERPOLATION_MODE_OFF:
+		rig.top_level = false
+		rig.physics_interpolation_mode = Node.PHYSICS_INTERPOLATION_MODE_INHERIT
+		rig.transform = Transform3D.IDENTITY
+		rig.reset_physics_interpolation()
+	rig.set_vehicle_pose(null)
 	if rig.rotation != Vector3.ZERO:
 		rig.rotation = rig.rotation.lerp(Vector3.ZERO, 1.0 - exp(-10.0 * dt))
 	if rig.position != Vector3.ZERO:
@@ -1663,6 +1684,11 @@ func exit_vehicle(bail := false) -> void:
 	state = S.AIR
 	if rig:
 		rig.set_ride_lean(0.0)
+		rig.set_vehicle_pose(null)
+		rig.top_level = false
+		rig.physics_interpolation_mode = Node.PHYSICS_INTERPOLATION_MODE_INHERIT
+		rig.transform = Transform3D.IDENTITY
+		rig.reset_physics_interpolation()
 		rig.rotation = Vector3.ZERO
 		rig.position = Vector3.ZERO
 	if cam:
@@ -1685,7 +1711,7 @@ func _st_vehicle(dt: float, inp: Dictionary) -> void:
 	var throttle := maxf(-inp.dir.y, 0.0)
 	var brake := maxf(inp.dir.y, 0.0)
 	vehicle.set_inputs(throttle, brake, -inp.dir.x, inp.jump_held, inp.sprint)
-	vehicle.set_driver_view(cam.aim_direction() if cam else global_basis.z,
+	vehicle.set_driver_view(cam.vehicle_aim_direction() if cam else global_basis.z,
 		inp)
 	global_position = vehicle.seat_global()
 	velocity = vehicle.linear_velocity

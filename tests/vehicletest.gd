@@ -30,20 +30,53 @@ func neutral(p) -> void:
 	p.ti.crouch_held = false
 	p.ti.interact_just = false
 	p.ti.grab = false
+	p.ti.vehicle_gear_just = false
+	p.ti.vehicle_flaps_just = false
+
+
+func rider_contract_ok(p, v) -> bool:
+	if p.rig.global_position.distance_to(v.rider_render_transform().origin) > 0.06:
+		return false
+	var slots: Array[StringName] = [
+		&"hand_left", &"hand_right", &"foot_left", &"foot_right"]
+	var contacts: PackedVector3Array = p.rig.limb_contact_points()
+	if contacts.size() != slots.size():
+		return false
+	for i in range(slots.size()):
+		var slot := slots[i]
+		if not v.has_rider_target(slot):
+			return false
+		# The IK solves the paw centre exactly; feet have a 3.5 cm authored toe
+		# offset. This bound therefore proves real contact without requiring all
+		# four extremity meshes to share one pivot convention.
+		if contacts[i].distance_to(v.rider_target_render_global(slot)) > 0.09:
+			return false
+	return true
 
 
 func mount(p, w, v) -> bool:
 	if p.vehicle != null:
 		p.exit_vehicle()
 		await sim(5)
-	p.global_position = v.interaction_position() + Vector3(1.2, 0.2, 0)
-	p.velocity = Vector3.ZERO
-	await sim(3)
-	p.ti.interact_just = true
-	await sim(3)
-	p.ti.interact_just = false
-	await sim(2)
-	return p.vehicle == v
+	neutral(p)
+	# A parked rigid body can settle a few centimetres between positioning the
+	# player and the next physics tick. Pulse the real contextual-E path up to
+	# three times, re-anchoring to the live seat each time, so this integration
+	# helper tests the interaction itself instead of a one-frame race.
+	for attempt in range(3):
+		p.global_position = v.interaction_position() + Vector3(1.2, 0.2, 0)
+		p.velocity = Vector3.ZERO
+		await sim(3)
+		p.ti.interact_just = true
+		await sim(1)
+		p.ti.interact_just = false
+		await sim(4)
+		if p.vehicle == v:
+			return true
+		if p.vehicle != null:
+			p.exit_vehicle()
+			await sim(5)
+	return false
 
 
 func dismount(p) -> void:
@@ -104,10 +137,52 @@ func run(main) -> void:
 	check("jeep static sag sits mid-travel", sag_ok)
 
 	# --- mounting through the real E path -----------------------------------
+	# Reproduce mounting while ADS has temporarily forced first person. Entry
+	# must clear ADS and restore the player's actual shoulder-view preference.
+	p.cam.set_view_mode(CameraRig.ViewMode.SHOULDER)
+	p.cam.set_aiming(true)
 	var mounted: bool = await mount(p, w, jeep)
 	check("E mounts the jeep through the interaction ladder", mounted)
+	check("mounting while ADS restores the preferred vehicle view",
+		not p.cam.aiming and p.cam.view_mode == CameraRig.ViewMode.SHOULDER)
 	check("mounting stows the weapon and disables the capsule",
 		p.is_weapon_stowed() and p._collision_shape.disabled)
+	await sim(18)
+	check("jeep rider is planted on authored seat and controls",
+		rider_contract_ok(p, jeep))
+	# Ground and water cockpits use vehicle-relative freelook. Rotate the parked
+	# chassis without touching the camera and prove its centered sightline follows.
+	var parked_jeep_basis: Basis = jeep.global_basis
+	p.cam._apply_view_mode(CameraRig.ViewMode.FIRST_PERSON)
+	jeep.global_basis = Basis(Vector3.UP, 0.38) * parked_jeep_basis
+	jeep.reset_physics_interpolation()
+	p.cam._process(1.0 / 60.0)
+	check("ground cockpit view turns with the vehicle chassis",
+		p.cam.vehicle_aim_direction().dot(jeep.global_basis.z) > 0.995)
+	p.cam._apply_view_mode(CameraRig.ViewMode.SHOULDER)
+	check("leaving a vehicle cockpit restores a level chase horizon",
+		p.cam.global_basis.y.dot(Vector3.UP) > 0.999)
+	jeep.global_basis = parked_jeep_basis
+	jeep.reset_physics_interpolation()
+
+	# Low range cannot jump ratios under throttle, but toggles cleanly stopped.
+	p.ti.dir = Vector2(0, -1)
+	p.ti.sprint = true
+	await sim(3)
+	check("jeep rejects low range while throttle is loaded", not jeep.low_range)
+	p.ti.dir = Vector2.ZERO
+	p.ti.sprint = false
+	await sim(3)
+	p.ti.sprint = true
+	await sim(3)
+	check("jeep selects low range only stopped and off-throttle",
+		jeep.low_range and jeep.engine.final_drive > 10.0)
+	p.ti.sprint = false
+	await sim(3)
+	p.ti.sprint = true
+	await sim(3)
+	p.ti.sprint = false
+	check("jeep can return to high range at rest", not jeep.low_range)
 
 	# --- drive: acceleration, gears, engine ---------------------------------
 	p.ti.dir = Vector2(0, -1)
@@ -124,8 +199,66 @@ func run(main) -> void:
 	# --- braking + reverse ---------------------------------------------------
 	p.ti.dir = Vector2(0, 1)
 	await sim(300)
+	var reverse_debug := "gear=%d velocity=%s safe=%s wheels=[" % [
+		jeep.engine.gear, jeep.linear_velocity,
+		str(jeep._direction_change_is_safe())]
+	for wheel in jeep.wheels:
+		reverse_debug += " %.2f/%s" % [wheel.spin * wheel.radius,
+			str(wheel.in_contact)]
+	reverse_debug += " ]"
 	check("brakes stop the jeep and holding S reverses",
-		jeep.forward_speed() < -1.2, "%.1f m/s" % jeep.forward_speed())
+		jeep.forward_speed() < -1.2,
+		"%.1f m/s %s" % [jeep.forward_speed(), reverse_debug])
+	# Force a realistic rollback while first is still selected. S must remain a
+	# brake until absolute speed is near zero; the old signed check chose reverse.
+	jeep.engine.gear = 1
+	jeep.linear_velocity = -jeep.global_basis.z * 8.0
+	for wheel in jeep.wheels:
+		wheel.spin = -8.0 / wheel.radius
+	p.ti.dir = Vector2(0, 1)
+	await sim(20)
+	check("rollback braking cannot select reverse while still moving",
+		jeep.engine.gear == 1 and jeep.forward_speed() < -0.7,
+		"gear=%d v=%.1f" % [jeep.engine.gear, jeep.forward_speed()])
+	# Forward speed is near zero during a sideways skid, but the chassis is not
+	# stopped. Holding S must remain braking instead of engaging reverse.
+	jeep.engine.gear = 1
+	jeep.linear_velocity = jeep.global_basis.x * 8.0
+	for wheel in jeep.wheels:
+		wheel.spin = 0.0
+	p.ti.dir = Vector2(0, 1)
+	await sim(20)
+	check("sideways skid cannot select reverse",
+		jeep.engine.gear == 1 and jeep.speed() > 0.7,
+		"gear=%d speed=%.1f" % [jeep.engine.gear, jeep.speed()])
+	# Even at zero chassis/wheel speed, an airborne transmission cannot safely
+	# swap direction because there is no grounded driven contact.
+	jeep.linear_velocity = Vector3.ZERO
+	var wheel_contacts: Array[bool] = []
+	for wheel in jeep.wheels:
+		wheel_contacts.append(wheel.in_contact)
+		wheel.in_contact = false
+		wheel.spin = 0.0
+	check("airborne jeep cannot select reverse",
+		not jeep._direction_change_is_safe())
+	for i in range(jeep.wheels.size()):
+		jeep.wheels[i].in_contact = wheel_contacts[i]
+	# Reverse uses the raw brake pedal as throttle. Even below the transfer-case
+	# speed threshold, holding S must keep SHIFT from changing ratio under load.
+	jeep.engine.gear = -1
+	jeep.linear_velocity = -jeep.global_basis.z * 0.25
+	for wheel in jeep.wheels:
+		wheel.spin = -0.25 / wheel.radius
+	p.ti.sprint = false
+	await sim(2)
+	p.ti.sprint = true
+	await sim(3)
+	check("jeep rejects low range while reverse pedal is loaded",
+		not jeep.low_range and jeep.input_brake > 0.9)
+	p.ti.sprint = false
+	jeep.linear_velocity = Vector3.ZERO
+	for wheel in jeep.wheels:
+		wheel.spin = 0.0
 	neutral(p)
 	await sim(60)
 
@@ -145,15 +278,32 @@ func run(main) -> void:
 
 	# --- dismount ------------------------------------------------------------
 	await dismount(p)
+	await sim(45)
 	check("E dismounts and restores the monkey",
 		p.vehicle == null and not p._collision_shape.disabled
 		and p.collision_layer == 1)
 	check("released jeep parks with its brakes on",
-		jeep.driver == null)
+		jeep.driver == null and jeep.input_brake > 0.99
+		and jeep.input_handbrake
+		and Vector2(jeep.linear_velocity.x, jeep.linear_velocity.z).length() < 0.8
+		and absf(jeep.linear_velocity.y) < 3.5,
+		"brake=%.2f handbrake=%s velocity=%s" % [jeep.input_brake,
+			str(jeep.input_handbrake), jeep.linear_velocity])
 
 	# --- motorcycle ----------------------------------------------------------
 	mounted = await mount(p, w, bike)
 	check("monkey saddles the dual-sport", mounted)
+	await sim(18)
+	check("bike rider is planted on authored saddle and controls",
+		rider_contract_ok(p, bike))
+	var bike_basis: Basis = bike.global_basis
+	bike.global_basis = Basis.from_euler(Vector3(-0.62,
+		bike_basis.get_euler(EULER_ORDER_YXZ).y, 0.0), EULER_ORDER_YXZ)
+	bike.input_throttle = 1.0
+	check("bike anti-loop detects nose-up throttle before drivetrain step",
+		bike.anti_loop_active())
+	bike.global_basis = bike_basis
+	bike.reset_physics_interpolation()
 	p.ti.dir = Vector2(0, -1)
 	await sim(120)
 	check("bike balance keeps it upright while accelerating",
@@ -192,37 +342,147 @@ func run(main) -> void:
 	# --- airboat over grass ---------------------------------------------------
 	mounted = await mount(p, w, boat)
 	check("monkey boards the airboat", mounted)
+	await sim(18)
+	check("airboat rider is planted on authored bench and controls",
+		rider_contract_ok(p, boat))
+	# One wet float point marks the whole boat as in water. That must not turn
+	# off analytic support beneath the dry half when its shoreline chunk has
+	# streamed out. Probe the fallback without applying forces, then restore the
+	# live mounted body before another physics frame can observe the test pose.
+	var boat_transform_before_fallback: Transform3D = boat.global_transform
+	var boat_linear_before_fallback: Vector3 = boat.linear_velocity
+	var boat_angular_before_fallback: Vector3 = boat.angular_velocity
+	var boat_space_before_fallback: PhysicsDirectSpaceState3D = boat._space
+	var boat_water_before_fallback: bool = boat._in_water
+	boat._space = null
+	boat.global_basis = Basis.IDENTITY
+	boat.global_position.y = Gen.height(
+		boat.global_position.x, boat.global_position.z) + 0.12
+	boat.linear_velocity = Vector3.ZERO
+	boat.angular_velocity = Vector3.ZERO
+	boat._in_water = true
+	var dry_support_points: int = boat._apply_streaming_safe_land_support(
+		1.0 / 60.0, false)
+	check("a wet airboat keeps dry support while shoreline terrain streams",
+		dry_support_points > 0, "supported=%d" % dry_support_points)
+	boat._space = boat_space_before_fallback
+	boat.global_transform = boat_transform_before_fallback
+	boat.linear_velocity = boat_linear_before_fallback
+	boat.angular_velocity = boat_angular_before_fallback
+	boat._in_water = boat_water_before_fallback
+	boat.reset_physics_interpolation()
+	boat.linear_velocity = Vector3(0, 12, 0)
+	check("vertical wave motion adds no airboat rudder authority",
+		boat._rudder_flow_speed() < 0.01)
+	boat.linear_velocity = boat.global_basis.z * 8.0 + Vector3.UP * 12.0
+	check("airboat rudder reads only planar forward flow",
+		absf(boat._rudder_flow_speed() - 8.0) < 0.05)
+	boat.linear_velocity = -boat.global_basis.z * 8.0 + Vector3.UP * 12.0
+	check("backward airboat drift reverses hull-flow steering",
+		absf(boat._rudder_flow_speed() + 8.0) < 0.05)
+	boat.linear_velocity = Vector3.ZERO
 	p.ti.dir = Vector2(0, -1)
 	await sim(300)
 	check("prop thrust slides the airboat over wet grass",
-		boat.speed() > 3.5, "%.1f m/s" % boat.speed())
+		boat.speed() > 3.5,
+		"speed=%.2f spool=%.2f throttle=%.2f brake=%.2f driver=%s pos=%s" % [
+			boat.speed(), boat.spool, boat.input_throttle, boat.input_brake,
+			str(boat.driver != null), boat.global_position])
+	var fan_before_chop: float = boat.spool
+	p.ti.dir = Vector2(0, 1)
+	await sim(15)
+	check("S rapidly chops the fan for a realistic coast-down",
+		boat.spool < fan_before_chop - 0.45,
+		"before=%.2f after=%.2f" % [fan_before_chop, boat.spool])
 	neutral(p)
 	await sim(120)
 	await dismount(p)
 
 	# --- fighter jet: taxi, takeoff, climb, afterburner, bail-out -------------
+	# Deliberately approach with the old camera aimed behind and above the jet.
+	p.cam.yaw = 0.0
+	p.cam.pitch = 0.35
 	mounted = await mount(p, w, jet)
 	check("monkey straps into the fighter jet", mounted)
-	# Align the camera aim with the jet's nose (spawned facing +Z): the FBW
-	# chases the aim, so a misaligned camera means a hard low turn after
-	# liftoff. aim = (-sin(yaw), 0, -cos(yaw)) → yaw = PI points +Z.
-	p.cam.yaw = PI
-	p.cam.pitch = 0.0
+	await sim(18)
+	check("jet mount aligns pursuit aim with the aircraft nose",
+		p.cam.vehicle_aim_direction().dot(jet.global_basis.z) > 0.995)
+	check("jet rider is planted in cockpit and on all controls",
+		rider_contract_ok(p, jet))
+	var flight_aim: Vector3 = p.cam.vehicle_aim_direction()
+	p.cam._apply_view_mode(CameraRig.ViewMode.FRONT)
+	check("front camera never reverses the jet control aim",
+		p.cam.vehicle_aim_direction().dot(flight_aim) > 0.999)
+	# Cockpit presentation follows the aircraft attitude while the pursuit aim
+	# stays in world space. Roll the parked airframe between physics ticks so the
+	# assertion is deterministic and cannot disturb the takeoff run below.
+	var parked_jet_basis: Basis = jet.global_basis
+	p.cam._apply_view_mode(CameraRig.ViewMode.FIRST_PERSON)
+	jet.global_basis = parked_jet_basis.rotated(
+		parked_jet_basis.z.normalized(), 0.42)
+	jet.reset_physics_interpolation()
+	p.cam._process(1.0 / 60.0)
+	check("cockpit camera follows the jet's rolled horizon",
+		p.cam.global_basis.y.dot(jet.global_basis.y) > 0.98)
+	jet.global_basis = parked_jet_basis
+	jet.reset_physics_interpolation()
+	p.cam._apply_view_mode(CameraRig.ViewMode.SHOULDER)
+	p.cam._process(1.0 / 60.0)
+	check("leaving the rolled jet cockpit clears pitch and roll",
+		p.cam.global_basis.y.dot(Vector3.UP) > 0.999)
+	# G/F travel through the same gathered just-pressed frame as normal play.
+	p.ti.vehicle_gear_just = true
+	p.ti.vehicle_flaps_just = true
+	await sim(1)
+	check("gathered G/F inputs toggle jet gear and flaps once",
+		not jet.gear_down and not jet.flaps_down)
+	await sim(2)
+	check("jet gear/flaps do not retrigger after the press frame",
+		not jet.gear_down and not jet.flaps_down)
+	p.ti.vehicle_gear_just = true
+	p.ti.vehicle_flaps_just = true
+	await sim(1)
+	check("second gathered G/F press restores takeoff configuration",
+		jet.gear_down and jet.flaps_down)
+	check("camera cycling preserves straight-ahead jet takeoff aim",
+		p.cam.vehicle_aim_direction().dot(jet.global_basis.z) > 0.995)
+	var runway_forward: Vector3 = Vector3(
+		jet.global_basis.z.x, 0.0, jet.global_basis.z.z).normalized()
+	var runway_side: Vector3 = runway_forward.cross(Vector3.UP).normalized()
+	var runway_origin: Vector3 = jet.global_position
 	p.ti.dir = Vector2(0, -1)   # W raises the throttle setpoint
 	await sim(240)
 	check("turbine spools and the jet rolls out",
 		jet.spool > 0.8 and jet.forward_speed() > 16.0,
 		"spool=%.2f v=%.1f" % [jet.spool, jet.forward_speed()])
 	# Rotate: pull the aim up once fast enough.
-	while jet.forward_speed() < 78.0:
-		await sim(10)
+	for i in range(900):
+		if jet.forward_speed() >= 78.0:
+			break
+		await sim(1)
+	var rotation_heading_dot: float = jet.global_basis.z.normalized().dot(
+		runway_forward)
+	var rotation_lateral: float = absf(
+		(jet.global_position - runway_origin).dot(runway_side))
+	var stable_rotation_run: bool = jet.forward_speed() >= 78.0 \
+		and rotation_heading_dot > 0.96 and rotation_lateral < 8.0 \
+		and jet.global_basis.y.y > 0.80
+	check("jet reaches rotation speed straight and upright", stable_rotation_run,
+		"v=%.1f heading=%.3f lateral=%.1fm up=%.2f spool=%.2f pos=%s" % [
+			jet.forward_speed(), rotation_heading_dot, rotation_lateral,
+			jet.global_basis.y.y, jet.spool, jet.global_position])
+	if not stable_rotation_run:
+		print("VEHICLETEST %d/%d FAIL" % [total - fails, total])
+		main.get_tree().quit(1)
+		return
 	p.cam.pitch = 0.30
 	p.ti.sprint = true   # afterburner
 	await sim(480)
 	var altitude: float = jet.global_position.y - 2.0
 	check("jet rotates and climbs away", altitude > 25.0,
 		"alt=%.0fm v=%.0f" % [altitude, jet.speed()])
-	jet._toggle_gear()
+	p.ti.vehicle_gear_just = true
+	await sim(1)
 	p.cam.pitch = 0.05
 	Engine.time_scale = 3.0
 	await sim(2500)

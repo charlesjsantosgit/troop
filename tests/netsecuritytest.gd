@@ -42,6 +42,27 @@ func _run() -> void:
 	_check(net.MAX_COLLECTED_IDS == 200000 and net.MAX_CHEST_CLAIMS == 50000,
 		"authoritative persistent-ID stores have explicit snapshot-aligned ceilings")
 
+	var owned_vehicle := "v:security#owned"
+	var other_vehicle := "v:security#other"
+	var unclaimed_vehicle := "v:security#unclaimed"
+	net.claimed_vehicles.clear()
+	_check(net._sender_owns_vehicle_state(77, -1, ""),
+		"ordinary on-foot state remains authorized without a vehicle claim")
+	_check(not net._sender_owns_vehicle_state(77, 1, unclaimed_vehicle),
+		"unclaimed vehicle state is rejected")
+	net.claimed_vehicles[owned_vehicle] = 77
+	net.claimed_vehicles[other_vehicle] = 88
+	_check(not net._sender_owns_vehicle_state(77, 1, other_vehicle),
+		"spoofed vehicle state owned by another peer is rejected")
+	_check(net._sender_owns_vehicle_state(77, 1, owned_vehicle),
+		"vehicle state matching the sender's exact claim is accepted")
+	_check(not net._sender_owns_vehicle_state(77, -1, owned_vehicle) \
+		and not net._sender_owns_vehicle_state(77, 1, "v:bad path#0") \
+		and not net._sender_owns_vehicle_state(77, net.MAX_VEHICLE_KIND + 1,
+			owned_vehicle),
+		"malformed vehicle kind and ID combinations are rejected")
+	net.claimed_vehicles.clear()
+
 	var pcm := PackedInt32Array()
 	pcm.resize(Codec.RECOMMENDED_FRAME_SAMPLES)
 	var packet: PackedByteArray = Codec.encode_pcm16(pcm)

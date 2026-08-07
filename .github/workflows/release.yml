@@ -37,6 +37,9 @@ jobs:
             --repository "$GITHUB_REPOSITORY" \
             --server-host "$TROOP_PUBLIC_SERVER_HOST"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          RELEASE_TITLE="$(python3 -c 'import json; print(json.load(open("packaging/release_metadata.json", encoding="utf-8"))["release_title"])')"
+          test -n "$RELEASE_TITLE"
+          echo "title=$RELEASE_TITLE" >> "$GITHUB_OUTPUT"
 
       - name: Install Godot 4.7 and export templates
         env:
@@ -89,6 +92,15 @@ jobs:
           "$GODOT_BIN" --headless --path . --script res://tests/voicetest.gd
           "$GODOT_BIN" --headless --path . --script res://tests/netsecuritytest.gd
 
+      - name: Run vehicle physics and world regressions
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$GODOT_BIN" --headless --path . res://scenes/main.tscn \
+            --quit-after 180000 -- vehicletest
+          "$GODOT_BIN" --headless --path . res://scenes/main.tscn \
+            --quit-after 60000 -- vehicleworldtest
+
       - name: Build installers and cross-platform content pack
         shell: bash
         run: ./packaging/build_installers.sh
@@ -123,7 +135,7 @@ jobs:
           gh release create "$GITHUB_REF_NAME" \
             --draft \
             --verify-tag \
-            --title "TROOP ${{ steps.release.outputs.version }}" \
+            --title "${{ steps.release.outputs.title }}" \
             --generate-notes
           gh release upload "$GITHUB_REF_NAME" dist/TROOP-*
           gh release edit "$GITHUB_REF_NAME" --draft=false --latest

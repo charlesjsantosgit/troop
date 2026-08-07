@@ -78,6 +78,7 @@ either one.
 1. Set `application/config/version` in `project.godot` to the new numeric
    version (`major.minor.patch`, with an optional fourth numeric component).
 2. Review `packaging/release_metadata.json`:
+   - set `release_title` to the player-facing GitHub release name;
    - increment `network_protocol` when multiplayer wire compatibility breaks;
      keep `application/config/network_protocol` in `project.godot` equal to it;
    - set `requires_installer` to `true` for engine, updater bootstrap, native

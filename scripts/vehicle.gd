@@ -17,6 +17,37 @@ enum Kind { BIKE, JEEP, BOAT, JET }
 const KIND_NAMES := ["DUAL-SPORT", "SAFARI JEEP", "AIRBOAT", "FIGHTER JET"]
 const ENTER_RANGE := 3.4
 const IMPACT_DAMAGE_THRESHOLD := 9.0   # m/s of velocity lost in one tick
+const DIRECTION_CHANGE_MAX_PLANAR_SPEED := 0.7
+const DIRECTION_CHANGE_MAX_TOTAL_SPEED := 0.9
+# Raycast tires can retain a small single-wheel spin mismatch while the stopped
+# chassis is held on all four brakes. This still rejects meaningful driveline
+# motion without deadlocking the familiar hold-S-to-reverse control.
+const DIRECTION_CHANGE_MAX_WHEEL_SPEED := 2.5
+
+
+## Render-only adapter consumed by MonkeyRig. The rig expects the vehicle pose
+## interface, while this adapter deliberately redirects contact reads to the
+## interpolated render transforms without changing the raw physics/test API.
+class RiderRenderPose:
+	extends RefCounted
+	var _vehicle_ref: WeakRef
+
+	func _init(owner) -> void:
+		_vehicle_ref = weakref(owner)
+
+	var kind: int:
+		get:
+			var owner = _vehicle_ref.get_ref()
+			return int(owner.kind) if is_instance_valid(owner) else 0
+
+	func has_rider_target(slot: StringName) -> bool:
+		var owner = _vehicle_ref.get_ref()
+		return is_instance_valid(owner) and owner.has_rider_target(slot)
+
+	func rider_target_global(slot: StringName) -> Vector3:
+		var owner = _vehicle_ref.get_ref()
+		return owner.rider_target_render_global(slot) \
+			if is_instance_valid(owner) else Vector3.INF
 
 var vid := ""
 var kind := Kind.JEEP
@@ -39,6 +70,14 @@ var drag_area := 1.6                   # Cd * A, m^2
 var steer_speed := 3.2                 # steering response, 1/s
 var max_steer_angle := 0.55            # rad at standstill
 var seat_offset := Vector3(0, 0.9, 0)
+## Vehicle-local location of the MonkeyRig origin while occupied. This is
+## authored per machine so the pelvis rests on the actual cushion/saddle; it is
+## deliberately separate from seat_offset, which remains the replicated player
+## anchor and interaction point.
+var rider_root_offset := Vector3(0, 0.46, 0)
+## Named control contacts used by the rider's final-pass IK. Values are either
+## vehicle-local Vector3s or Node3Ds parented under moving controls.
+var rider_targets: Dictionary = {}
 var exit_offsets: Array[Vector3] = [Vector3(1.4, 0.4, 0), Vector3(-1.4, 0.4, 0),
 	Vector3(0, 0.6, 2.4), Vector3(0, 0.6, -2.4)]
 var camera_distance := 6.0
@@ -50,6 +89,9 @@ var engine_stream := "engine_v8"
 var engine_pitch_base := 0.6
 var engine_pitch_span := 1.25
 var driver_mass := 38.0
+## Vehicle-local offset from the authored rig root to the seated driver's mass
+## centre. Subclasses can lower this for a tightly crouched riding posture.
+var driver_center_offset := Vector3(0, 0.62, 0)
 
 ## Anti-roll bars: [left wheel index, right wheel index, N/m of compression
 ## difference] — transfers load across an axle to resist body roll.
@@ -73,6 +115,10 @@ var _idle_timer := 0.0
 var _righting_timer := 0.0
 var _space: PhysicsDirectSpaceState3D
 var _exclude: Array[RID] = []
+var _unladen_mass := 0.0
+var _unladen_center_of_mass := Vector3.ZERO
+var _driver_load_applied := false
+var _rider_render_pose: RiderRenderPose
 
 
 func _ready() -> void:
@@ -112,6 +158,65 @@ func seat_global() -> Vector3:
 	return global_position + global_basis * seat_offset
 
 
+func rider_root_global() -> Vector3:
+	return global_position + global_basis * rider_root_offset
+
+
+## Render-frame saddle transform. Raw rider_root_global remains authoritative
+## for physics and deterministic tests; visible rigs use this interpolated pose
+## so they stay welded to the chassis between physics ticks.
+func rider_render_transform() -> Transform3D:
+	var vehicle_transform := get_global_transform_interpolated()
+	return Transform3D(vehicle_transform.basis * Basis(Vector3.UP, PI),
+		vehicle_transform * rider_root_offset)
+
+
+func seat_render_global() -> Vector3:
+	return get_global_transform_interpolated() * seat_offset
+
+
+## Register a rider contact under a moving vehicle part (steering wheel, bar,
+## stick, pedal). Keeping the marker in that hierarchy makes paws and feet stay
+## planted as the visible control animates.
+func add_rider_target(parent: Node3D, slot: StringName,
+		local_position: Vector3) -> Node3D:
+	var marker := Node3D.new()
+	marker.name = "RiderTarget_" + str(slot)
+	marker.position = local_position
+	parent.add_child(marker)
+	rider_targets[slot] = marker
+	return marker
+
+
+func rider_target_global(slot: StringName) -> Vector3:
+	var value: Variant = rider_targets.get(slot)
+	if value is Node3D and is_instance_valid(value):
+		return (value as Node3D).global_position
+	if value is Vector3:
+		return global_position + global_basis * (value as Vector3)
+	return Vector3.INF
+
+
+## Interpolated counterpart used only by render-driven MonkeyRig IK.
+func rider_target_render_global(slot: StringName) -> Vector3:
+	var value: Variant = rider_targets.get(slot)
+	if value is Node3D and is_instance_valid(value):
+		return (value as Node3D).get_global_transform_interpolated().origin
+	if value is Vector3:
+		return get_global_transform_interpolated() * (value as Vector3)
+	return Vector3.INF
+
+
+func rider_render_pose() -> RiderRenderPose:
+	if _rider_render_pose == null:
+		_rider_render_pose = RiderRenderPose.new(self)
+	return _rider_render_pose
+
+
+func has_rider_target(slot: StringName) -> bool:
+	return rider_target_global(slot).is_finite()
+
+
 func interaction_position() -> Vector3:
 	return seat_global()
 
@@ -124,21 +229,43 @@ func begin_drive(player: Node3D) -> void:
 	driver = player
 	sleeping = false
 	freeze = false
-	mass += driver_mass
+	# Treat the monkey as real payload instead of adding weight at the chassis
+	# origin. The combined CoM matters most on the light motorcycle, where a
+	# rider is a meaningful fraction of the moving mass.
+	if not _driver_load_applied:
+		_unladen_mass = mass
+		_unladen_center_of_mass = center_of_mass
+		var rider_com := rider_root_offset + driver_center_offset
+		var loaded_mass := _unladen_mass + driver_mass
+		center_of_mass_mode = RigidBody3D.CENTER_OF_MASS_MODE_CUSTOM
+		center_of_mass = (_unladen_center_of_mass * _unladen_mass
+			+ rider_com * driver_mass) / maxf(loaded_mass, 1.0)
+		mass = loaded_mass
+		_driver_load_applied = true
 	input_throttle = 0.0
 	input_brake = 0.0
 	input_steer = 0.0
 	input_handbrake = false
+	input_aux = false
+	_reverse_hold = 0.0
+	_steer_target = 0.0
 	_prev_velocity = linear_velocity
 
 
 ## Ends local driving and returns a safe world-space exit position.
 func end_drive() -> Vector3:
 	driver = null
-	mass = maxf(mass - driver_mass, 1.0)
+	if _driver_load_applied:
+		mass = maxf(_unladen_mass, 1.0)
+		center_of_mass = _unladen_center_of_mass
+		_driver_load_applied = false
 	input_throttle = 0.0
-	input_brake = 0.4
+	input_brake = 1.0
+	input_steer = 0.0
 	input_handbrake = true
+	input_aux = false
+	_reverse_hold = 0.0
+	_steer_target = 0.0
 	return _pick_exit_position()
 
 
@@ -281,17 +408,39 @@ func _physics_process(dt: float) -> void:
 		# suspension settles, then let the body sleep.
 		input_brake = 1.0
 		input_throttle = 0.0
+		input_steer = 0.0
+		input_aux = false
+		input_handbrake = true
 		if sleeping:
 			_update_audio(dt, 0.0, 0.0)
 			return
 	else:
 		_idle_timer = 0.0
 	_simulate(dt)
+	if driver == null:
+		_apply_parked_hold(dt)
 	_update_visuals(dt)
 	_update_audio(dt, engine.rpm_fraction(),
 		input_throttle if driver else 0.0)
 	_detect_impacts()
 	_sanity_clamp()
+
+
+## A real parking brake resists the whole parked chassis, not merely wheel spin.
+## Add a bounded low-speed hold for ground machines so a residual sideways skid
+## cannot carry an abandoned jeep away after the player has stopped and exited.
+func _apply_parked_hold(_dt: float) -> void:
+	if kind != Kind.BIKE and kind != Kind.JEEP:
+		return
+	var grounded := false
+	for wheel in wheels:
+		grounded = grounded or wheel.in_contact
+	if not grounded or global_basis.y.y < 0.35:
+		return
+	var planar := Vector3(linear_velocity.x, 0.0, linear_velocity.z)
+	if planar.length() < 4.0:
+		apply_central_force(-planar * mass * 5.0)
+		apply_torque(-Vector3.UP * angular_velocity.y * mass * 1.2)
 
 
 ## Core ground-vehicle simulation; subclasses extend or replace.
@@ -303,12 +452,17 @@ func _simulate(dt: float) -> void:
 	var throttle := input_throttle if driver else 0.0
 	var brake := input_brake if driver else 1.0
 	if engine.reverse_ratio > 0.0 and driver:
-		var fwd_v := forward_speed()
-		if engine.gear >= 1 and input_brake > 0.4 and fwd_v < 0.7:
+		# Direction changes are only legal at a genuine stop. Signed comparisons
+		# used to select reverse while already rolling backward quickly (and first
+		# while rolling forward), turning the driver's brake into acceleration.
+		var stopped_for_direction_change := _direction_change_is_safe()
+		if engine.gear >= 1 and input_brake > 0.4 \
+				and stopped_for_direction_change:
 			_reverse_hold += dt
 			if _reverse_hold > 0.3:
 				engine.gear = -1
-		elif engine.gear == -1 and input_throttle > 0.4 and fwd_v > -0.7:
+		elif engine.gear == -1 and input_throttle > 0.4 \
+				and stopped_for_direction_change:
 			engine.gear = 1
 			_reverse_hold = 0.0
 		else:
@@ -340,6 +494,24 @@ func _simulate(dt: float) -> void:
 	_apply_aero(dt)
 	if driver:
 		_assist_recovery(dt)
+
+
+## A transmission direction change requires the chassis and driveline to be
+## genuinely stopped. Longitudinal speed alone is insufficient during a side
+## slide or jump, and a spinning driven wheel still carries driveline energy.
+func _direction_change_is_safe() -> bool:
+	var planar_speed := Vector2(linear_velocity.x, linear_velocity.z).length()
+	if planar_speed >= DIRECTION_CHANGE_MAX_PLANAR_SPEED \
+			or speed() >= DIRECTION_CHANGE_MAX_TOTAL_SPEED:
+		return false
+	var driven_contact := false
+	for wheel in wheels:
+		if not wheel.driven:
+			continue
+		driven_contact = driven_contact or wheel.in_contact
+		if absf(wheel.spin * wheel.radius) >= DIRECTION_CHANGE_MAX_WHEEL_SPEED:
+			return false
+	return driven_contact
 
 
 func _advance_steering(dt: float) -> void:

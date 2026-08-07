@@ -88,6 +88,7 @@ var _death_view := false
 var _death_follow_target: Node3D
 var _vehicle_view := false
 var _vehicle: Vehicle = null
+var _vehicle_local_yaw := 0.0
 
 
 func _ready() -> void:
@@ -158,9 +159,22 @@ func _apply_first_person(enabled: bool) -> void:
 
 
 func _apply_view_mode(mode: int) -> void:
+	var was_cockpit := _vehicle_view and first_person \
+		and is_instance_valid(_vehicle)
+	var was_relative_cockpit := was_cockpit \
+		and _vehicle.kind != Vehicle.Kind.JET
+	var previous_look := _vehicle_relative_look_direction() \
+		if was_relative_cockpit else _look_direction(false)
 	view_mode = clampi(mode, ViewMode.SHOULDER, ViewMode.FRONT)
 	first_person = view_mode == ViewMode.FIRST_PERSON
 	front_view = view_mode == ViewMode.FRONT
+	var relative_cockpit := _vehicle_view and first_person \
+		and is_instance_valid(_vehicle) \
+		and _vehicle.kind != Vehicle.Kind.JET
+	if relative_cockpit and not was_relative_cockpit:
+		_capture_vehicle_local_look(previous_look)
+	elif was_relative_cockpit and not relative_cockpit:
+		_set_look_direction(previous_look)
 	var limits := pitch_limits()
 	pitch = clampf(pitch, limits.x, limits.y)
 	_arm.spring_length = FIRST_PERSON_ARM if first_person \
@@ -180,6 +194,12 @@ func _apply_view_mode(mode: int) -> void:
 	snap_to_target()
 	if front_view or _death_view:
 		_zero_movement_output()
+	if was_cockpit and not first_person:
+		# Cockpit mode writes a complete rolled/pitched root basis. Rebuild a
+		# level orbit immediately so chase, front, and eventual on-foot views never
+		# inherit the aircraft or bike horizon in their x/z Euler components.
+		var orbit_yaw := yaw + (PI if front_view else 0.0)
+		global_basis = Basis(Vector3.UP, orbit_yaw + _recoil_yaw)
 
 
 func toggle_view() -> int:
@@ -288,9 +308,27 @@ func begin_death_view(follow_target: Node3D) -> void:
 ## follow target, arm length, FOV speed scaling, and shake all come from the
 ## vehicle so a motorcycle feels tight and a jet reads its 700 mph.
 func begin_vehicle_view(v: Vehicle) -> void:
+	# ADS temporarily forces first person. Restore the player's actual preference
+	# before declaring a vehicle view; otherwise releasing aim cannot undo the
+	# stale temporary cockpit because aiming has already been cleared.
+	aiming = false
+	_apply_view_mode(preferred_view_mode)
 	_vehicle = v
 	_vehicle_view = true
-	aiming = false
+	var vehicle_basis := v.get_global_transform_interpolated().basis
+	# A jet's pursuit controller consumes the camera aim immediately. Start it
+	# on the aircraft nose instead of inheriting an unrelated on-foot/selfie aim
+	# that can command a violent turn during the takeoff roll.
+	if v.kind == Vehicle.Kind.JET:
+		_set_look_direction(vehicle_basis.z)
+	else:
+		# Ground and water cockpits use vehicle-relative freelook. Center the local
+		# view down the machine on entry and seed the chase orbit from its heading.
+		var flat_forward := Vector3(vehicle_basis.z.x, 0.0, vehicle_basis.z.z)
+		if flat_forward.length_squared() > 0.001:
+			_set_look_direction(flat_forward.normalized())
+		_vehicle_local_yaw = 0.0
+		pitch = 0.0
 	_reset_movement_camera()
 	_arm.spring_length = v.camera_distance
 	snap_to_target()
@@ -299,10 +337,15 @@ func begin_vehicle_view(v: Vehicle) -> void:
 func end_vehicle_view() -> void:
 	if not _vehicle_view:
 		return
+	if _is_relative_vehicle_cockpit():
+		# Preserve the last local freelook as a world-space on-foot heading.
+		_set_look_direction(_vehicle_relative_look_direction())
 	_vehicle_view = false
 	_vehicle = null
 	_zero_movement_output()
 	_apply_view_mode(preferred_view_mode)
+	var orbit_yaw := yaw + (PI if front_view else 0.0)
+	global_basis = Basis(Vector3.UP, orbit_yaw + _recoil_yaw)
 	_last_velocity = target.velocity if target else Vector3.ZERO
 
 
@@ -311,6 +354,57 @@ func aim_direction() -> Vector3:
 	if is_instance_valid(_cam):
 		return -_cam.global_transform.basis.z
 	return Vector3.FORWARD
+
+
+## Stable piloting aim, independent of camera-only presentation. In particular,
+## FRONT adds PI to the rendered orbit but must never reverse a jet's controls.
+func vehicle_aim_direction() -> Vector3:
+	if not _vehicle_view:
+		return aim_direction()
+	if _is_relative_vehicle_cockpit():
+		return _vehicle_relative_look_direction()
+	return _look_direction(false)
+
+
+func _look_direction(include_front: bool) -> Vector3:
+	var look_yaw := yaw + (PI if include_front else 0.0)
+	var cp := cos(pitch)
+	return Vector3(-sin(look_yaw) * cp, sin(pitch),
+		-cos(look_yaw) * cp).normalized()
+
+
+func _is_relative_vehicle_cockpit() -> bool:
+	return _vehicle_view and first_person and is_instance_valid(_vehicle) \
+		and _vehicle.kind != Vehicle.Kind.JET
+
+
+func _vehicle_relative_look_direction() -> Vector3:
+	if not is_instance_valid(_vehicle):
+		return _look_direction(false)
+	var cp := cos(pitch)
+	var local_direction := Vector3(-sin(_vehicle_local_yaw) * cp,
+		sin(pitch), cos(_vehicle_local_yaw) * cp)
+	return (_vehicle.get_global_transform_interpolated().basis \
+		* local_direction).normalized()
+
+
+func _capture_vehicle_local_look(world_direction: Vector3) -> void:
+	if not is_instance_valid(_vehicle) or world_direction.length_squared() < 0.001:
+		return
+	var vehicle_basis := _vehicle.get_global_transform_interpolated().basis
+	var local_direction := (vehicle_basis.inverse() \
+		* world_direction.normalized()).normalized()
+	_vehicle_local_yaw = atan2(-local_direction.x, local_direction.z)
+	pitch = asin(clampf(local_direction.y, -1.0, 1.0))
+
+
+func _set_look_direction(direction: Vector3) -> void:
+	if direction.length_squared() < 0.001:
+		return
+	var normalized := direction.normalized()
+	yaw = atan2(-normalized.x, -normalized.z)
+	var limits := pitch_limits()
+	pitch = clampf(asin(clampf(normalized.y, -1.0, 1.0)), limits.x, limits.y)
 
 
 func end_death_view() -> void:
@@ -330,7 +424,11 @@ func pitch_limits() -> Vector2:
 func apply_look(relative: Vector2) -> void:
 	var look_sensitivity := effective_sensitivity()
 	var limits := pitch_limits()
-	yaw -= relative.x * look_sensitivity
+	if _is_relative_vehicle_cockpit():
+		_vehicle_local_yaw = wrapf(_vehicle_local_yaw \
+			- relative.x * look_sensitivity, -PI, PI)
+	else:
+		yaw -= relative.x * look_sensitivity
 	pitch = clampf(pitch - relative.y * look_sensitivity, limits.x, limits.y)
 
 
@@ -404,10 +502,25 @@ func _process(dt: float) -> void:
 		global_position = global_position.lerp(
 			target_pos + Vector3.UP * height, 1.0 - exp(-follow_rate * dt))
 	var orbit_yaw := yaw + (PI if front_view else 0.0)
-	rotation.y = orbit_yaw + _recoil_yaw
+	var cockpit_view := _vehicle_view and first_person \
+		and is_instance_valid(_vehicle)
+	if cockpit_view:
+		# Jets keep a world-space pursuit sightline; ground and water vehicles use
+		# the vehicle-relative freelook direction built above. Both inherit the
+		# machine's up axis so chassis roll and pitch remain readable.
+		var vehicle_basis := _vehicle.get_global_transform_interpolated().basis
+		var look_direction := vehicle_aim_direction()
+		var cockpit_up := vehicle_basis.y.normalized()
+		if absf(look_direction.dot(cockpit_up)) > 0.97:
+			cockpit_up = vehicle_basis.x.normalized()
+		global_basis = Basis.looking_at(look_direction, cockpit_up)
+	else:
+		# Assign the whole basis, not only rotation.y: the prior cockpit frame may
+		# have left full vehicle pitch/roll on this top-level camera root.
+		global_basis = Basis(Vector3.UP, orbit_yaw + _recoil_yaw)
 	_advance_movement_camera(dt, motion_velocity, grounded, orbit_yaw)
 	_pitch_node.rotation.x = clampf(
-		pitch + _recoil_pitch,
+		_recoil_pitch if cockpit_view else pitch + _recoil_pitch,
 		-CAMERA_PITCH_LIMIT, CAMERA_PITCH_LIMIT)
 
 	var fov_speed_scale := 36.0
@@ -690,7 +803,9 @@ func _advance_vehicle_camera(dt: float) -> void:
 	_last_velocity = v.linear_velocity
 	var longitudinal := clampf(
 		accel.dot(v.global_basis.z) / 45.0, -0.06, 0.06)
-	var bank := aux.y * v.camera_bank_factor
+	# Cockpit orientation already uses the vehicle's full up axis; adding the
+	# chase-camera bank again would double-roll the pilot's head.
+	var bank := 0.0 if first_person else aux.y * v.camera_bank_factor
 	if is_instance_valid(_camera_mount):
 		_camera_mount.position = _mount_base_position() + jitter
 		_camera_mount.rotation = _camera_mount.rotation.lerp(
