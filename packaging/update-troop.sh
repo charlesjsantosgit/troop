@@ -40,4 +40,9 @@ hdiutil attach "$WORK/$DMG" -nobrowse -quiet -mountpoint "$MOUNT"
 rm -rf "$APP"
 ditto "$MOUNT/TROOP.app" "$APP"
 hdiutil detach "$MOUNT" -quiet
+# The checksum above already proved this is the genuine release, so drop the
+# quarantine flag: launching never shows the Gatekeeper "couldn't verify"
+# dialog or needs Privacy & Security → Open Anyway.
+xattr -dr com.apple.quarantine "$APP" 2>/dev/null || true
 echo "✅ TROOP $VER installed at $APP — ook!"
+echo "   Launches straight from Finder — no Gatekeeper dialog."

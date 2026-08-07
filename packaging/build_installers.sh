@@ -171,7 +171,39 @@ if [[ "$MAC_ARCHS" != *"arm64"* || "$MAC_ARCHS" != *"x86_64"* ]]; then
   echo "The macOS executable is not Universal 2; found: $MAC_ARCHS" >&2
   exit 1
 fi
-codesign --verify --deep --strict "$MAC_APP"
+
+# Optional Developer ID signing + notarization. When TROOP_MAC_SIGN_IDENTITY is
+# set (a "Developer ID Application: …" identity in the keychain), the exported
+# app is re-signed with the hardened runtime; when TROOP_MAC_NOTARY_PROFILE is
+# also set (an `xcrun notarytool store-credentials` profile), the app and disk
+# image are notarized and stapled so Gatekeeper opens the download with no
+# "couldn't verify" dialog. Without these variables the build keeps Godot's
+# ad-hoc signature exactly as before.
+MAC_SIGN_IDENTITY="${TROOP_MAC_SIGN_IDENTITY:-}"
+MAC_NOTARY_PROFILE="${TROOP_MAC_NOTARY_PROFILE:-}"
+MAC_ENTITLEMENTS="$SCRIPT_DIR/macos/entitlements.plist"
+if [[ -n "$MAC_SIGN_IDENTITY" ]]; then
+  if [[ ! -f "$MAC_ENTITLEMENTS" ]]; then
+    echo "Missing entitlements file: $MAC_ENTITLEMENTS" >&2
+    exit 1
+  fi
+  echo "Re-signing TROOP.app with Developer ID: $MAC_SIGN_IDENTITY"
+  codesign --force --timestamp --options runtime \
+    --entitlements "$MAC_ENTITLEMENTS" \
+    --sign "$MAC_SIGN_IDENTITY" "$MAC_APP"
+  codesign --verify --strict --verbose=2 "$MAC_APP"
+  if [[ -n "$MAC_NOTARY_PROFILE" ]]; then
+    echo "Notarizing TROOP.app (profile: $MAC_NOTARY_PROFILE) — this can take a few minutes"
+    MAC_NOTARY_ZIP="$MAC_DMG_STAGE/TROOP-notarize.zip"
+    ditto -c -k --keepParent "$MAC_APP" "$MAC_NOTARY_ZIP"
+    xcrun notarytool submit "$MAC_NOTARY_ZIP" \
+      --keychain-profile "$MAC_NOTARY_PROFILE" --wait
+    rm -f "$MAC_NOTARY_ZIP"
+    xcrun stapler staple "$MAC_APP"
+  fi
+else
+  codesign --verify --deep --strict "$MAC_APP"
+fi
 
 echo "[6/8] Smoke-testing the exported macOS app and creating its disk image"
 EXPORTED_SMOKE_OUTPUT="$("$MAC_BINARY" --headless --quit-after 1200 -- smoke 2>&1)"
@@ -190,6 +222,19 @@ hdiutil create \
   -format UDZO \
   "$MAC_DMG"
 hdiutil verify "$MAC_DMG"
+
+if [[ -n "$MAC_SIGN_IDENTITY" ]]; then
+  echo "Signing the disk image"
+  codesign --force --timestamp --sign "$MAC_SIGN_IDENTITY" "$MAC_DMG"
+  if [[ -n "$MAC_NOTARY_PROFILE" ]]; then
+    echo "Notarizing the disk image (profile: $MAC_NOTARY_PROFILE)"
+    xcrun notarytool submit "$MAC_DMG" \
+      --keychain-profile "$MAC_NOTARY_PROFILE" --wait
+    xcrun stapler staple "$MAC_DMG"
+    echo "Gatekeeper assessment of the stapled disk image:"
+    spctl --assess --type open --context context:primary-signature -vv "$MAC_DMG"
+  fi
+fi
 
 DMG_MOUNT_POINT="$(mktemp -d /tmp/troop-dmg-verify.XXXXXX)"
 hdiutil attach -readonly -nobrowse -mountpoint "$DMG_MOUNT_POINT" "$MAC_DMG" >/dev/null
@@ -238,4 +283,13 @@ echo
 echo "Release artifacts:"
 ls -lh "$WINDOWS_INSTALLER" "$MAC_DMG" "$CONTENT_PCK" "$CHECKSUMS"
 echo
-echo "These builds are ad-hoc/unsigned previews. See packaging/README.md before public distribution."
+if [[ -n "$MAC_SIGN_IDENTITY" && -n "$MAC_NOTARY_PROFILE" ]]; then
+  echo "macOS: Developer ID signed, notarized, and stapled — Gatekeeper opens this DMG without warnings."
+  echo "Windows: still unsigned (SmartScreen may warn). See packaging/README.md for Authenticode."
+elif [[ -n "$MAC_SIGN_IDENTITY" ]]; then
+  echo "macOS: Developer ID signed but NOT notarized — Gatekeeper will still warn on download."
+  echo "Set TROOP_MAC_NOTARY_PROFILE to notarize; see packaging/README.md."
+else
+  echo "These builds are ad-hoc/unsigned previews. See packaging/README.md before public distribution."
+  echo "macOS users can install without any Gatekeeper dialog via the terminal one-liner in README.md."
+fi

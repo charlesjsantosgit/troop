@@ -43,7 +43,17 @@ func _build_terrain() -> void:
 				st.add_vertex(Vector3(x - position.x, Gen.WATER_Y - 0.25,
 					z - position.z))
 			else:
-				st.set_color(Gen.ground_color(h, x, z))
+				# Tint forested ground toward canopy color: individual trees
+				# cannot be instanced across a 6 km sector, but from altitude a
+				# jungle IS its canopy — this keeps the 15-mile view green
+				# instead of bare dirt, matching the skyline tier's tint where
+				# the two overlap.
+				var ground := Gen.ground_color(h, x, z)
+				var cover := Gen.canopy_cover(h, x, z)
+				if cover > 0.0:
+					ground = ground.lerp(Gen.canopy_color(x, z, h),
+						cover * 0.66)
+				st.set_color(ground)
 				st.add_vertex(Vector3(x - position.x, h, z - position.z))
 	for iz in range(CELLS):
 		for ix in range(CELLS):

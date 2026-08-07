@@ -745,6 +745,65 @@ func biome_foliage_color(biome: int, shade: float) -> Color:
 		0.205 + shade * 0.175)
 
 
+## Decorative skyline-tier tree crowns for one 48 m chunk: a deliberately
+## cheap, independent deterministic draw (its own RNG salt, ~8 noise samples)
+## rather than the canonical chunk layout. Beyond the 672 m horizon ring,
+## per-tree correspondence with the near jungle is invisible, but enumerating
+## 256 canonical layouts per 768 m skyline sector was measurably expensive.
+## Every RNG draw below is unconditional so the sequence stays deterministic
+## regardless of which candidates the terrain gates reject.
+func skyline_tree_layout(cx: int, cz: int) -> Array:
+	if debug_world:
+		return []
+	var rng := _chunk_rng(cx, cz, 1801)
+	var trees: Array = []
+	var x0 := float(cx) * CHUNK
+	var z0 := float(cz) * CHUNK
+	for attempt in range(8):
+		var px := x0 + rng.randf_range(1.5, CHUNK - 1.5)
+		var pz := z0 + rng.randf_range(1.5, CHUNK - 1.5)
+		var shade := rng.randf()
+		var trunk_h := rng.randf_range(11.0, 24.0)
+		var crown_r := rng.randf_range(3.4, 5.6)
+		var density_roll := rng.randf()
+		var h := height(px, pz)
+		if h < WATER_Y + 0.6 or h > TREE_LINE:
+			continue
+		var biome := biome_at_height(px, pz, h)
+		if density_roll > _tree_density(biome) * 0.82:
+			continue
+		trees.append({
+			"pos": Vector3(px, h, pz),
+			"trunk_h": trunk_h,
+			"crown_r": crown_r,
+			"color": biome_foliage_color(biome, shade),
+		})
+	return trees
+
+
+## How completely the jungle canopy covers the ground at this point (0..1).
+## Used by the far LOD tiers to tint terrain toward foliage color where trees
+## grow, so forests still read as forests kilometres past the last instanced
+## tree silhouette. Purely a function of existing deterministic fields.
+func canopy_cover(h: float, x: float, z: float) -> float:
+	if debug_world:
+		return 0.0
+	if h < WATER_Y + 0.5 or h > TREE_LINE:
+		return 0.0
+	var shore := smoothstep(WATER_Y + 0.5, WATER_Y + 1.6, h)
+	var tree_line_fade := 1.0 - smoothstep(TREE_LINE - 5.0, TREE_LINE, h)
+	var density := _tree_density(biome_at_height(x, z, h))
+	return shore * tree_line_fade * density
+
+
+## Representative mid-shade canopy color for far-tier ground tinting, with a
+## little spatial variation from the shared color-jitter noise field.
+func canopy_color(x: float, z: float, h: float) -> Color:
+	var shade := 0.32 + clampf(_n_color.get_noise_2d(x * 0.5, z * 0.5)
+		* 0.5 + 0.5, 0.0, 1.0) * 0.30
+	return biome_foliage_color(biome_at_height(x, z, h), shade)
+
+
 func _make_tree(rng: RandomNumberGenerator, p: Vector3, force_h: float,
 		biome_override: int = -1, include_details := true) -> Dictionary:
 	var g := height(p.x, p.z)

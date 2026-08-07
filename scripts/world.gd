@@ -14,6 +14,7 @@ signal headshot_scored(source: Node3D, target: Node3D, lethal: bool, distance: f
 const BUILD_BUDGET := 1  # cap streaming work to avoid traversal frame spikes
 const HORIZON_BUILD_BUDGET := 1
 const HORIZON_TREE_SOURCE_BUDGET := 4
+const SKYLINE_TREE_SOURCE_BUDGET := 16
 const NEAR_PREDICTION_TIME := 0.65
 const DEFEAT_VIEW_TIME := 2.35
 const MELEE_RADIUS := 0.88
@@ -42,6 +43,7 @@ var _horizon_detail_queue: Array[HorizonChunk] = []
 var skyline_chunks: Dictionary = {}  # Vector2i -> SkylineChunk mountain vista
 var _skyline_queue: Array = []
 var _skyline_pending: Dictionary = {}
+var _skyline_detail_queue: Array[SkylineChunk] = []
 var _skyline_center := Vector2i(0x3fffffff, 0x3fffffff)
 var stratos_chunks: Dictionary = {}  # Vector2i -> StratosChunk (altitude tier)
 var _stratos_queue: Array = []
@@ -1127,6 +1129,20 @@ func _stream(budget: int) -> void:
 			did_heavy_work = true
 			break
 
+	# Skyline tree silhouettes fill last: they cover 256 source chunks per
+	# sector, so they only ever consume frames nothing else wanted.
+	if not did_heavy_work:
+		while not _skyline_detail_queue.is_empty():
+			var skyline_detail: SkylineChunk = _skyline_detail_queue.front()
+			if not is_instance_valid(skyline_detail) \
+					or skyline_detail.is_queued_for_deletion():
+				_skyline_detail_queue.pop_front()
+				continue
+			if skyline_detail.build_tree_step(SKYLINE_TREE_SOURCE_BUDGET):
+				_skyline_detail_queue.pop_front()
+			did_heavy_work = true
+			break
+
 
 func center_horizon_sector() -> Vector2i:
 	var c := local_player.global_position if local_player else Vector3.ZERO
@@ -1269,15 +1285,17 @@ func _refresh_skyline_targets(sc: Vector2i) -> void:
 		if maxi(d.x, d.y) > Gen.SKYLINE_DROP_R:
 			dead.append(k)
 	for k in dead:
+		_skyline_detail_queue.erase(skyline_chunks[k])
 		skyline_chunks[k].queue_free()
 		skyline_chunks.erase(k)
 
 
 func _build_skyline_chunk(k: Vector2i) -> void:
-	var sector: Node3D = SkylineChunkScript.new()
+	var sector: SkylineChunk = SkylineChunkScript.new()
 	add_child(sector)
-	sector.setup(k)
+	sector.setup(k, true)
 	skyline_chunks[k] = sector
+	_skyline_detail_queue.append(sector)
 
 
 func _build_chunk(k: Vector2i, defer_outer_details := true) -> void:

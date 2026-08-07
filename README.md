@@ -182,6 +182,14 @@ macOS:
 curl -fsSL https://raw.githubusercontent.com/charlesjsantosgit/troop/main/packaging/update-troop.sh | bash
 ```
 
+> **Skipping the macOS "couldn't verify" dialog** — the terminal command above
+> verifies the release checksum itself and clears quarantine, so the installed
+> app opens straight from Finder with no Gatekeeper warning and no trip to
+> Privacy & Security. It also performs fresh installs. The browser-downloaded
+> DMG still shows the dialog once because preview builds are not notarized;
+> `packaging/README.md` documents the Developer ID + notarization flow that
+> removes it from the DMG too.
+
 Windows (PowerShell):
 
 ```powershell
