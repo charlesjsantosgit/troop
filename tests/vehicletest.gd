@@ -54,6 +54,65 @@ func rider_contract_ok(p, v) -> bool:
 	return true
 
 
+func collect_array_meshes(root: Node,
+		result: Array[MeshInstance3D]) -> void:
+	for child in root.get_children():
+		if child is MeshInstance3D:
+			var mesh_instance := child as MeshInstance3D
+			if mesh_instance.mesh is ArrayMesh:
+				result.append(mesh_instance)
+		collect_array_meshes(child, result)
+
+
+## Godot renders clockwise triangles. For each closed convex procedural part,
+## (c-a)x(b-a) must therefore point away from the mesh centre. This checks the
+## committed arrays themselves, not the same helper that authored the model.
+func outward_winding_stats(mesh_instance: MeshInstance3D) -> Dictionary:
+	var array_mesh := mesh_instance.mesh as ArrayMesh
+	var face_count := 0
+	var inward_count := 0
+	var minimum_alignment := INF
+	for surface_index in range(array_mesh.get_surface_count()):
+		var arrays: Array = array_mesh.surface_get_arrays(surface_index)
+		var vertices: PackedVector3Array = arrays[Mesh.ARRAY_VERTEX]
+		var indices: PackedInt32Array = arrays[Mesh.ARRAY_INDEX]
+		if vertices.is_empty():
+			continue
+		var bounds := AABB(vertices[0], Vector3.ZERO)
+		for vertex: Vector3 in vertices:
+			bounds = bounds.expand(vertex)
+		var centre := bounds.get_center()
+		var element_count := indices.size() if not indices.is_empty() \
+			else vertices.size()
+		for offset in range(0, element_count, 3):
+			var ia := indices[offset] if not indices.is_empty() else offset
+			var ib := indices[offset + 1] if not indices.is_empty() else offset + 1
+			var ic := indices[offset + 2] if not indices.is_empty() else offset + 2
+			var a: Vector3 = vertices[ia]
+			var b: Vector3 = vertices[ib]
+			var c: Vector3 = vertices[ic]
+			var normal := (c - a).cross(b - a)
+			if normal.length_squared() < 0.0000001:
+				continue
+			var alignment := normal.normalized().dot((a + b + c) / 3.0 - centre)
+			minimum_alignment = minf(minimum_alignment, alignment)
+			face_count += 1
+			if alignment <= 0.0001:
+				inward_count += 1
+	return {"faces": face_count, "inward": inward_count,
+		"minimum": minimum_alignment}
+
+
+func hierarchy_has_positive_determinants(root: Node) -> bool:
+	for child in root.get_children():
+		if child is Node3D \
+				and (child as Node3D).transform.basis.determinant() <= 0.0:
+			return false
+		if not hierarchy_has_positive_determinants(child):
+			return false
+	return true
+
+
 func mount(p, w, v) -> bool:
 	if p.vehicle != null:
 		p.exit_vehicle()
@@ -117,6 +176,32 @@ func run(main) -> void:
 		and not Net._valid_vehicle_id("x:debug#bike")
 		and not Net._valid_vehicle_id("v:debug")
 		and not Net._valid_vehicle_id("v:a#b#c"))
+	var jet_body: Node3D = jet.get_node_or_null("Body") as Node3D
+	var jet_array_meshes: Array[MeshInstance3D] = []
+	if jet_body:
+		collect_array_meshes(jet_body, jet_array_meshes)
+	var jet_faces := 0
+	var jet_inward_faces := 0
+	var jet_minimum_alignment := INF
+	var jet_meshes_cull_back := true
+	for mesh_instance: MeshInstance3D in jet_array_meshes:
+		var stats := outward_winding_stats(mesh_instance)
+		jet_faces += int(stats["faces"])
+		jet_inward_faces += int(stats["inward"])
+		jet_minimum_alignment = minf(jet_minimum_alignment,
+			float(stats["minimum"]))
+		var material := mesh_instance.material_override as BaseMaterial3D
+		jet_meshes_cull_back = jet_meshes_cull_back and material != null \
+			and material.cull_mode == BaseMaterial3D.CULL_BACK
+	check("jet procedural shell faces wind outward",
+		jet_array_meshes.size() == 10 and jet_faces > 0 \
+		and jet_inward_faces == 0,
+		"meshes=%d faces=%d inward=%d min=%.4f" % [jet_array_meshes.size(),
+			jet_faces, jet_inward_faces, jet_minimum_alignment])
+	check("jet opaque generated shells use back-face culling",
+		jet_meshes_cull_back)
+	check("jet model hierarchy contains no mirrored transforms",
+		jet_body != null and hierarchy_has_positive_determinants(jet_body))
 
 	# --- parked settling ----------------------------------------------------
 	await sim(150)

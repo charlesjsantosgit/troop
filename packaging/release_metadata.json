@@ -3,6 +3,6 @@
   "minimum_bootstrap": 1,
   "network_protocol": 5,
   "release_title": "TROOP 0.3",
-  "notes": "TROOP 0.3 vehicle polish: rebuilt fighter silhouette and landing gear, exact seated monkey poses and control contacts in every machine, safer and more approachable handling, deterministic vehicle controls, and multiplayer vehicle-state validation.",
+  "notes": "TROOP 0.3 jet rendering hotfix: corrected clockwise face winding and outward normals across the fuselage, mirrored wings, stabilizers, fins, and tail; restored back-face culling; and removed the overlapping radome shell that could flicker at the nose.",
   "requires_installer": false
 }
