@@ -55,6 +55,7 @@ func _init() -> void:
 		"reverse_ratio": 3.52,
 		"final_drive": 4.10,
 		"driveline_efficiency": 0.85,
+		"auto_shift": true,
 		"shift_time": 0.32,
 		"engine_brake_coefficient": 1.6,
 		"clutch_engage_rpm": 1500.0,

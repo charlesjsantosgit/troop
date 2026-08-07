@@ -35,6 +35,8 @@ const BINDABLE_ACTIONS := [
 	{"action": "weapon_3", "label": "SMG"},
 	{"action": "weapon_4", "label": "Sniper Rifle"},
 	{"action": "scope_zoom", "label": "Scope Zoom"},
+	{"category": "VEHICLES", "action": "vehicle_pitch_up", "label": "Jet Nose Up"},
+	{"action": "vehicle_pitch_down", "label": "Jet Nose Down"},
 	{"category": "VIEW", "action": "camera_mode", "label": "Camera Mode"},
 	{"action": "fullscreen", "label": "Fullscreen"},
 ]

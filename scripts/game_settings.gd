@@ -43,6 +43,8 @@ const BINDING_ACTIONS: Array[StringName] = [
 	&"menu",
 	&"fullscreen",
 	&"camera_mode",
+	&"vehicle_pitch_up",
+	&"vehicle_pitch_down",
 ]
 
 const DEFAULT_KEYS := {
@@ -67,6 +69,8 @@ const DEFAULT_KEYS := {
 	&"menu": KEY_ESCAPE,
 	&"fullscreen": KEY_F11,
 	&"camera_mode": KEY_C,
+	&"vehicle_pitch_up": KEY_UP,
+	&"vehicle_pitch_down": KEY_DOWN,
 }
 
 const DEFAULT_MOUSE_BUTTONS := {

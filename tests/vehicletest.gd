@@ -27,11 +27,42 @@ func neutral(p) -> void:
 	p.ti.dir = Vector2.ZERO
 	p.ti.sprint = false
 	p.ti.jump_held = false
+	p.ti.crouch_just = false
 	p.ti.crouch_held = false
 	p.ti.interact_just = false
 	p.ti.grab = false
 	p.ti.vehicle_gear_just = false
 	p.ti.vehicle_flaps_just = false
+	p.ti.vehicle_pitch = 0.0
+
+
+## Give each motorcycle-control assertion a straight, settled approach. The
+## top-speed fixture travels kilometres at accelerated simulation time, while
+## a wheelie intentionally leaves the chassis pitched and yawing; carrying
+## either state into the next handling assertion makes its direction depend on
+## the previous manoeuvre instead of the key being tested.
+func reset_bike_control_fixture(bike: Motorcycle) -> void:
+	var pos := bike.global_position
+	if not (is_finite(pos.x) and is_finite(pos.y) and is_finite(pos.z)):
+		pos = Vector3(-6.0, DebugWorldBuilder.GROUND_Y, 120.0)
+	bike.settle_at(Vector3(pos.x, DebugWorldBuilder.GROUND_Y, pos.z + 12.0), 0.0)
+	bike._prev_velocity = Vector3.ZERO
+	bike.sleeping = false
+	bike._steer_target = 0.0
+	bike._steer_current = 0.0
+	bike.lean_target = 0.0
+	bike._lean_integral = 0.0
+	bike.wheelie_remaining = 0.0
+	bike._wheelie_elapsed = 0.0
+	bike._wheelie_cooldown = 0.0
+	bike.engine.gear = 1
+	bike.engine.rpm = bike.engine.idle_rpm
+	bike.engine._shift_cooldown = 0.0
+	bike.engine._shift_lockout = 0.0
+	for wheel in bike.wheels:
+		wheel.spin = 0.0
+		wheel.spin_angle = 0.0
+		wheel.steer_angle = 0.0
 
 
 func rider_contract_ok(p, v) -> bool:
@@ -176,6 +207,19 @@ func run(main) -> void:
 		and not Net._valid_vehicle_id("x:debug#bike")
 		and not Net._valid_vehicle_id("v:debug")
 		and not Net._valid_vehicle_id("v:a#b#c"))
+	var automatic_probe := VehicleEngine.new()
+	automatic_probe.configure({
+		"torque_curve": [[800, 100.0], [5100, 100.0]],
+		"idle_rpm": 750.0, "redline_rpm": 5100.0,
+		"limiter_rpm": 5400.0, "gear_ratios": [4.0, 2.32, 1.54, 1.0, 0.73],
+		"final_drive": 4.10, "clutch_engage_rpm": 1500.0,
+		"auto_shift": true,
+	})
+	automatic_probe.gear = 5
+	for i in range(220):
+		automatic_probe.step(1.0 / 60.0, 0.0, 0.0, 0.0)
+	check("automatic gearbox settles back to first gear while stopped",
+		automatic_probe.gear == 1, "gear=%d" % automatic_probe.gear)
 	var jet_body: Node3D = jet.get_node_or_null("Body") as Node3D
 	var jet_array_meshes: Array[MeshInstance3D] = []
 	if jet_body:
@@ -235,6 +279,15 @@ func run(main) -> void:
 	await sim(18)
 	check("jeep rider is planted on authored seat and controls",
 		rider_contract_ok(p, jeep))
+	main.hud._update_vehicle_cluster()
+	check("jeep has an accurate analog automatic-transmission cluster",
+		jeep.engine.auto_shift and main.hud.vehicle_tachometer.visible \
+		and is_equal_approx(main.hud.vehicle_tachometer.rpm, jeep.engine.rpm) \
+		and is_equal_approx(main.hud.vehicle_tachometer.scale_max_rpm, 6000.0) \
+		and is_equal_approx(main.hud.vehicle_tachometer.needle_fraction,
+			jeep.engine.rpm / 6000.0) \
+		and is_equal_approx(main.hud.vehicle_tachometer.redline_fraction,
+			5100.0 / 6000.0))
 	# Ground and water cockpits use vehicle-relative freelook. Rotate the parked
 	# chassis without touching the camera and prove its centered sightline follows.
 	var parked_jeep_basis: Basis = jeep.global_basis
@@ -277,13 +330,36 @@ func run(main) -> void:
 		"%.1f m/s" % drive_speed)
 	check("gearbox upshifted beyond first", jeep.engine.gear >= 2,
 		"gear=%d" % jeep.engine.gear)
+	main.hud._update_vehicle_cluster()
+	check("analog tach needle follows raw engine RPM exactly",
+		absf(main.hud.vehicle_tachometer.rpm - jeep.engine.rpm) < 0.01 \
+		and absf(main.hud.vehicle_tachometer.needle_angle_radians \
+			- (AnalogTachometer.START_ANGLE + AnalogTachometer.SWEEP_ANGLE \
+			* jeep.engine.rpm / 6000.0)) < 0.001,
+		"hud=%.1f engine=%.1f" % [main.hud.vehicle_tachometer.rpm,
+			jeep.engine.rpm])
 	check("driven wheels are turning with the ground",
 		absf(jeep.wheels[2].spin * jeep.wheels[2].radius - drive_speed) \
 		< maxf(3.0, drive_speed * 0.35))
 
 	# --- braking + reverse ---------------------------------------------------
+	var high_forward_gear: int = jeep.engine.gear
+	var saw_automatic_downshift := false
 	p.ti.dir = Vector2(0, 1)
-	await sim(300)
+	for i in range(300):
+		await sim(1)
+		if jeep.engine.gear >= 1 and jeep.engine.gear < high_forward_gear:
+			saw_automatic_downshift = true
+		if absf(jeep.forward_speed()) < 1.8:
+			break
+	p.ti.dir = Vector2.ZERO
+	await sim(220)
+	check("automatic jeep downshifts to first as it slows",
+		saw_automatic_downshift and jeep.engine.gear == 1,
+		"started=%d ended=%d v=%.1f" % [high_forward_gear,
+			jeep.engine.gear, jeep.forward_speed()])
+	p.ti.dir = Vector2(0, 1)
+	await sim(90)
 	var reverse_debug := "gear=%d velocity=%s safe=%s wheels=[" % [
 		jeep.engine.gear, jeep.linear_velocity,
 		str(jeep._direction_change_is_safe())]
@@ -381,6 +457,19 @@ func run(main) -> void:
 	await sim(18)
 	check("bike rider is planted on authored saddle and controls",
 		rider_contract_ok(p, bike))
+	p.ti.dir = Vector2(-1, 0)
+	await sim(1)
+	var gathered_bike_left: bool = bike.input_steer > 0.99
+	p.ti.dir = Vector2(1, 0)
+	await sim(1)
+	var gathered_bike_right: bool = bike.input_steer < -0.99
+	neutral(p)
+	await sim(1)
+	check("bike A and D map to physical left and right steering",
+		gathered_bike_left and gathered_bike_right)
+	check("bike HUD teaches the Ctrl wheelie",
+		main.hud._vehicle_hint(bike).contains("WHEELIE") \
+		and main.hud._vehicle_hint(bike).contains(Settings.binding_text(&"crouch")))
 	var bike_basis: Basis = bike.global_basis
 	bike.global_basis = Basis.from_euler(Vector3(-0.62,
 		bike_basis.get_euler(EULER_ORDER_YXZ).y, 0.0), EULER_ORDER_YXZ)
@@ -410,17 +499,90 @@ func run(main) -> void:
 		vmax > 44.0 and vmax < 52.0, "%.1f m/s (%.0f mph)" % [vmax,
 			vmax * 2.23694])
 	p.ti.sprint = false
-	# Ease off to cornering speed, then lean into a right-hander: expect roll
-	# into the turn matching lean_target's sign convention.
-	p.ti.dir = Vector2(0, 1)
-	await sim(180)
+	# Reset the long accelerated top-speed run, then approach each manoeuvre at
+	# an ordinary trail-riding speed through the same real W input as gameplay.
+	neutral(p)
+	reset_bike_control_fixture(bike)
+	await sim(24)
+	for i in range(360):
+		if bike.forward_speed() < 10.0:
+			p.ti.dir = Vector2(0, -1)
+		elif bike.forward_speed() > 17.0:
+			p.ti.dir = Vector2(0, 1)
+		else:
+			break
+		await sim(1)
+	# Ctrl is a one-frame trigger; the authored balance assist persists after the
+	# key is released. Hold A during it to prove steering is physically reduced.
+	p.ti.dir = Vector2(-1, -1)
+	p.ti.crouch_just = true
+	p.ti.crouch_held = true
+	await sim(1)
+	p.ti.crouch_held = false
+	var wheelie_triggered: bool = bike.wheelie_active()
+	var peak_nose_up := 0.0
+	var saw_front_lift := false
+	var saw_rear_support := false
+	var maximum_wheelie_steer := 0.0
+	for i in range(90):
+		# One brief A sample proves the airborne steering cap; ride the rest of
+		# the manoeuvre straight so the fixture measures the wheelie, not a
+		# deliberate post-landing lowside after its 1.2-second assist ends.
+		if i == 10:
+			p.ti.dir = Vector2(0, -1)
+		await sim(1)
+		peak_nose_up = maxf(peak_nose_up,
+			-bike.global_basis.get_euler(EULER_ORDER_YXZ).x)
+		saw_front_lift = saw_front_lift or not bike.wheels[0].in_contact
+		saw_rear_support = saw_rear_support or bike.wheels[1].in_contact
+		if bike.wheelie_active():
+			maximum_wheelie_steer = maxf(maximum_wheelie_steer,
+				absf(bike._steer_target))
+	check("Ctrl pops a brief, protected motorcycle wheelie",
+		wheelie_triggered and peak_nose_up > 0.14 and peak_nose_up < 0.55 \
+		and saw_front_lift and saw_rear_support,
+		"peak=%.2f front_lift=%s rear_support=%s" % [peak_nose_up,
+			str(saw_front_lift), str(saw_rear_support)])
+	check("wheelie sharply limits turning while the front is raised",
+		maximum_wheelie_steer <= bike.max_steer_angle * 0.22,
+		"steer=%.3f max=%.3f" % [maximum_wheelie_steer,
+			bike.max_steer_angle * 0.22])
+	neutral(p)
+	await sim(75)
+	check("wheelie timer ends and returns steering authority",
+		not bike.wheelie_active())
+
+	# Lean into a right-hander and assert actual heading/displacement, not merely
+	# an internally consistent target sign. This catches the old inverted bank.
+	neutral(p)
+	reset_bike_control_fixture(bike)
+	await sim(24)
+	for i in range(300):
+		if bike.forward_speed() < 10.0:
+			p.ti.dir = Vector2(0, -1)
+		elif bike.forward_speed() > 17.0:
+			p.ti.dir = Vector2(0, 1)
+		else:
+			break
+		await sim(1)
+	var corner_origin: Vector3 = bike.global_position
+	var corner_forward: Vector3 = bike.global_basis.z.normalized()
+	var corner_right: Vector3 = -bike.global_basis.x.normalized()
 	p.ti.dir = Vector2(1, -1)
-	await sim(70)
+	await sim(50)
 	var lean: float = bike.global_basis.get_euler(EULER_ORDER_YXZ).z
 	var lean_matches: bool = signf(lean) == signf(bike.lean_target) \
 		and absf(bike.lean_target) > 0.1 and absf(lean) > 0.08
-	check("bike banks into the corner like a real motorcycle", lean_matches,
-		"lean=%.2f target=%.2f" % [lean, bike.lean_target])
+	var right_heading: float = bike.global_basis.z.normalized().dot(corner_right)
+	var right_displacement: float = (bike.global_position - corner_origin).dot(
+		corner_right)
+	check("D banks and turns the bike right with responsive movement",
+		lean_matches and lean > 0.0 and right_heading > 0.10 \
+		and right_displacement > 0.35 and bike.driver == p \
+		and bike.global_basis.y.y > 0.68,
+		"lean=%.2f target=%.2f heading=%.2f side=%.2f forward=%.2f" % [
+			lean, bike.lean_target, right_heading, right_displacement,
+			bike.global_basis.z.normalized().dot(corner_forward)])
 	await dismount(p)
 	check("bike drops to its stand when parked", bike.driver == null)
 
@@ -494,6 +656,23 @@ func run(main) -> void:
 		p.cam.vehicle_aim_direction().dot(jet.global_basis.z) > 0.995)
 	check("jet rider is planted in cockpit and on all controls",
 		rider_contract_ok(p, jet))
+	check("jet HUD teaches the arrow pitch controls",
+		main.hud._vehicle_hint(jet).contains("NOSE UP") \
+		and main.hud._vehicle_hint(jet).contains("NOSE DOWN") \
+		and main.hud._vehicle_hint(jet).contains(
+			Settings.binding_text(&"vehicle_pitch_up")) \
+		and main.hud._vehicle_hint(jet).contains(
+			Settings.binding_text(&"vehicle_pitch_down")))
+	p.ti.vehicle_pitch = 1.0
+	await sim(1)
+	var gathered_up: bool = jet._pitch_input > 0.99
+	p.ti.vehicle_pitch = -1.0
+	await sim(1)
+	var gathered_down: bool = jet._pitch_input < -0.99
+	neutral(p)
+	await sim(1)
+	check("Up and Down arrows reach the jet as direct pitch commands",
+		gathered_up and gathered_down and absf(jet._pitch_input) < 0.001)
 	var flight_aim: Vector3 = p.cam.vehicle_aim_direction()
 	p.cam._apply_view_mode(CameraRig.ViewMode.FRONT)
 	check("front camera never reverses the jet control aim",
@@ -535,39 +714,68 @@ func run(main) -> void:
 		jet.global_basis.z.x, 0.0, jet.global_basis.z.z).normalized()
 	var runway_side: Vector3 = runway_forward.cross(Vector3.UP).normalized()
 	var runway_origin: Vector3 = jet.global_position
+	# The player-facing takeoff is now the simple combination shown on the HUD:
+	# hold W and Up. The mouse aim stays level to prove it is not secretly doing
+	# the rotation for this fixture.
+	p.cam.pitch = 0.0
 	p.ti.dir = Vector2(0, -1)   # W raises the throttle setpoint
+	p.ti.vehicle_pitch = 1.0    # Up Arrow commands a protected nose-up rotation
 	await sim(240)
 	check("turbine spools and the jet rolls out",
 		jet.spool > 0.8 and jet.forward_speed() > 16.0,
 		"spool=%.2f v=%.1f" % [jet.spool, jet.forward_speed()])
-	# Rotate: pull the aim up once fast enough.
+	# Hold the same two keys through rotation; no precisely timed mouse pull is
+	# required. Stop as soon as the main gear is clearly airborne.
 	for i in range(900):
-		if jet.forward_speed() >= 78.0:
+		if jet.global_position.y > 5.0:
 			break
 		await sim(1)
-	var rotation_heading_dot: float = jet.global_basis.z.normalized().dot(
-		runway_forward)
+	# Compare runway heading in the ground plane. A 14° rotation necessarily
+	# reduces a raw 3D dot product even when yaw is perfectly centred.
+	var rotation_flat_forward := Vector3(jet.global_basis.z.x, 0.0,
+		jet.global_basis.z.z).normalized()
+	var rotation_heading_dot: float = rotation_flat_forward.dot(runway_forward)
 	var rotation_lateral: float = absf(
 		(jet.global_position - runway_origin).dot(runway_side))
-	var stable_rotation_run: bool = jet.forward_speed() >= 78.0 \
-		and rotation_heading_dot > 0.96 and rotation_lateral < 8.0 \
+	var takeoff_distance: float = (jet.global_position - runway_origin).dot(
+		runway_forward)
+	# A 400-ish metre roll is both easy in the game and realistic for a light
+	# fighter; the 18 m centreline bound still fits a standard 45 m runway with
+	# room for its 9.45 m wingspan.
+	var stable_rotation_run: bool = jet.global_position.y > 5.0 \
+		and jet.forward_speed() > 58.0 and rotation_heading_dot > 0.94 \
+		and rotation_lateral < 18.0 and takeoff_distance < 450.0 \
 		and jet.global_basis.y.y > 0.80
-	check("jet reaches rotation speed straight and upright", stable_rotation_run,
-		"v=%.1f heading=%.3f lateral=%.1fm up=%.2f spool=%.2f pos=%s" % [
-			jet.forward_speed(), rotation_heading_dot, rotation_lateral,
+	check("holding W and Up Arrow produces an easy, straight takeoff",
+		stable_rotation_run,
+		"alt=%.1f v=%.1f run=%.0fm heading=%.3f lateral=%.1fm up=%.2f spool=%.2f pos=%s" % [
+			jet.global_position.y, jet.forward_speed(), takeoff_distance,
+			rotation_heading_dot, rotation_lateral,
 			jet.global_basis.y.y, jet.spool, jet.global_position])
 	if not stable_rotation_run:
 		print("VEHICLETEST %d/%d FAIL" % [total - fails, total])
 		main.get_tree().quit(1)
 		return
-	p.cam.pitch = 0.30
 	p.ti.sprint = true   # afterburner
 	await sim(480)
 	var altitude: float = jet.global_position.y - 2.0
-	check("jet rotates and climbs away", altitude > 25.0,
+	check("Up Arrow keeps the jet in a protected climb", altitude > 25.0,
 		"alt=%.0fm v=%.0f" % [altitude, jet.speed()])
+	var climb_attitude: float = jet.global_basis.z.y
+	p.ti.vehicle_pitch = -1.0
+	await sim(90)
+	check("Down Arrow lowers the jet's nose",
+		jet.global_basis.z.y < climb_attitude - 0.04,
+		"before=%.2f after=%.2f" % [climb_attitude, jet.global_basis.z.y])
+	# Re-establish the assisted climb and clean up the airframe for the long
+	# acceleration run. This is the same simple player flow taught by the HUD:
+	# hold Up, tap G/F, and keep Shift held for afterburner.
+	p.ti.vehicle_pitch = 1.0
 	p.ti.vehicle_gear_just = true
+	p.ti.vehicle_flaps_just = true
 	await sim(1)
+	check("gear and flaps retract for clean accelerated flight",
+		not jet.gear_down and not jet.flaps_down)
 	p.cam.pitch = 0.05
 	Engine.time_scale = 3.0
 	await sim(2500)
