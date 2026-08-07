@@ -81,6 +81,9 @@ var sfx_volume := 1.0
 var ambience_volume := 1.0
 var voice_volume := 1.0
 var mouse_sensitivity := 1.0
+var player_name := ""
+var minimap_mode := 0
+var minimap_zoom := 1.0
 
 var _bindings: Dictionary = {}
 
@@ -119,6 +122,17 @@ func set_volume(channel: StringName, value: float) -> bool:
 		_:
 			return false
 	return true
+
+
+## The chosen monkey name persists across sessions instead of re-rolling.
+func set_player_name(value: String) -> void:
+	player_name = value.strip_edges().left(20)
+
+
+func set_minimap_prefs(mode: int, zoom: float) -> void:
+	minimap_mode = clampi(mode, 0, 2)
+	minimap_zoom = clampf(zoom, 0.4, 2.6)
+	save()
 
 
 func set_mouse_sensitivity(value: float) -> void:
@@ -190,6 +204,9 @@ func save() -> Error:
 	config.set_value("audio", "ambience", ambience_volume)
 	config.set_value("audio", "voice", voice_volume)
 	config.set_value("controls", "mouse_sensitivity", mouse_sensitivity)
+	config.set_value("profile", "name", player_name)
+	config.set_value("minimap", "mode", minimap_mode)
+	config.set_value("minimap", "zoom", minimap_zoom)
 	for action in BINDING_ACTIONS:
 		var event := _bindings.get(action) as InputEvent
 		if event != null:
@@ -209,6 +226,11 @@ func _load_from_disk() -> void:
 		float(config.get_value("controls", "mouse_sensitivity", mouse_sensitivity)),
 		MIN_MOUSE_SENSITIVITY,
 		MAX_MOUSE_SENSITIVITY)
+	player_name = str(config.get_value("profile", "name", "")).strip_edges() \
+		.left(20)
+	minimap_mode = clampi(int(config.get_value("minimap", "mode", 0)), 0, 2)
+	minimap_zoom = clampf(float(config.get_value("minimap", "zoom", 1.0)),
+		0.4, 2.6)
 
 	# Applying stored values through the same swap rule makes partially-written or
 	# hand-edited config files deterministic and conflict-free.

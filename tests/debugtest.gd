@@ -155,7 +155,41 @@ func run(main) -> void:
 			and not Net._bans.has("10.0.0.9"),
 		"expired bans clean themselves up")
 
-	# 11 — a version-mismatch rejection tears down to the menu and immediately
+	# 11 — altitude view distance: pure curve + live stretch + stratos tier
+	_check(absf(Gen.view_distance_for_altitude(0.0)
+			- Gen.VIEW_BASE_DISTANCE) < 0.01
+			and absf(Gen.view_distance_for_altitude(200.0)
+			- Gen.VIEW_PEAK_DISTANCE) < 0.01
+			and Gen.view_distance_for_altitude(40.0)
+			> Gen.view_distance_for_altitude(20.0),
+		"view distance curve: base at ground, capped at 15 miles, monotonic")
+	admin.run_command("/fly")
+	p.admin_teleport(Vector3(0, 130.0, 0))
+	await _frames(200)
+	_check(world.current_view_distance > 6000.0,
+		"flying high stretches the live view distance")
+	_check(world.stratos_chunks.size() >= 1,
+		"stratos sectors stream in at altitude")
+	var window_high: float = main.hud.minimap.window_meters()
+	admin.run_command("/fly")
+	p.admin_teleport(Vector3(0, 3.0, 0))
+	await _frames(30)
+	_check(window_high > main.hud.minimap.window_meters(),
+		"minimap zooms out with altitude")
+	_check(main.hud.minimap._tiles[0].size()
+			+ main.hud.minimap._tiles[1].size()
+			+ main.hud.minimap._tiles[2].size() > 0,
+		"minimap baked satellite tiles")
+
+	# 12 — the chosen name persists to disk
+	Settings.set_player_name("OokTester")
+	Settings.save()
+	var reread := ConfigFile.new()
+	reread.load(Settings.CONFIG_PATH)
+	_check(str(reread.get_value("profile", "name", "")) == "OokTester",
+		"player name persists in settings.cfg")
+
+	# 13 — a version-mismatch rejection tears down to the menu and immediately
 	# arms the updater (we assert the flow starts, not the network result)
 	main._on_net_error("Server is running TROOP 9.9.9; your game is 0.0.1")
 	await get_tree().process_frame

@@ -22,6 +22,12 @@ const SKYLINE_DROP_R := 2
 const SKYLINE_NEAR_FADE := 600.0 # dithered handoff inside the horizon ring
 const SKYLINE_DISTANCE := CHUNK * SKYLINE_SECTOR_CHUNKS \
 	* (SKYLINE_VIEW_R + 0.5)
+const STRATOS_SECTOR_CHUNKS := 128  # 6144 m ultra tier for altitude vistas
+const STRATOS_CELLS := 32           # 192 m cells: 33x33 lattice per sector
+const STRATOS_NEAR_FADE := 1700.0   # dithered handoff inside the skyline ring
+const VIEW_BASE_DISTANCE := 2200.0  # ground-level far plane (m)
+const VIEW_PEAK_DISTANCE := 24140.0 # 15 miles from the tallest peaks
+const VIEW_PER_METER := 300.0       # extra view metres per metre of altitude
 const MOUNTAIN_HEIGHT := 66.0    # ridge crest amplitude above the jungle floor
 const TREE_LINE := 27.0          # jungle canopy stops growing above this height
 const SNOW_LINE_START := 26.0    # rock band begins fading into permanent snow
@@ -120,6 +126,15 @@ func setup(seed_v: int) -> void:
 	_n_mountain_mask.seed = seed_v + 909
 	_n_mountain_mask.noise_type = FastNoiseLite.TYPE_SIMPLEX_SMOOTH
 	_n_mountain_mask.frequency = 0.00042
+
+
+## Elevation buys horizon: standing on a tall peak (or flying) stretches the
+## far plane smoothly from 2.2 km up to a 15-mile view. Pure math so tests and
+## the streaming/fog/camera systems all agree on one curve.
+func view_distance_for_altitude(altitude: float) -> float:
+	return clampf(VIEW_BASE_DISTANCE
+		+ maxf(altitude - 10.0, 0.0) * VIEW_PER_METER,
+		VIEW_BASE_DISTANCE, VIEW_PEAK_DISTANCE)
 
 
 func height(x: float, z: float) -> float:

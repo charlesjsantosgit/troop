@@ -19,6 +19,7 @@ var headshot_label: Label
 var damage_overlay: ColorRect
 var hint: Label
 var roster: Label
+var minimap: Minimap
 var crosshair: CombatCrosshair
 var spread_label: Label
 var camera_badge: Label
@@ -65,6 +66,16 @@ func _ready() -> void:
 	score_label = _label(24)
 	score_label.position = Vector2(margin, margin)
 	add_child(score_label)
+
+	minimap = Minimap.new()
+	minimap.anchor_left = 1.0
+	minimap.anchor_right = 1.0
+	minimap.offset_left = -Minimap.SIZE_LARGE - margin
+	minimap.offset_right = -margin
+	minimap.position.y = margin
+	if player and player.world:
+		minimap.configure(player.world)
+	add_child(minimap)
 
 	roster = _label(15)
 	roster.position = Vector2(0, margin)
@@ -396,6 +407,10 @@ func _process(dt: float) -> void:
 		Color(0.34, 0.92, 0.31), health_fraction)
 	health_label.text = "HP %d" % ceili(player.health)
 
+	if minimap:
+		minimap.visible = minimap.mode != 2 and not _sniper_scope_active
+		roster.position.y = 12.0 + (minimap.size.y + 8.0 \
+			if minimap.visible else 0.0)
 	var weapon = player.active_weapon if player.active_weapon else player.gun
 	var front_camera: bool = player.cam != null and player.cam.front_view
 	_update_sniper_scope(weapon, front_camera)
