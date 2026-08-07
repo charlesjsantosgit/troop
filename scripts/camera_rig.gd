@@ -86,6 +86,8 @@ var _landing_pitch_velocity := 0.0
 var _last_velocity := Vector3.ZERO
 var _death_view := false
 var _death_follow_target: Node3D
+var _vehicle_view := false
+var _vehicle: Vehicle = null
 
 
 func _ready() -> void:
@@ -282,6 +284,35 @@ func begin_death_view(follow_target: Node3D) -> void:
 	snap_to_target()
 
 
+## Chase/cockpit camera while the monkey drives. C still cycles views; the
+## follow target, arm length, FOV speed scaling, and shake all come from the
+## vehicle so a motorcycle feels tight and a jet reads its 700 mph.
+func begin_vehicle_view(v: Vehicle) -> void:
+	_vehicle = v
+	_vehicle_view = true
+	aiming = false
+	_reset_movement_camera()
+	_arm.spring_length = v.camera_distance
+	snap_to_target()
+
+
+func end_vehicle_view() -> void:
+	if not _vehicle_view:
+		return
+	_vehicle_view = false
+	_vehicle = null
+	_zero_movement_output()
+	_apply_view_mode(preferred_view_mode)
+	_last_velocity = target.velocity if target else Vector3.ZERO
+
+
+## World-space direction the camera looks along (the jet's pursuit stick).
+func aim_direction() -> Vector3:
+	if is_instance_valid(_cam):
+		return -_cam.global_transform.basis.z
+	return Vector3.FORWARD
+
+
 func end_death_view() -> void:
 	if not _death_view:
 		return
@@ -337,6 +368,8 @@ func _process(dt: float) -> void:
 			and not (target and target.test_mode):
 		set_aiming(false)
 	_advance_recoil(dt)
+	if _vehicle_view and not is_instance_valid(_vehicle):
+		end_vehicle_view()
 	var follow := _current_follow_target()
 	var target_pos: Vector3 = follow.get_global_transform_interpolated().origin
 	var motion_velocity: Vector3 = target.velocity
@@ -345,13 +378,31 @@ func _process(dt: float) -> void:
 		grounded = false
 		if follow is RigidBody3D:
 			motion_velocity = follow.linear_velocity
+	elif _vehicle_view:
+		grounded = true
+		motion_velocity = _vehicle.linear_velocity
 	var sp: float = motion_velocity.length()
 	var height := DEATH_FOLLOW_HEIGHT if _death_view \
 		else (FIRST_PERSON_HEIGHT if first_person \
 		else (FRONT_VIEW_HEIGHT if front_view else THIRD_PERSON_HEIGHT))
 	var follow_rate := 30.0 if first_person else 22.0
-	global_position = global_position.lerp(
-		target_pos + Vector3.UP * height, 1.0 - exp(-follow_rate * dt))
+	if _vehicle_view:
+		# The vehicle supplies its own camera geometry: cockpit/helmet height
+		# in first person, a taller chase pivot otherwise.
+		if first_person:
+			var head := follow.get_global_transform_interpolated() \
+				* _vehicle.fp_camera_offset
+			global_position = global_position.lerp(head,
+				1.0 - exp(-34.0 * dt))
+			height = 0.0
+		else:
+			height = _vehicle.camera_height
+			global_position = global_position.lerp(
+				target_pos + Vector3.UP * height,
+				1.0 - exp(-follow_rate * dt))
+	else:
+		global_position = global_position.lerp(
+			target_pos + Vector3.UP * height, 1.0 - exp(-follow_rate * dt))
 	var orbit_yaw := yaw + (PI if front_view else 0.0)
 	rotation.y = orbit_yaw + _recoil_yaw
 	_advance_movement_camera(dt, motion_velocity, grounded, orbit_yaw)
@@ -359,7 +410,10 @@ func _process(dt: float) -> void:
 		pitch + _recoil_pitch,
 		-CAMERA_PITCH_LIMIT, CAMERA_PITCH_LIMIT)
 
-	var t := clampf(sp / 36.0, 0.0, 1.0)
+	var fov_speed_scale := 36.0
+	if _vehicle_view and is_instance_valid(_vehicle):
+		fov_speed_scale = _vehicle.speed_for_max_fov
+	var t := clampf(sp / fov_speed_scale, 0.0, 1.0)
 	var sniper_scoped := is_sniper_scoped()
 	var base_fov := sniper_scope_fov() if sniper_scoped else (
 		AIM_FOV if aiming else (FIRST_PERSON_FOV if first_person else BASE_FOV))
@@ -374,6 +428,8 @@ func _process(dt: float) -> void:
 		desired_arm = FRONT_VIEW_ARM
 	elif first_person:
 		desired_arm = FIRST_PERSON_ARM
+	elif _vehicle_view and is_instance_valid(_vehicle):
+		desired_arm = _vehicle.camera_distance * lerpf(1.0, 1.3, t)
 	else:
 		desired_arm = lerpf(THIRD_PERSON_ARM, THIRD_PERSON_SPEED_ARM, t)
 	var arm_rate := 24.0 if first_person else 4.0
@@ -419,6 +475,9 @@ func _advance_movement_camera(dt: float, motion_velocity: Vector3,
 		grounded: bool, orbit_yaw: float) -> void:
 	var safe_dt := minf(maxf(dt, 0.0), 0.10)
 	if safe_dt <= 0.0:
+		return
+	if _vehicle_view and is_instance_valid(_vehicle):
+		_advance_vehicle_camera(safe_dt)
 		return
 	var sniper_scoped := is_sniper_scoped()
 	var state: int = int(target.state) if target else 0
@@ -614,6 +673,33 @@ static func _clamp_components(value: Vector3, limit: Vector3) -> Vector3:
 ## Clears only traversal-driven motion; look direction, damage and weapon recoil
 ## are intentionally untouched. Besides making state changes easy to reason
 ## about, this gives deterministic diagnostics a clean starting pose.
+## Vehicle-specific mount motion: engine rumble scaled by RPM and contact,
+## banking with the machine's roll, and a small pitch under thrust/braking.
+func _advance_vehicle_camera(dt: float) -> void:
+	var v := _vehicle
+	var rpm := v.engine.rpm_fraction()
+	var aux := v.state_aux()
+	_motion_t = fmod(_motion_t + dt * lerpf(6.0, 21.0, rpm), TAU * 64.0)
+	var rumble := (0.0035 + rpm * 0.011) \
+		* (0.4 if first_person else 1.0)
+	var jitter := Vector3(
+		sin(_motion_t * 5.1) * rumble,
+		sin(_motion_t * 6.7 + 1.3) * rumble * 0.8,
+		0.0)
+	var accel := (v.linear_velocity - _last_velocity) / maxf(dt, 0.001)
+	_last_velocity = v.linear_velocity
+	var longitudinal := clampf(
+		accel.dot(v.global_basis.z) / 45.0, -0.06, 0.06)
+	var bank := aux.y * v.camera_bank_factor
+	if is_instance_valid(_camera_mount):
+		_camera_mount.position = _mount_base_position() + jitter
+		_camera_mount.rotation = _camera_mount.rotation.lerp(
+			Vector3(longitudinal, 0.0, bank), 1.0 - exp(-8.0 * dt))
+	if is_instance_valid(_cam):
+		_cam.h_offset = 0.0
+		_cam.v_offset = 0.0
+
+
 func _reset_movement_camera() -> void:
 	_motion_t = 0.0
 	_bob_t = 0.0
@@ -689,4 +775,6 @@ func front_subject_direction() -> Vector3:
 func _current_follow_target() -> Node3D:
 	if _death_view and is_instance_valid(_death_follow_target):
 		return _death_follow_target
+	if _vehicle_view and is_instance_valid(_vehicle):
+		return _vehicle
 	return target

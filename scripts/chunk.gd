@@ -191,8 +191,10 @@ func finish_deferred_build_step() -> bool:
 		8:
 			if _pending_build_collisions:
 				_build_collisions()
+		9:
+			_request_vehicle_spawns()
 	_detail_build_stage += 1
-	if _detail_build_stage > 8:
+	if _detail_build_stage > 9:
 		_details_pending = false
 		_pending_collected = {}
 		_pending_build_collisions = false
@@ -523,6 +525,16 @@ func _build_understory() -> void:
 		mmi.visibility_range_fade_mode = \
 			GeometryInstance3D.VISIBILITY_RANGE_FADE_SELF
 		add_child(mmi)
+
+
+## Deterministic vehicle spawn points stream through the chunk pipeline, but
+## the spawned machines are world-level nodes with a session-wide dedupe, so a
+## re-streamed chunk never duplicates a jeep someone drove away.
+func _request_vehicle_spawns() -> void:
+	var owner_world := get_parent()
+	if owner_world and owner_world.has_method("request_vehicle_spawns"):
+		owner_world.call("request_vehicle_spawns",
+			Gen.vehicle_layout(key.x, key.y))
 
 
 func _build_supply_huts() -> void:

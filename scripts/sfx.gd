@@ -395,3 +395,98 @@ func _seq(parts: Array) -> AudioStreamWAV:
 		gap.resize(int(0.025 * RATE) * 2)
 		data.append_array(gap)
 	return _wav(data)
+
+
+# ---- vehicle sound synthesis ----------------------------------------------
+# Engine loops are built lazily on the first vehicle spawn (they are only a
+# few hundred milliseconds of synthesis, but boot should not pay for them).
+# Loops are made from phase-locked harmonics of the loop base frequency, so
+# they repeat seamlessly; "grit" adds a periodic amplitude chew, and noise
+# beds get a head/tail crossfade to hide their seam.
+
+var _vehicle_sounds_ready := false
+
+
+func ensure_vehicle_sounds() -> void:
+	if _vehicle_sounds_ready:
+		return
+	_vehicle_sounds_ready = true
+	# Big-single dual-sport thumper: sparse low firing pulses, hard waveshape.
+	streams["engine_single"] = _engine_loop(31.5,
+		[[1.0, 1.0], [2.0, 0.66], [3.0, 0.40], [4.0, 0.26], [6.0, 0.13]],
+		0.55, 0.46, 0.55, 2.6)
+	# Straight-six safari truck: smoother, denser harmonic stack.
+	streams["engine_i6"] = _engine_loop(118.0,
+		[[0.5, 0.42], [1.0, 1.0], [1.5, 0.22], [2.0, 0.52], [3.0, 0.30],
+			[4.0, 0.14]],
+		0.42, 0.36, 0.26, 1.7)
+	# Airboat: aircraft flat-six drone plus a dominant two-blade prop chop.
+	streams["engine_prop"] = _engine_loop(79.0,
+		[[0.5, 0.55], [1.0, 1.0], [2.0, 0.62], [3.0, 0.24], [5.0, 0.10]],
+		0.46, 0.40, 0.62, 1.9)
+	# Turbine core: broadband intake hiss with two locked whine partials.
+	streams["jet_turbine"] = _turbine_loop(0.5, 0.34, 1900.0,
+		[[1520.0, 0.16], [2280.0, 0.10]])
+	# Afterburner: heavy low rumble bed, almost no tone.
+	streams["jet_burner"] = _turbine_loop(0.55, 0.55, 240.0,
+		[[96.0, 0.20]])
+	streams["gear_clunk"] = _seq([_noise_burst(0.028, 0.5, 950.0),
+		_tone(220.0, 130.0, 0.07, 0.42)])
+	streams["stall_beep"] = _tone(1180.0, 1180.0, 0.16, 0.5)
+	streams["touchdown"] = _seq([_noise_burst(0.05, 0.62, 1400.0),
+		_ground_thump(0.16, 0.5)])
+
+
+func _engine_loop(f0: float, harmonics: Array, dur: float, vol: float,
+		grit: float, drive: float) -> AudioStreamWAV:
+	# All partials are integer multiples of base = f0/2, and the loop holds an
+	# integer number of base cycles, so the seam is mathematically silent.
+	var base := f0 * 0.5
+	var cycles := maxi(int(round(dur * base)), 1)
+	var n := int(round(float(cycles) / base * RATE))
+	var data := PackedByteArray()
+	data.resize(n * 2)
+	var phases: Array[float] = []
+	for h in harmonics:
+		phases.append(fmod(float(h[0]) * 12.9898, TAU))
+	for i in range(n):
+		var t := float(i) / RATE
+		var s := 0.0
+		for k in range(harmonics.size()):
+			var h: Array = harmonics[k]
+			s += float(h[1]) * sin(TAU * float(h[0]) * 2.0 * base * t
+				+ phases[k])
+		# Soft-clip waveshaping gives combustion growl without aliasing hash.
+		s = s * drive / (1.0 + absf(s * drive))
+		var chew := 1.0 + grit * 0.5 * (sin(TAU * base * t) - 1.0) * 0.5
+		data.encode_s16(i * 2, int(clampf(s * chew * vol, -1.0, 1.0) * 32767.0))
+	return _wav(data, true)
+
+
+func _turbine_loop(dur: float, vol: float, lp_hz: float,
+		whines: Array) -> AudioStreamWAV:
+	var n := int(dur * RATE)
+	var fade := int(0.06 * RATE)
+	var raw: Array[float] = []
+	raw.resize(n + fade)
+	var y := 0.0
+	var a := 1.0 - exp(-TAU * lp_hz / RATE)
+	for i in range(n + fade):
+		y += a * ((randf() * 2.0 - 1.0) - y)
+		raw[i] = y
+	var data := PackedByteArray()
+	data.resize(n * 2)
+	var loop_base := 1.0 / dur
+	for i in range(n):
+		var s := raw[i]
+		# Crossfade the tail's extra noise over the head to hide the seam.
+		if i < fade:
+			var mix := float(i) / float(fade)
+			s = raw[n + i] * (1.0 - mix) + raw[i] * mix
+		var t := float(i) / RATE
+		for w in whines:
+			# Lock each whine to an exact multiple of the loop rate.
+			var f: float = round(float(w[0]) / loop_base) * loop_base
+			s += float(w[1]) * sin(TAU * f * t)
+		data.encode_s16(i * 2, int(clampf(s * vol * 2.2, -1.0, 1.0) * 32767.0))
+	return _wav(data, true)

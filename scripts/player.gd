@@ -135,6 +135,9 @@ var active_weapon: Node3D
 var weapon_slot := 1
 var melee_mode := false
 var fly_mode := false
+var vehicle: Vehicle = null
+var _vehicle_exit_cd := 0.0
+var _collision_shape: CollisionShape3D
 var melee_attack_remaining := 0.0
 var melee_attack_combo := 0
 var body_hitbox: CombatHitbox
@@ -179,6 +182,7 @@ func _ready() -> void:
 	cs.shape = cap
 	cs.position = Vector3(0, 0.5, 0)
 	add_child(cs)
+	_collision_shape = cs
 	# stick to rolling terrain at gallop speed instead of launching off
 	# every knoll — jumps still clear it because move_and_slide skips the
 	# snap while velocity points away from the floor
@@ -267,6 +271,9 @@ func _physics_process(dt: float) -> void:
 	roll_t = maxf(roll_t - dt, 0.0)
 
 	var inp := _gather()
+	if vehicle:
+		_st_vehicle(dt, inp)
+		return
 	if inp.interact_just and state != S.SWING and is_local and world \
 			and world.has_method("try_open_villager_trade") \
 			and world.try_open_villager_trade(self):
@@ -277,6 +284,11 @@ func _physics_process(dt: float) -> void:
 			and world.try_open_supply_chest(self):
 		# E remains vine grab everywhere else; a chest in arm's reach wins only
 		# for this tap so one input can stay cleanly contextual.
+		inp.grab = false
+	if inp.interact_just and state != S.SWING and world \
+			and world.has_method("try_enter_vehicle") \
+			and world.try_enter_vehicle(self):
+		# Mounting wins this tap the same way a chest does.
 		inp.grab = false
 	if inp.jump_just:
 		buffer_t = JUMP_BUFFER
@@ -671,7 +683,8 @@ func is_all_fours() -> bool:
 
 
 func is_weapon_stowed() -> bool:
-	return melee_mode or is_healing() or is_all_fours() or state == S.SWIM
+	return melee_mode or is_healing() or is_all_fours() or state == S.SWIM \
+		or vehicle != null
 
 
 ## First-person sprinting keeps the viewmodel in frame even though the weapon is
@@ -679,7 +692,8 @@ func is_weapon_stowed() -> bool:
 ## quadruped back-stow so all four limbs remain believable in the world model.
 func is_weapon_visually_stowed() -> bool:
 	if _first_person_weapons_requested:
-		return melee_mode or is_healing() or state == S.SWIM
+		return melee_mode or is_healing() or state == S.SWIM \
+			or vehicle != null
 	return is_weapon_stowed()
 
 
@@ -868,6 +882,8 @@ func take_damage(amount: float, source: Node3D, impulse: Vector3,
 
 
 func begin_defeat(hit_zone := "body", impact_impulse := Vector3.ZERO) -> void:
+	if vehicle:
+		exit_vehicle(true)
 	defeated = true
 	defeat_sequence += 1
 	var death_velocity := velocity
@@ -1418,6 +1434,9 @@ func _release(pop: bool) -> void:
 
 
 func _anim() -> int:
+	if vehicle:
+		return MonkeyRig.Anim.PILOT if vehicle.kind == Vehicle.Kind.JET \
+			else MonkeyRig.Anim.RIDE
 	match state:
 		S.SWING:
 			return MonkeyRig.Anim.SWING
@@ -1534,10 +1553,31 @@ func _process(dt: float) -> void:
 		and active_weapon.get("_reload_hand_grip") is Node3D
 	rig.set_reload_pose(reload_hand_active,
 		active_weapon.get("_reload_hand_grip") if reload_hand_active else null)
-	var show_melee_pose := melee_mode and state != S.SWING
+	var show_melee_pose := melee_mode and state != S.SWING \
+		and vehicle == null
 	rig.set_melee_pose(show_melee_pose, melee_attack_remaining > 0.0,
 		melee_attack_progress(), melee_attack_combo)
 	rig.set_healing_pose(is_healing(), bandage_progress())
+	if vehicle and is_instance_valid(vehicle):
+		# Seated: the whole monkey adopts the machine's attitude — the rig
+		# root takes the vehicle basis (flipped to the rig's -Z facing) and
+		# the pose branch handles lean/counter-lean. The rig's own yaw node
+		# must sit at zero or a stale pre-mount heading skews the rider.
+		rig.set_yaw(0.0)
+		rig.global_transform.basis = vehicle.global_basis \
+			* Basis(Vector3.UP, PI)
+		# The rig origin is the monkey's feet; sink it so the folded hips
+		# (HIP_Y minus the seated tuck) meet the saddle instead of hovering.
+		rig.position = Vector3(0, -0.44, 0)
+		rig.set_ride_lean(vehicle.state_aux().y)
+		rig.set_rope(false, Vector3.ZERO, Vector3.ZERO)
+		rig.update_motion(dt, _anim(), velocity, true, _active_pivot())
+		_update_motion_effects(_anim())
+		return
+	if rig.rotation != Vector3.ZERO:
+		rig.rotation = rig.rotation.lerp(Vector3.ZERO, 1.0 - exp(-10.0 * dt))
+	if rig.position != Vector3.ZERO:
+		rig.position = rig.position.lerp(Vector3.ZERO, 1.0 - exp(-12.0 * dt))
 	if state == S.SWING:
 		# A two-handed long rifle needs the chest and both shoulders behind the
 		# sightline. Track the aim while tail/feet carry the rope; other swing poses
@@ -1568,6 +1608,115 @@ func _process(dt: float) -> void:
 
 
 # ---- admin fly mode and remote-applied admin actions -----------------------
+
+
+## ---- vehicles -------------------------------------------------------------
+
+func enter_vehicle(v: Vehicle) -> void:
+	if vehicle != null or defeated or v == null or not v.can_enter(self):
+		return
+	if state == S.SWING:
+		_release(false)
+	if fly_mode:
+		set_fly_mode(false)
+	vehicle = v
+	v.begin_drive(self)
+	if not v.driver_impact.is_connected(_on_vehicle_impact):
+		v.driver_impact.connect(_on_vehicle_impact)
+	state = S.GROUND
+	galloping = false
+	dived = false
+	wallsliding = false
+	flipping = false
+	skid_t = 0.0
+	velocity = v.linear_velocity
+	_collision_shape.disabled = true
+	collision_layer = 0
+	collision_mask = 0
+	_vehicle_exit_cd = 0.4
+	if cam:
+		cam.begin_vehicle_view(v)
+	Sfx.play_at("gear_clunk", global_position, -10.0, 1.25)
+	supply_notice = "%s  ·  E TO DISMOUNT" % v.display_name()
+	supply_notice_remaining = 2.4
+
+
+func exit_vehicle(bail := false) -> void:
+	if vehicle == null:
+		return
+	var v := vehicle
+	vehicle = null
+	if v.driver_impact.is_connected(_on_vehicle_impact):
+		v.driver_impact.disconnect(_on_vehicle_impact)
+	var exit_pos := v.end_drive()
+	if Net.active:
+		var aux := v.state_aux()
+		Net.release_vehicle(v.vid,
+			[v.global_position, v.yaw_angle(), aux.x, aux.y])
+	global_position = exit_pos
+	velocity = v.linear_velocity * (0.85 if bail else 0.25)
+	if bail:
+		velocity.y = maxf(velocity.y, 2.5)
+	_collision_shape.disabled = false
+	collision_layer = 1
+	collision_mask = 1
+	state = S.AIR
+	if rig:
+		rig.set_ride_lean(0.0)
+		rig.rotation = Vector3.ZERO
+		rig.position = Vector3.ZERO
+	if cam:
+		cam.end_vehicle_view()
+	_vehicle_exit_cd = 0.4
+	reset_physics_interpolation()
+
+
+func _st_vehicle(dt: float, inp: Dictionary) -> void:
+	state = S.GROUND
+	_vehicle_exit_cd = maxf(_vehicle_exit_cd - dt, 0.0)
+	if not is_instance_valid(vehicle) or vehicle.driver != self:
+		vehicle = null
+		_collision_shape.disabled = false
+		collision_layer = 1
+		collision_mask = 1
+		if cam:
+			cam.end_vehicle_view()
+		return
+	var throttle := maxf(-inp.dir.y, 0.0)
+	var brake := maxf(inp.dir.y, 0.0)
+	vehicle.set_inputs(throttle, brake, -inp.dir.x, inp.jump_held, inp.sprint)
+	vehicle.set_driver_view(cam.aim_direction() if cam else global_basis.z,
+		inp)
+	global_position = vehicle.seat_global()
+	velocity = vehicle.linear_velocity
+	if inp.interact_just and _vehicle_exit_cd <= 0.0 and vehicle.allows_exit():
+		exit_vehicle(vehicle.speed() > 6.0)
+		return
+	# replicate at the normal cadence; the vehicle piggybacks on player state
+	_send_t += dt
+	if Net.active and _send_t >= 0.05:
+		_send_t = 0.0
+		Net.send_state(global_position, vehicle.yaw_angle(), velocity, _anim(),
+			false, Vector3.ZERO, 0.0, PackedVector3Array(), weapon_slot - 1,
+			true, false,
+			int(active_weapon.ammo) if active_weapon else 0, false,
+			0.0, false, vehicle.kind, vehicle.vid, vehicle.state_aux())
+
+
+## Hard decelerations while driving hurt: light hits bruise, a violent crash
+## throws the rider off, and hitting the jungle at jet speed is lethal.
+func _on_vehicle_impact(delta_speed: float) -> void:
+	if vehicle == null or _invulnerable_t > 0.0:
+		return
+	var damage := (delta_speed - Vehicle.IMPACT_DAMAGE_THRESHOLD) * 5.5
+	if damage <= 0.0:
+		return
+	var eject := vehicle.ejects_rider_on_crash() \
+		and delta_speed > Vehicle.IMPACT_DAMAGE_THRESHOLD + 5.0
+	var impulse := -velocity.normalized() * 2.0 + Vector3.UP * 2.0
+	if eject:
+		exit_vehicle(true)
+	take_damage(damage, null, impulse, "body")
 
 
 func set_fly_mode(active: bool) -> void:

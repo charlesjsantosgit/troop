@@ -9,6 +9,7 @@ var main: Node
 var world: Node3D
 var chat: ChatBox
 var _spawn_serial := 0
+var _admin_vehicle_serial := 0
 
 const BIOME_BY_NAME := {
 	"rainforest": Gen.Biome.RAINFOREST,
@@ -89,6 +90,34 @@ func toggle_fly() -> bool:
 	feedback("Angel wings %s." % ("unfurled — hold SPACE to rise, CTRL to sink"
 		if now_flying else "folded away"))
 	return now_flying
+
+
+## Deliver a machine to the admin's position (offline sessions only, like bot
+## spawns — network vehicles must come from deterministic world spawns).
+func spawn_vehicle(kind_word: String) -> bool:
+	if not _player() or not can_spawn():
+		if not can_spawn():
+			feedback("Vehicle delivery is a solo/debug perk — online rides "
+				+ "spawn at the motor pool, airstrip, and lakes.")
+		return false
+	var kinds := {"bike": Vehicle.Kind.BIKE, "motorcycle": Vehicle.Kind.BIKE,
+		"jeep": Vehicle.Kind.JEEP, "boat": Vehicle.Kind.BOAT,
+		"airboat": Vehicle.Kind.BOAT, "jet": Vehicle.Kind.JET}
+	var query := kind_word.to_lower().strip_edges()
+	if not kinds.has(query):
+		feedback("Unknown machine — try /vehicle bike|jeep|boat|jet.")
+		return false
+	_admin_vehicle_serial += 1
+	var p: MonkeyPlayer = _player()
+	var forward := Vector3(sin(p.rig.yaw_angle() + PI), 0.0,
+		cos(p.rig.yaw_angle() + PI))
+	var spot := p.global_position + forward * 5.0
+	var v: Vehicle = world.spawn_vehicle(kinds[query],
+		"v:admin#%d" % _admin_vehicle_serial, spot,
+		atan2(forward.x, forward.z))
+	feedback("%s delivered — E to %s." % [v.display_name(),
+		v.mount_verb().to_lower()])
+	return true
 
 
 func teleport_to_biome(biome_name: String) -> bool:
@@ -233,6 +262,7 @@ func run_command(text: String) -> void:
 			feedback("/tp <rainforest|bamboo|wetland|highland|mountains"
 				+ "|player-name>")
 			feedback("/spawn <peel|swinger|follower|statue|villager>")
+			feedback("/vehicle <bike|jeep|boat|jet> — deliver a machine (solo)")
 			feedback("/time <hour|clear> — set or release the clock")
 			feedback("/kick <player> · /ban <player> <minutes>")
 			feedback("/say <text> — server-wide announcement")
@@ -243,6 +273,8 @@ func run_command(text: String) -> void:
 			heal_target(_resolve_peer(parts, 1))
 		"fly":
 			toggle_fly()
+		"vehicle", "ride":
+			spawn_vehicle(parts[1] if parts.size() > 1 else "")
 		"give":
 			var kind := _weapon_kind(parts[1] if parts.size() > 1 else "")
 			var amount := int(parts[2]) if parts.size() > 2 else 30

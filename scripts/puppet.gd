@@ -41,6 +41,9 @@ var _state_weapon_stowed := false
 var _state_melee_mode := false
 var _state_healing_progress := 0.0
 var _state_flying := false
+var _vehicle_kind := -1
+var _vehicle_id := ""
+var _vehicle_aux := Vector3.ZERO
 var _last_swim_fx_cycle := -1.0
 var _last_swim_kick_bucket := -1
 var _was_swimming_fx := false
@@ -141,7 +144,9 @@ func apply_state(pos: Vector3, yaw: float, vel: Vector3, anim: int,
 		swinging: bool, anchor: Vector3, tail: float,
 		wraps: PackedVector3Array, weapon_kind := Net.WEAPON_REVOLVER,
 		weapon_stowed := false, melee_mode := false, weapon_ammo := -1,
-		weapon_reloading := false, healing_progress := 0.0, flying := false) -> void:
+		weapon_reloading := false, healing_progress := 0.0, flying := false,
+		vehicle_kind := -1, vehicle_id := "",
+		vehicle_aux := Vector3.ZERO) -> void:
 	if defeated_visual:
 		if _defeat_guard_t > 0.0:
 			return
@@ -158,6 +163,14 @@ func apply_state(pos: Vector3, yaw: float, vel: Vector3, anim: int,
 	_anchor = anchor
 	_tail = tail
 	_wraps = wraps
+	_vehicle_kind = vehicle_kind
+	_vehicle_id = vehicle_id
+	_vehicle_aux = vehicle_aux
+	if vehicle_kind >= 0 and not vehicle_id.is_empty():
+		var world := get_parent()
+		if world and world.has_method("apply_remote_vehicle_state"):
+			world.call("apply_remote_vehicle_state", peer_id, vehicle_kind,
+				vehicle_id, pos, yaw, vehicle_aux, vel)
 	if weapon_kind != _active_weapon_kind:
 		var previous_weapon := _visible_weapon()
 		if previous_weapon and previous_weapon.reload_remaining > 0.0:
@@ -198,6 +211,32 @@ func _process(dt: float) -> void:
 	rig.set_sniper_rope_pose(sniper_rope_active,
 		sniper.support_grip if sniper_rope_active else null)
 	_age += dt
+	var riding_vehicle: Vehicle = null
+	if _vehicle_kind >= 0 and not _vehicle_id.is_empty():
+		var world := get_parent()
+		if world and world.has_method("vehicle_by_id"):
+			riding_vehicle = world.call("vehicle_by_id", _vehicle_id)
+	if riding_vehicle:
+		# Seated: hard-follow the interpolated vehicle's saddle and adopt its
+		# full attitude; the RIDE/PILOT anim arrives in the state stream.
+		global_position = riding_vehicle.seat_global()
+		rig.set_yaw(0.0)
+		rig.global_transform.basis = riding_vehicle.global_basis \
+			* Basis(Vector3.UP, PI)
+		rig.position = Vector3(0, -0.44, 0)
+		rig.set_ride_lean(_vehicle_aux.y)
+		rig.set_rope(false, Vector3.ZERO, Vector3.ZERO)
+		rig.set_gun_aim(false, _gun_direction, 0.0)
+		rig.set_melee_pose(false, false, 0.0, 0)
+		rig.set_healing_pose(false, 0.0)
+		rig.update_motion(dt, _anim, _vel, true, _anchor)
+		_update_water_effects()
+		return
+	if rig.rotation != Vector3.ZERO:
+		rig.rotation = rig.rotation.lerp(Vector3.ZERO, 1.0 - exp(-10.0 * dt))
+		rig.set_ride_lean(0.0)
+	if rig.position != Vector3.ZERO:
+		rig.position = rig.position.lerp(Vector3.ZERO, 1.0 - exp(-12.0 * dt))
 	var pred := _target + _vel * minf(_age, 0.25)
 	global_position = global_position.lerp(pred, 1.0 - exp(-14.0 * dt))
 	rig.set_yaw(lerp_angle(rig.yaw_angle(), _yaw, 1.0 - exp(-10.0 * dt)))

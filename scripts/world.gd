@@ -56,6 +56,9 @@ var _prefetch_center := Vector2i(0x3fffffff, 0x3fffffff)
 var _horizon_center := Vector2i(0x3fffffff, 0x3fffffff)
 var local_player: MonkeyPlayer
 var puppets: Dictionary = {}         # peer id -> Puppet
+var vehicles: Dictionary = {}        # stable vehicle id -> Vehicle node
+var _pending_vehicle_entry := ""     # vid awaiting the host's seat claim
+var _spawned_vehicle_ids: Dictionary = {}  # session dedupe for chunk spawns
 var _marker: MeshInstance3D
 var _particles: GPUParticles3D
 var water_fx: WaterFX
@@ -242,6 +245,8 @@ func build() -> void:
 	Net.bullet_fired.connect(_on_network_bullet)
 	Net.melee_swung.connect(_on_network_melee)
 	Net.peer_defeated.connect(_on_peer_defeated)
+	Net.vehicle_claimed.connect(_on_vehicle_claimed)
+	Net.vehicle_released.connect(_on_vehicle_released)
 
 
 func set_expensive_effects(enabled: bool) -> void:
@@ -461,6 +466,144 @@ func _on_supply_chest_claimed(hut_id: String, claimant_id: int) -> void:
 			and local_player.has_method("receive_supply_loot"):
 		local_player.call("receive_supply_loot", int(payload.get("ammo_kind", 0)),
 			int(payload.get("ammo_amount", 0)), int(payload.get("bandages", 0)))
+
+
+# ---- vehicles --------------------------------------------------------------
+# Vehicles are world-level nodes (never chunk children): a machine driven three
+# kilometres from its spawn chunk must survive that chunk streaming out.
+
+func spawn_vehicle(kind: int, vid: String, pos: Vector3,
+		yaw := 0.0) -> Vehicle:
+	if vehicles.has(vid):
+		return vehicles[vid]
+	var v: Vehicle
+	match kind:
+		Vehicle.Kind.BIKE:
+			v = Motorcycle.new()
+		Vehicle.Kind.BOAT:
+			v = Airboat.new()
+		Vehicle.Kind.JET:
+			v = FighterJet.new()
+		_:
+			v = SafariJeep.new()
+	v.setup(vid, self)
+	add_child(v)
+	v.settle_at(pos, yaw)
+	vehicles[vid] = v
+	# Late joiners: apply the host's resting transform and any live claim.
+	if Net.vehicle_rests.has(vid):
+		var rest: Array = Net.vehicle_rests[vid]
+		if rest.size() == 4:
+			v.apply_rest_state(rest[0], float(rest[1]), float(rest[2]),
+				float(rest[3]))
+	if Net.active and Net.claimed_vehicles.has(vid) \
+			and int(Net.claimed_vehicles[vid]) != Net.local_id():
+		v.set_remote_controlled(true, int(Net.claimed_vehicles[vid]))
+	return v
+
+
+## Chunk streaming hands deterministic spawn definitions up here; each stable
+## id spawns at most once per session so re-streamed chunks never duplicate a
+## machine that has since been driven away.
+func request_vehicle_spawns(defs: Array) -> void:
+	for def in defs:
+		var vid := str(def.get("id", ""))
+		if vid.is_empty() or _spawned_vehicle_ids.has(vid) \
+				or vehicles.has(vid):
+			continue
+		_spawned_vehicle_ids[vid] = true
+		spawn_vehicle(int(def.get("kind", 0)), vid,
+			def.get("pos", Vector3.ZERO), float(def.get("yaw", 0.0)))
+
+
+func vehicle_by_id(vid: String) -> Vehicle:
+	var v = vehicles.get(vid)
+	if is_instance_valid(v) and not v.is_queued_for_deletion():
+		return v
+	vehicles.erase(vid)
+	return null
+
+
+## Nearest enterable vehicle in arm's reach — a registry lookup like chests.
+func nearby_vehicle(player: Node3D) -> Vehicle:
+	if not player or not is_instance_valid(player):
+		return null
+	var nearest: Vehicle = null
+	var nearest_distance_sq := INF
+	var stale: Array = []
+	for vid in vehicles:
+		var candidate = vehicles[vid]
+		if not is_instance_valid(candidate) \
+				or candidate.is_queued_for_deletion():
+			stale.append(vid)
+			continue
+		var v := candidate as Vehicle
+		if not v or not v.can_enter(player):
+			continue
+		var distance_sq := player.global_position.distance_squared_to(
+			v.interaction_position())
+		if distance_sq <= Vehicle.ENTER_RANGE * Vehicle.ENTER_RANGE \
+				and distance_sq < nearest_distance_sq:
+			nearest = v
+			nearest_distance_sq = distance_sq
+	for vid in stale:
+		vehicles.erase(vid)
+	return nearest
+
+
+## Mount the nearest free vehicle. Solo mounts instantly; online asks the host
+## for the seat claim and mounts when it is granted.
+func try_enter_vehicle(player: Node3D) -> bool:
+	var v := nearby_vehicle(player)
+	if v == null or not player.has_method("enter_vehicle"):
+		return false
+	if not Net.active:
+		player.call("enter_vehicle", v)
+		return true
+	_pending_vehicle_entry = v.vid
+	if Net.request_vehicle(v.vid):
+		return true
+	_pending_vehicle_entry = ""
+	return false
+
+
+func _on_vehicle_claimed(vid: String, claimant_id: int) -> void:
+	var v := vehicle_by_id(vid)
+	if claimant_id == Net.local_id():
+		if _pending_vehicle_entry == vid and v and local_player \
+				and is_instance_valid(local_player):
+			local_player.enter_vehicle(v)
+		_pending_vehicle_entry = ""
+		return
+	if v:
+		v.set_remote_controlled(true, claimant_id)
+
+
+func _on_vehicle_released(vid: String, rest: Array) -> void:
+	if _pending_vehicle_entry == vid:
+		_pending_vehicle_entry = ""
+	var v := vehicle_by_id(vid)
+	if v == null:
+		return
+	if v.remote_controlled:
+		v.set_remote_controlled(false)
+	if rest.size() == 4 and v.driver == null:
+		v.apply_rest_state(rest[0], float(rest[1]), float(rest[2]),
+			float(rest[3]))
+
+
+## Feed a remote driver's replicated state into the vehicle node, spawning it
+## on demand if this peer has never streamed the vehicle's origin chunk.
+func apply_remote_vehicle_state(peer_id: int, kind: int, vid: String,
+		pos: Vector3, yaw: float, aux: Vector3, vel: Vector3) -> void:
+	var v := vehicle_by_id(vid)
+	if v == null:
+		v = spawn_vehicle(kind, vid, pos, yaw)
+	if v.driver != null:
+		return   # never let remote state fight the local driver's seat
+	if not v.remote_controlled or v.occupied_by_peer != peer_id:
+		v.set_remote_controlled(true, peer_id)
+	v.apply_remote_state(pos, yaw, aux, vel)
 
 
 func spawn_local(peer_id: int, pname: String) -> MonkeyPlayer:
