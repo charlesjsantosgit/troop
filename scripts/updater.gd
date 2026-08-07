@@ -312,8 +312,10 @@ func _mount_selected_pack() -> void:
 		return
 	if compare_versions(active, _base_version) <= 0:
 		# A full installer has caught up with (or surpassed) the content pack.
-		_state["active_version"] = ""
-		_save_state()
+		# Skip the mount but DO NOT persist the cleanup: user:// is shared by
+		# every binary running this project (installed app, editor, headless
+		# tests), and a newer-base process saving this verdict would silently
+		# un-update an older-base install that still needs the pack.
 		return
 	if not _verify_and_mount_version(active):
 		_state["active_version"] = ""

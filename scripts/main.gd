@@ -952,10 +952,10 @@ func _show_menu() -> void:
 
 	add_child(menu)
 	call_deferred("_refresh_menu_scale")
-	# The updater already checks 1.5 s after boot and every six hours; asking
-	# again on each menu visit is free (internally throttled) and keeps the
-	# footer chip honest.
-	Updater.check_for_updates()
+	# The updater already checks on boot and every six hours; a menu visit is
+	# rare and user-initiated, so force past the throttle to keep the footer
+	# chip honest about what the latest release actually is.
+	Updater.check_for_updates(true)
 	if not _update_version.is_empty() and Updater.is_update_staged():
 		_schedule_staged_update_restart(_update_version)
 
@@ -987,7 +987,7 @@ func _set_update_chip(status: String) -> void:
 		"checking":
 			text = "AUTO-UPDATE · CHECKING…"
 		"current":
-			text = "AUTO-UPDATE · UP TO DATE"
+			text = "AUTO-UPDATE · UP TO DATE (%s)" % Updater.current_version()
 		"available", "downloading":
 			text = "AUTO-UPDATE · DOWNLOADING NEW VERSION"
 		"staged":
