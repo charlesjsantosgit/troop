@@ -173,6 +173,22 @@ with Godot 4.7 export templates and NSIS installed, rebuild both with:
 
 See `packaging/README.md` for signing, notarization, and release notes.
 
+**Update from the terminal** — replaces the installed game with the latest
+release wherever it is installed (checksums verified; the game also updates
+itself in-game, so this is mainly for repair or big engine jumps):
+
+macOS:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/charlesjsantosgit/troop/main/packaging/update-troop.sh | bash
+```
+
+Windows (PowerShell):
+
+```powershell
+powershell -c "irm https://raw.githubusercontent.com/charlesjsantosgit/troop/main/packaging/update-troop.ps1 | iex"
+```
+
 Release builds check a small RSA-signed manifest on GitHub Releases. Ordinary
 script, scene, shader, and generated-content updates download as a compact Godot
 resource pack, are re-verified on every boot, and take effect on the next
