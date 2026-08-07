@@ -366,20 +366,52 @@ func state_aux() -> Vector3:
 
 # ---- construction ----------------------------------------------------------
 
+## SurfaceTool follows Godot's clockwise front-face convention. Return a
+## triangle whose generated normal points toward the supplied exterior hint,
+## regardless of which side of a mirrored aircraft part produced the points.
+func _clockwise_triangle(a: Vector3, b: Vector3, c: Vector3,
+		outward: Vector3) -> Array[Vector3]:
+	var clockwise_normal := (c - a).cross(b - a)
+	if clockwise_normal.dot(outward) >= 0.0:
+		return [a, b, c]
+	return [a, c, b]
+
+
+## The four inputs trace a quad perimeter. Both emitted triangles use the same
+## outward-aware winding, preventing top/bottom and left/right mirrored panels
+## from silently receiving opposite normals.
+func _clockwise_quad(a: Vector3, b: Vector3, c: Vector3, d: Vector3,
+		outward: Vector3) -> Array[Vector3]:
+	var clockwise_normal := (c - a).cross(b - a)
+	if clockwise_normal.dot(outward) >= 0.0:
+		return [a, b, c, a, c, d]
+	return [a, d, c, a, c, b]
+
+
+## The radome is part of the single lofted shell. Vertex tint preserves its
+## dark break without laying a second cylinder over the same nose polygons,
+## which previously added z-fighting on top of the inverted shell normals.
+func _fuselage_tint(z: float) -> Color:
+	var radome_tint := Color(0.24 / 0.47, 0.27 / 0.50, 0.29 / 0.54)
+	return Color.WHITE.lerp(radome_tint, smoothstep(5.60, 6.48, z))
+
+
 func _build_body() -> void:
 	var body := Node3D.new()
 	body.name = "Body"
 	add_child(body)
 	var skin := paint_material(Color(0.47, 0.50, 0.54), 0.22, 0.62)
-	# Thin flight surfaces are visible from both sides; a double-sided copy of
-	# the skin keeps every wing, stabilator, and fin solid from any angle.
+	var fuselage_skin := skin.duplicate() as StandardMaterial3D
+	fuselage_skin.vertex_color_use_as_albedo = true
+	# Every flight surface below is a closed prism. Back-face culling now exposes
+	# a winding regression instead of drawing the inward face and lighting it as
+	# though the aircraft skin were inside out.
 	var surface_skin := StandardMaterial3D.new()
 	surface_skin.albedo_color = Color(0.45, 0.48, 0.52)
 	surface_skin.metallic = 0.22
 	surface_skin.roughness = 0.62
-	surface_skin.cull_mode = BaseMaterial3D.CULL_DISABLED
+	surface_skin.cull_mode = BaseMaterial3D.CULL_BACK
 	var dark := dark_metal_material()
-	var radome := paint_material(Color(0.24, 0.27, 0.29), 0.05, 0.74)
 	var cockpit_trim := paint_material(Color(0.075, 0.085, 0.095), 0.35, 0.52)
 
 	# Lofted fuselage: a capped, indexed 18-sided shell. The original ten-sided
@@ -408,7 +440,10 @@ func _build_body() -> void:
 			var a1 := Vector3(cos(t1) * a[1], sin(t1) * a[2] + a[3], a[0])
 			var b0 := Vector3(cos(t0) * b[1], sin(t0) * b[2] + b[3], b[0])
 			var b1 := Vector3(cos(t1) * b[1], sin(t1) * b[2] + b[3], b[0])
-			for p in [a0, b0, b1, a0, b1, a1]:
+			var middle_angle := (t0 + t1) * 0.5
+			var outward := Vector3(cos(middle_angle), sin(middle_angle), 0.0)
+			for p in _clockwise_quad(a0, b0, b1, a1, outward):
+				loft.set_color(_fuselage_tint(p.z))
 				loft.add_vertex(p)
 	# Close both ends so a low camera never sees through the radome or nozzle.
 	loft.set_smooth_group(-1)
@@ -422,21 +457,21 @@ func _build_body() -> void:
 				sin(t0) * station[2] + station[3], station[0])
 			var p1 := Vector3(cos(t1) * station[1],
 				sin(t1) * station[2] + station[3], station[0])
-			var cap_points := [center, p1, p0] \
-				if end_index == 0 else [center, p0, p1]
-			for p in cap_points:
+			var outward := Vector3(0.0, 0.0, 1.0) \
+				if end_index == 0 else Vector3(0.0, 0.0, -1.0)
+			for p in _clockwise_triangle(center, p0, p1, outward):
+				loft.set_color(_fuselage_tint(p.z))
 				loft.add_vertex(p)
 	loft.index()
 	loft.generate_normals()
 	var fuselage := MeshInstance3D.new()
+	fuselage.name = "FuselageShell"
 	fuselage.mesh = loft.commit()
-	fuselage.material_override = skin
+	fuselage.material_override = fuselage_skin
 	body.add_child(fuselage)
 
-	# Radome break and blended shoulder chines keep the nose readable without
-	# turning the whole forward fuselage into one uninterrupted grey spike.
-	add_cylinder(body, 0.035, 0.255, 1.18, Vector3(0, 0.08, 7.01), radome,
-		Vector3(PI / 2.0, 0, 0), 18)
+	# Blended shoulder chines keep the nose readable without turning the whole
+	# forward fuselage into one uninterrupted grey spike.
 	for side in [-1.0, 1.0]:
 		_add_wing_panel(body, side, Vector3(0.48 * side, 0.03, 3.45),
 			Vector3(1.36 * side, -0.04, 1.55), 0.72, 0.28, surface_skin)
@@ -530,24 +565,34 @@ func _build_body() -> void:
 		_add_wing_panel(body, side, Vector3(0.3 * side, -0.42, -5.2),
 			Vector3(0.9 * side, -1.0, -5.9), 0.9, 0.5, surface_skin)
 	var tail := MeshInstance3D.new()
+	tail.name = "VerticalTailShell"
 	var tail_loft := SurfaceTool.new()
 	tail_loft.begin(Mesh.PRIMITIVE_TRIANGLES)
+	tail_loft.set_smooth_group(-1)
 	var tail_pts := [Vector3(0, 0.5, -3.6), Vector3(0, 2.6, -5.6),
 		Vector3(0, 2.6, -6.6), Vector3(0, 0.4, -6.4)]
-	for side_index in range(2):
-		var thickness := -0.07 if side_index == 0 else 0.07
-		var order := [0, 1, 2, 0, 2, 3] if side_index == 0 \
-			else [0, 2, 1, 0, 3, 2]
-		for i in order:
-			var p: Vector3 = tail_pts[i]
-			tail_loft.add_vertex(p + Vector3(thickness, 0, 0))
+	for thickness in [-0.07, 0.07]:
+		var outward := Vector3(signf(thickness), 0.0, 0.0)
+		for indices in [[0, 1, 2], [0, 2, 3]]:
+			var a: Vector3 = tail_pts[indices[0]] + Vector3(thickness, 0, 0)
+			var b: Vector3 = tail_pts[indices[1]] + Vector3(thickness, 0, 0)
+			var c: Vector3 = tail_pts[indices[2]] + Vector3(thickness, 0, 0)
+			for p in _clockwise_triangle(a, b, c, outward):
+				tail_loft.add_vertex(p)
+	var tail_center := Vector3.ZERO
+	for point: Vector3 in tail_pts:
+		tail_center += point
+	tail_center /= float(tail_pts.size())
 	for edge_index in range(tail_pts.size()):
 		var edge_next := (edge_index + 1) % tail_pts.size()
 		var a: Vector3 = tail_pts[edge_index] + Vector3(-0.07, 0, 0)
 		var b: Vector3 = tail_pts[edge_next] + Vector3(-0.07, 0, 0)
 		var c: Vector3 = tail_pts[edge_next] + Vector3(0.07, 0, 0)
 		var d: Vector3 = tail_pts[edge_index] + Vector3(0.07, 0, 0)
-		for p in [a, b, c, a, c, d]:
+		var outward: Vector3 = (tail_pts[edge_index] + tail_pts[edge_next]) * 0.5 \
+			- tail_center
+		outward.x = 0.0
+		for p in _clockwise_quad(a, b, c, d, outward):
 			tail_loft.add_vertex(p)
 	tail_loft.index()
 	tail_loft.generate_normals()
@@ -650,33 +695,37 @@ func _add_wing_panel(parent: Node3D, _side: float, root: Vector3,
 		material: Material) -> void:
 	var st := SurfaceTool.new()
 	st.begin(Mesh.PRIMITIVE_TRIANGLES)
+	st.set_smooth_group(-1)
 	var r0 := root + Vector3(0, 0, root_chord * 0.5)
 	var r1 := root + Vector3(0, 0, -root_chord * 0.5)
 	var t0 := tip + Vector3(0, 0, tip_chord * 0.5)
 	var t1 := tip + Vector3(0, 0, -tip_chord * 0.5)
-	for dy in [-0.08, 0.08]:
-		var off := Vector3(0, dy, 0)
-		for p in [r0 + off, t0 + off, t1 + off, r0 + off, t1 + off, r1 + off]:
-			st.add_vertex(p)
+	var down := Vector3(0, -0.08, 0)
+	var up := Vector3(0, 0.08, 0)
+	for p in _clockwise_quad(r0 + down, t0 + down, t1 + down,
+			r1 + down, Vector3.DOWN):
+		st.add_vertex(p)
+	for p in _clockwise_quad(r0 + up, t0 + up, t1 + up,
+			r1 + up, Vector3.UP):
+		st.add_vertex(p)
 	# Leading/trailing edge skins.
-	for pair in [[r0, t0], [t1, r1]]:
-		var a: Vector3 = pair[0]
-		var b: Vector3 = pair[1]
-		for p in [a + Vector3(0, -0.08, 0), b + Vector3(0, -0.08, 0),
-				b + Vector3(0, 0.08, 0), a + Vector3(0, -0.08, 0),
-				b + Vector3(0, 0.08, 0), a + Vector3(0, 0.08, 0)]:
-			st.add_vertex(p)
+	for p in _clockwise_quad(r0 + down, t0 + down, t0 + up, r0 + up,
+			Vector3(0, 0, 1)):
+		st.add_vertex(p)
+	for p in _clockwise_quad(r1 + down, t1 + down, t1 + up, r1 + up,
+			Vector3(0, 0, -1)):
+		st.add_vertex(p)
 	# Root and tip caps stop the panels reading as open sheets at grazing angles.
-	for pair in [[r1, r0], [t0, t1]]:
-		var a: Vector3 = pair[0]
-		var b: Vector3 = pair[1]
-		for p in [a + Vector3(0, -0.08, 0), b + Vector3(0, -0.08, 0),
-				b + Vector3(0, 0.08, 0), a + Vector3(0, -0.08, 0),
-				b + Vector3(0, 0.08, 0), a + Vector3(0, 0.08, 0)]:
-			st.add_vertex(p)
+	for p in _clockwise_quad(r1 + down, r0 + down, r0 + up, r1 + up,
+			Vector3(-_side, 0, 0)):
+		st.add_vertex(p)
+	for p in _clockwise_quad(t0 + down, t1 + down, t1 + up, t0 + up,
+			Vector3(_side, 0, 0)):
+		st.add_vertex(p)
 	st.index()
 	st.generate_normals()
 	var mi := MeshInstance3D.new()
+	mi.name = "FlightSurface"
 	mi.mesh = st.commit()
 	mi.material_override = material
 	parent.add_child(mi)

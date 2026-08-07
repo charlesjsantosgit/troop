@@ -1434,7 +1434,7 @@ func _do_debug_shot(what: String, out: String) -> void:
 			cam.make_current()
 			for i in range(90):
 				await get_tree().process_frame
-		"debug-jet":
+		"debug-jet", "debug-jet-opposite", "debug-jet-high", "debug-jet-low":
 			if hud:
 				hud.visible = false
 			p.set_physics_process(false)
@@ -1443,11 +1443,24 @@ func _do_debug_shot(what: String, out: String) -> void:
 			world.set_time_of_day_override(12.0)
 			_add_vehicle_preview_rider(world.vehicle_by_id("v:debug#jet"), "Ace")
 			cam.fov = 55.0
-			# A clean side profile makes the transparent dome visibly enclose the
-			# seated pilot; the old front-quarter angle hid its forward contour in
-			# the sky and made the same correct seat pose look perched on the nose.
-			cam.global_position = Vector3(9.0, 4.7, 34.5)
-			cam.look_at(Vector3(24.0, 2.55, 34.0))
+			# Complementary diagnostic angles expose the near shell on both mirrored
+			# sides, plus upper and lower panel faces. A winding regression can no
+			# longer hide behind a double-sided material or one favorable profile.
+			match what:
+				"debug-jet-opposite":
+					cam.global_position = Vector3(39.0, 4.7, 33.5)
+					cam.look_at(Vector3(24.0, 2.55, 34.0))
+				"debug-jet-high":
+					cam.global_position = Vector3(12.0, 12.0, 34.5)
+					cam.look_at(Vector3(24.0, 2.45, 34.0))
+				"debug-jet-low":
+					cam.global_position = Vector3(9.0, 2.15, 34.5)
+					cam.look_at(Vector3(24.0, 2.75, 34.0))
+				_:
+					# A clean side profile also makes the transparent dome visibly
+					# enclose the seated pilot.
+					cam.global_position = Vector3(9.0, 4.7, 34.5)
+					cam.look_at(Vector3(24.0, 2.55, 34.0))
 			cam.make_current()
 			for i in range(90):
 				await get_tree().process_frame
@@ -1477,7 +1490,7 @@ func _do_debug_shot(what: String, out: String) -> void:
 				await get_tree().process_frame
 	if what != "debug-wings" and what != "debug-course" \
 			and what != "debug-vehicles" and what != "debug-ride" \
-			and what != "debug-jet":
+			and not what.begins_with("debug-jet"):
 		cam.queue_free()
 	for i in range(8):
 		await RenderingServer.frame_post_draw
