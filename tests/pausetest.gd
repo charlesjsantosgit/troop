@@ -12,6 +12,14 @@ func _ready() -> void:
 
 func run(main) -> void:
 	await get_tree().process_frame
+	main.hud._fps_refresh_remaining = 0.0
+	main.hud._update_fps_meter(HUD.FPS_REFRESH_SECONDS)
+	_check(main.hud.fps_label != null and main.hud.fps_label.visible \
+		and main.hud.fps_label.text.begins_with("FPS ") \
+		and main.hud.fps_label.position.x <= 20.0 \
+		and main.hud.fps_label.position.y + 20.0 <= main.hud.score_label.position.y \
+		and main.hud.fps_label.get_index() > main.hud.sniper_scope.get_index(),
+		"accurate FPS meter occupies the top-left without covering the score")
 	main._open_pause_menu()
 	_check(get_tree().paused and main.pause_menu != null \
 		and main.pause_layer != null,

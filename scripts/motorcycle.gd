@@ -8,19 +8,30 @@ extends Vehicle
 ## under power, stoppies under the front brake, and a genuine 110 mph flat
 ## out in a tuck. One big single cylinder barks underneath it all.
 
-const WHEELBASE_FRONT := 0.76
-const WHEELBASE_REAR := -0.73
-const FRONT_RADIUS := 0.34
-const REAR_RADIUS := 0.315
+## The motorcycle is authored at human dual-sport dimensions, then reduced to
+## the monkey cast's scale as one coherent machine. Keeping the physics wheels,
+## collision hull, controls, and visible model on this same factor prevents the
+## rider from reading like a toy perched on an oversized motorcycle.
+const MODEL_SCALE := 0.86
+const AUTHORED_WHEELBASE_FRONT := 0.76
+const AUTHORED_WHEELBASE_REAR := -0.73
+const AUTHORED_FRONT_RADIUS := 0.34
+const AUTHORED_REAR_RADIUS := 0.315
+const WHEELBASE_FRONT := AUTHORED_WHEELBASE_FRONT * MODEL_SCALE
+const WHEELBASE_REAR := AUTHORED_WHEELBASE_REAR * MODEL_SCALE
+const FRONT_RADIUS := AUTHORED_FRONT_RADIUS * MODEL_SCALE
+const REAR_RADIUS := AUTHORED_REAR_RADIUS * MODEL_SCALE
+const SUSPENSION_TRAVEL := 0.224
+const SUSPENSION_ATTACH_Y := -0.013
 const RAKE := 0.45                    # steering-head angle, rad (~26 deg)
 const MAX_LEAN := 0.83                # ~48 deg on knobbies
 const LOWSIDE_LEAN_ERROR := 0.55
-const WHEELIE_DURATION := 1.20
-const WHEELIE_COOLDOWN := 1.65
-const WHEELIE_TARGET_PITCH := -0.39   # ~22° balance-point target
-const WHEELIE_STEER_SCALE := 0.15
-const WHEELIE_MIN_SPEED := 4.0
-const WHEELIE_MAX_SPEED := 34.0
+const WHEELIE_DURATION := 2.20
+const WHEELIE_COOLDOWN := 2.45
+const WHEELIE_TARGET_PITCH := -0.52   # ~30° balance-point target
+const WHEELIE_STEER_SCALE := 0.08
+const WHEELIE_MIN_SPEED := 2.5
+const WHEELIE_MAX_SPEED := 38.0
 const MAX_ASSISTED_LEAN := 0.66       # ~38°: quick without a snap lowside
 
 var lean_target := 0.0
@@ -40,6 +51,7 @@ var _rear_wheel_visual: Node3D
 var _handlebar: Node3D
 var _headlight: SpotLight3D
 var _shock_spring: MeshInstance3D
+var _body_visual: Node3D
 
 
 func _init() -> void:
@@ -50,10 +62,12 @@ func _init() -> void:
 	drag_area = 0.55
 	max_steer_angle = 0.62
 	steer_speed = 4.5
-	seat_offset = Vector3(0, 0.62, -0.18)
-	# Rig origin that puts the 0.48 m seated pelvis directly into the saddle.
-	rider_root_offset = Vector3(0, 0.21, -0.12)
-	fp_camera_offset = Vector3(0, 1.06, -0.10)
+	seat_offset = Vector3(0, 0.535, -0.155)
+	# The monkey itself remains full size. Lower its rig root by the model-scale
+	# delta so the same 0.48 m seated pelvis rests in the resized saddle instead
+	# of floating above it; retain the original root-to-head camera separation.
+	rider_root_offset = Vector3(0, 0.115, -0.103)
+	fp_camera_offset = Vector3(0, 0.965, -0.083)
 	exit_offsets = [Vector3(-1.1, 0.3, 0), Vector3(1.1, 0.3, 0),
 		Vector3(0, 0.5, -1.8)]
 	camera_distance = 4.6
@@ -77,7 +91,9 @@ func _init() -> void:
 		"inertia": 0.14,
 		"gear_ratios": [2.47, 1.78, 1.38, 1.09, 0.87],
 		"reverse_ratio": 0.0,
-		"final_drive": 5.86,
+		# Smaller tires need a proportionally taller final ratio to preserve the
+		# existing road-speed/RPM relationship and familiar 110 mph performance.
+		"final_drive": 5.86 * MODEL_SCALE,
 		"driveline_efficiency": 0.90,
 		"shift_time": 0.16,
 		"engine_brake_coefficient": 1.1,
@@ -86,9 +102,9 @@ func _init() -> void:
 
 	var front := VehicleWheel.new()
 	front.configure({
-		"local_pos": Vector3(0, -0.05, WHEELBASE_FRONT),
+		"local_pos": Vector3(0, SUSPENSION_ATTACH_Y, WHEELBASE_FRONT),
 		"radius": FRONT_RADIUS,
-		"travel": 0.26,
+		"travel": SUSPENSION_TRAVEL,
 		"spring_rate": 11500.0,
 		"damp_bump": 780.0,
 		"damp_rebound": 1250.0,
@@ -105,9 +121,9 @@ func _init() -> void:
 	wheels.append(front)
 	var rear := VehicleWheel.new()
 	rear.configure({
-		"local_pos": Vector3(0, -0.05, WHEELBASE_REAR),
+		"local_pos": Vector3(0, SUSPENSION_ATTACH_Y, WHEELBASE_REAR),
 		"radius": REAR_RADIUS,
-		"travel": 0.26,
+		"travel": SUSPENSION_TRAVEL,
 		"spring_rate": 13800.0,
 		"damp_bump": 950.0,
 		"damp_rebound": 1650.0,
@@ -128,11 +144,14 @@ func _ready() -> void:
 	super()
 	var body_shape := CollisionShape3D.new()
 	var body_box := BoxShape3D.new()
-	body_box.size = Vector3(0.42, 0.72, 1.85)
+	body_box.size = Vector3(0.42, 0.72, 1.82) * MODEL_SCALE
 	body_shape.shape = body_box
-	body_shape.position = Vector3(0, 0.42, 0)
+	body_shape.position = Vector3(0, 0.42, 0) * MODEL_SCALE
 	add_child(body_shape)
 	_build_body()
+	# Physical root-space outlet just beyond the scaled muffler's aft cap.
+	add_exhaust(Vector3(0.14, 0.604, -0.91) * MODEL_SCALE,
+		Vector3(0, 0, -1), VehicleExhaust.Profile.BIKE)
 
 
 func mount_verb() -> String:
@@ -140,6 +159,40 @@ func mount_verb() -> String:
 
 
 func ejects_rider_on_crash() -> bool:
+	return true
+
+
+func end_drive() -> Vector3:
+	# A grounded, upright rider can place the bike directly on its kickstand.
+	# Requiring both wheel rays prevents Ctrl-wheelie or low-speed hop dismounts
+	# from freezing a machine in midair or balanced on the rear contact alone.
+	var pose := global_basis.get_euler(EULER_ORDER_YXZ)
+	var can_set_stand := speed() < 4.5 and _both_wheels_near_ground() \
+		and global_basis.y.y > 0.72 and absf(pose.x) < 0.28 \
+		and absf(pose.z) < 0.60
+	var exit_position := super()
+	_reset_special_physics_state()
+	if can_set_stand:
+		global_basis = Basis.from_euler(Vector3(0.0, pose.y, -0.12),
+			EULER_ORDER_YXZ)
+		linear_velocity = Vector3.ZERO
+		angular_velocity = Vector3.ZERO
+		sleeping = true
+		reset_physics_interpolation()
+	return exit_position
+
+
+func _both_wheels_near_ground() -> bool:
+	# Suspension contact can flicker for a frame while the rider's weight is
+	# removed. Probe the same physical/streaming-safe ground under both hubs and
+	# allow only a small tire-reach tolerance. A raised wheelie front remains far
+	# outside this envelope, so it cannot be mistaken for a parked stance.
+	for wheel in wheels:
+		var attach := global_position + global_basis * wheel.local_pos
+		var reach := wheel.radius + wheel.travel
+		var probe: Dictionary = probe_ground(attach, reach + 0.08)
+		if float(probe.distance) > reach + 0.08:
+			return false
 	return true
 
 
@@ -163,6 +216,15 @@ func set_driver_view(_aim: Vector3, inp: Dictionary) -> void:
 
 func wheelie_active() -> bool:
 	return wheelie_remaining > 0.0
+
+
+func _reset_special_physics_state() -> void:
+	wheelie_remaining = 0.0
+	_wheelie_elapsed = 0.0
+	_wheelie_cooldown = 0.0
+	_lowside_t = 0.0
+	lean_target = 0.0
+	_lean_integral = 0.0
 
 
 func _advance_steering(dt: float) -> void:
@@ -208,7 +270,7 @@ func _simulate(dt: float) -> void:
 func anti_loop_active() -> bool:
 	var pitch := global_basis.get_euler(EULER_ORDER_YXZ).x
 	# This project drives along local +Z, so nose-up is negative X pitch.
-	return pitch < -0.55 and input_throttle > 0.0
+	return pitch < -0.61 and input_throttle > 0.0
 
 
 func _wheels_grounded() -> int:
@@ -219,9 +281,29 @@ func _wheels_grounded() -> int:
 	return n
 
 
-## A short PD attitude assist represents the monkey shifting rearward and
-## feeding power to the balance point. It eases both in and out, remains below
-## the anti-loop cutoff, and leaves tire contact/landing to the rigid body.
+func _near_ground_for_feet() -> bool:
+	# Wheel-ray contact can flicker while the loaded suspension crosses static
+	# sag. At walking pace the monkey's feet still reach the real surface below
+	# the chassis, so keep balance authority through that brief gap. This affects
+	# only an occupied slow bike; it never freezes or parks an airborne body.
+	if _wheels_grounded() > 0:
+		return true
+	if _space:
+		var query := PhysicsRayQueryParameters3D.create(
+			global_position + Vector3.UP * 0.15,
+			global_position + Vector3.DOWN * 0.95)
+		query.exclude = _exclude
+		if not _space.intersect_ray(query).is_empty():
+			return true
+	var terrain_gap := global_position.y \
+		- terrain_height_at(global_position.x, global_position.z)
+	return terrain_gap >= -0.1 and terrain_gap <= 0.85
+
+
+## A sustained PD attitude assist represents the monkey shifting rearward and
+## feeding power to the balance point. It rises decisively, holds long enough
+## to read as a real wheelie, then eases down while tire contact and landing
+## remain entirely in the rigid-body simulation.
 func _advance_wheelie(dt: float) -> void:
 	if not wheelie_active() or driver == null:
 		wheelie_remaining = 0.0 if driver == null else wheelie_remaining
@@ -229,13 +311,13 @@ func _advance_wheelie(dt: float) -> void:
 	_wheelie_elapsed = minf(_wheelie_elapsed + dt, WHEELIE_DURATION)
 	wheelie_remaining = maxf(WHEELIE_DURATION - _wheelie_elapsed, 0.0)
 	var phase := _wheelie_elapsed / WHEELIE_DURATION
-	var envelope := smoothstep(0.0, 0.18, phase) \
-		* (1.0 - smoothstep(0.70, 1.0, phase))
+	var envelope := smoothstep(0.0, 0.12, phase) \
+		* (1.0 - smoothstep(0.78, 1.0, phase))
 	var target_pitch := WHEELIE_TARGET_PITCH * envelope
 	var pitch := global_basis.get_euler(EULER_ORDER_YXZ).x
 	var pitch_rate := angular_velocity.dot(global_basis.x)
-	var command := clampf((target_pitch - pitch) * 20.0
-		- pitch_rate * 5.0, -6.0, 6.0)
+	var command := clampf((target_pitch - pitch) * 26.0
+		- pitch_rate * 6.5, -8.0, 8.0)
 	apply_torque(global_basis.x * command * mass)
 
 
@@ -247,6 +329,8 @@ func _advance_wheelie(dt: float) -> void:
 func _advance_lean(dt: float) -> void:
 	var v := forward_speed()
 	var grounded := _wheels_grounded() > 0
+	var balance_supported := grounded \
+		or (driver != null and absf(v) < 2.5 and _near_ground_for_feet())
 	var roll := global_basis.get_euler(EULER_ORDER_YXZ).z
 	if driver == null:
 		# Sidestand: a parked bike settles into a slight lean and stays.
@@ -274,8 +358,8 @@ func _advance_lean(dt: float) -> void:
 		clampf(absf(v) / 14.0, 0.0, 1.0))
 	if absf(v) < 2.5:
 		lean_target = 0.0
-		authority = 34.0
-	if not grounded:
+		authority = 44.0
+	if not balance_supported:
 		authority = 4.0   # airborne body English only
 	var error := angle_difference(roll, lean_target)
 	var roll_rate := angular_velocity.dot(global_basis.z)
@@ -308,8 +392,9 @@ func _advance_lean(dt: float) -> void:
 	# Rider pitch damping: soften wheelie/stoppie rotation like a real body
 	# hanging off the pegs, and close the throttle past the balance point.
 	var pitch_rate := angular_velocity.dot(global_basis.x)
+	var pitch_damping := 0.32 if wheelie_active() else 0.85
 	apply_torque(-global_basis.x * clampf(pitch_rate, -8.0, 8.0)
-		* mass * 0.85)
+		* mass * pitch_damping)
 
 
 ## Sliding out both contact patches while leaned past recovery is a lowside:
@@ -339,8 +424,10 @@ func _check_lowside(dt: float) -> void:
 
 
 func _build_body() -> void:
-	var body := Node3D.new()
+	_body_visual = Node3D.new()
+	var body := _body_visual
 	body.name = "Body"
+	body.scale = Vector3.ONE * MODEL_SCALE
 	add_child(body)
 	var paint := paint_material(Color(0.78, 0.30, 0.06), 0.3, 0.5)
 	var frame_mat := paint_material(Color(0.13, 0.13, 0.14), 0.6, 0.42)
@@ -375,6 +462,12 @@ func _build_body() -> void:
 	tank.scale = Vector3(0.85, 1.0, 1.5)
 	add_box(body, Vector3(0.24, 0.07, 0.62), Vector3(0, 0.655, -0.30),
 		paint_material(Color(0.09, 0.09, 0.09), 0.1, 0.85))
+	# Stable reference for proportion/ride-height regressions. It follows the
+	# same uniformly scaled model root as the actual saddle surface.
+	var saddle_top := Node3D.new()
+	saddle_top.name = "SaddleTop"
+	saddle_top.position = Vector3(0, 0.69, -0.30)
+	body.add_child(saddle_top)
 	add_box(body, Vector3(0.20, 0.05, 0.30), Vector3(0, 0.67, -0.68), paint,
 		Vector3(-0.18, 0, 0))
 	for side in [-0.13, 0.13]:
@@ -437,7 +530,7 @@ func _build_body() -> void:
 	body.add_child(_front_fender)
 	add_box(_front_fender, Vector3(0.22, 0.03, 0.55), Vector3.ZERO, paint,
 		Vector3(0.1, 0, 0))
-	_front_wheel_visual = build_knobby_wheel(FRONT_RADIUS, 0.115, 16,
+	_front_wheel_visual = build_knobby_wheel(AUTHORED_FRONT_RADIUS, 0.115, 16,
 		Color(0.2, 0.2, 0.22))
 	body.add_child(_front_wheel_visual)
 	wheels[0].visual = null   # posed manually along the fork axis
@@ -449,7 +542,7 @@ func _build_body() -> void:
 	for side in [-0.10, 0.10]:
 		add_box(_swingarm, Vector3(0.035, 0.05, 0.62),
 			Vector3(side, 0, -0.28), frame_mat)
-	_rear_wheel_visual = build_knobby_wheel(REAR_RADIUS, 0.13, 16,
+	_rear_wheel_visual = build_knobby_wheel(AUTHORED_REAR_RADIUS, 0.13, 16,
 		Color(0.2, 0.2, 0.22))
 	body.add_child(_rear_wheel_visual)
 	add_cylinder(_swingarm, 0.055, 0.055, 0.03,
@@ -478,7 +571,7 @@ func _build_body() -> void:
 ## Forks compress along their raked axis, the swingarm rotates to follow the
 ## rear wheel, and the bar assembly steers around the head tube.
 func _update_extra_visuals(_dt: float) -> void:
-	if _steer_head == null:
+	if _steer_head == null or _body_visual == null:
 		return
 	_steer_head.rotation = Vector3(-RAKE, 0, 0)
 	_steer_head.rotate_object_local(Vector3.UP, _steer_current)
@@ -488,12 +581,12 @@ func _update_extra_visuals(_dt: float) -> void:
 	# steering can never make the tire hover above (or tunnel through) its patch.
 	var fork_extension := front.travel - front.compression
 	var front_center := front.local_pos - Vector3(0, fork_extension, 0)
-	_front_wheel_visual.position = front_center
+	_front_wheel_visual.position = _model_local(front_center)
 	_front_wheel_visual.rotation = Vector3.ZERO
 	_front_wheel_visual.rotate_object_local(Vector3.UP, _steer_current)
 	_front_wheel_visual.rotate_object_local(Vector3.RIGHT, front.spin_angle)
-	_front_fender.position = front_center \
-		+ Vector3(0, FRONT_RADIUS + 0.06, 0)
+	_front_fender.position = _model_local(front_center) \
+		+ Vector3(0, AUTHORED_FRONT_RADIUS + 0.06, 0)
 	_front_fender.rotation = Vector3(0, _steer_current, 0)
 	var hub_in_head := _steer_head.to_local(to_global(front_center))
 	for i in range(_front_sliders.size()):
@@ -508,13 +601,13 @@ func _update_extra_visuals(_dt: float) -> void:
 	var rear := wheels[1]
 	var rear_center := rear.local_pos \
 		- Vector3(0, rear.travel - rear.compression, 0)
-	_rear_wheel_visual.position = rear_center
+	_rear_wheel_visual.position = _model_local(rear_center)
 	_rear_wheel_visual.rotation = Vector3.ZERO
 	_rear_wheel_visual.rotate_object_local(Vector3.RIGHT, rear.spin_angle)
 	# Aim the live swingarm directly at the same physical hub and lengthen only
 	# its longitudinal members to meet it. The prior positive-angle estimate put
 	# the visible rear wheel roughly 0.7 m above its actual contact patch.
-	var arm_delta := rear_center - _swingarm.position
+	var arm_delta := _model_local(rear_center) - _swingarm.position
 	_swingarm.rotation = Vector3(atan2(arm_delta.y, -arm_delta.z), 0, 0)
 	_swingarm.scale = Vector3(1, 1, arm_delta.length() / 0.57)
 	if _shock_spring:
@@ -528,6 +621,13 @@ func _update_extra_visuals(_dt: float) -> void:
 		_headlight.light_energy = lerpf(_headlight.light_energy,
 			4.5 if (driver != null or remote_controlled) and night else 0.0,
 			0.2)
+
+
+## Convert a physical chassis-local coordinate into the uniformly scaled
+## procedural model's local space. This keeps wheel hubs and suspension members
+## on the real raycast contact geometry instead of applying MODEL_SCALE twice.
+func _model_local(physical_local: Vector3) -> Vector3:
+	return physical_local / MODEL_SCALE
 
 
 func _pose_fork_member(member: MeshInstance3D, a: Vector3, b: Vector3) -> void:

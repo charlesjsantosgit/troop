@@ -34,6 +34,11 @@ const TAKEOFF_PITCH_LIMIT := 0.24       # ~14° protected rotation
 const ASSISTED_CLIMB_PITCH := 0.24      # Up holds a useful, non-stalling climb
 const ASSISTED_DESCENT_PITCH := -0.16   # Down lowers the nose without a dive
 const CONTROL_AUTHORITY_Q := 3500.0     # Pa for full control-surface response
+const NOZZLE_LIP_Z := -7.25
+const BURNER_CORE_LENGTH := 2.25
+# The replicated aux vector has no spare component. Values 0..1 remain normal
+# spool for backwards compatibility; +2 carries the independent burner bit.
+const REMOTE_AFTERBURNER_OFFSET := 2.0
 
 var throttle_setpoint := 0.0       # persistent 0..1 (W raises, S lowers)
 var spool := 0.0                   # turbine response toward the setpoint
@@ -138,6 +143,10 @@ func _ready() -> void:
 	add_child(wing_shape)
 	_build_body()
 	_build_burner_audio()
+	# The existing cone is the luminous burner core; this outlet adds only the
+	# translucent high-speed heat plume from the real nozzle lip.
+	add_exhaust(Vector3(0, 0, NOZZLE_LIP_Z), Vector3(0, 0, -1),
+		VehicleExhaust.Profile.JET)
 
 
 func mount_verb() -> String:
@@ -187,6 +196,20 @@ func air_density() -> float:
 
 func mach() -> float:
 	return speed() / SOUND_SPEED
+
+
+func exhaust_activity(profile_kind: int) -> float:
+	if remote_controlled:
+		return VehicleExhaust.sampled_intensity(profile_kind, true,
+			_remote_rpm, 0.60, exhaust_boost())
+	# Let a bailed-out turbine wind down instead of snapping its plume off while
+	# the physical spool and existing nozzle flame are still decaying.
+	return VehicleExhaust.sampled_intensity(profile_kind,
+		driver != null or spool > 0.015, spool, spool, exhaust_boost())
+
+
+func exhaust_boost() -> float:
+	return 1.0 if afterburner else 0.0
 
 
 ## Full flight-model replacement for the ground-vehicle _simulate.
@@ -414,7 +437,22 @@ func _warn_stall(dt: float) -> void:
 
 func state_aux() -> Vector3:
 	var euler := global_basis.get_euler(EULER_ORDER_YXZ)
-	return Vector3(euler.x, euler.z, spool)
+	var encoded_spool := spool + (REMOTE_AFTERBURNER_OFFSET if afterburner else 0.0)
+	return Vector3(euler.x, euler.z, encoded_spool)
+
+
+## Decode turbine spool and the independent afterburner bit before the base
+## interpolation path stores its normalized remote RPM. This keeps remote
+## particle velocity, nozzle core, burner audio, and engine pitch in sync.
+func apply_remote_state(pos: Vector3, yaw: float, aux: Vector3,
+		vel: Vector3) -> void:
+	var remote_afterburner := aux.z >= REMOTE_AFTERBURNER_OFFSET
+	var remote_spool := aux.z - REMOTE_AFTERBURNER_OFFSET \
+		if remote_afterburner else aux.z
+	spool = clampf(remote_spool, 0.0, 1.0)
+	afterburner = remote_afterburner
+	engine.rpm = lerpf(62.0, 100.0, spool)
+	super(pos, yaw, Vector3(aux.x, aux.y, spool), vel)
 
 
 # ---- construction ----------------------------------------------------------
@@ -661,21 +699,29 @@ func _build_body() -> void:
 	add_cylinder(body, 0.40, 0.50, 0.7, Vector3(0, 0.0, -6.9), dark,
 		Vector3(PI / 2.0, 0, 0), 12)
 	_nozzle_glow = StandardMaterial3D.new()
-	_nozzle_glow.albedo_color = Color(1.0, 0.62, 0.2, 0.85)
+	# A real turbine plume is brightest at the nozzle but never an opaque orange
+	# rod. Additive, uncapped geometry gives a thin blue-white core whose warmer
+	# afterburner colour can still be read through the surrounding heat plume.
+	_nozzle_glow.albedo_color = Color(0.50, 0.72, 1.0, 0.0)
 	_nozzle_glow.emission_enabled = true
-	_nozzle_glow.emission = Color(1.0, 0.55, 0.15)
+	_nozzle_glow.emission = Color(0.38, 0.68, 1.0)
 	_nozzle_glow.emission_energy_multiplier = 0.0
 	_nozzle_glow.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	_nozzle_glow.blend_mode = BaseMaterial3D.BLEND_MODE_ADD
 	_nozzle_glow.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	_nozzle_glow.cull_mode = BaseMaterial3D.CULL_DISABLED
 	var flame_mesh := CylinderMesh.new()
-	flame_mesh.top_radius = 0.36
-	flame_mesh.bottom_radius = 0.10
-	flame_mesh.height = 2.6
-	flame_mesh.radial_segments = 10
+	flame_mesh.top_radius = 0.29
+	flame_mesh.bottom_radius = 0.055
+	flame_mesh.height = BURNER_CORE_LENGTH
+	flame_mesh.radial_segments = 16
+	flame_mesh.cap_top = false
+	flame_mesh.cap_bottom = false
 	_nozzle_flame = MeshInstance3D.new()
 	_nozzle_flame.mesh = flame_mesh
 	_nozzle_flame.rotation = Vector3(PI / 2.0, 0, 0)
-	_nozzle_flame.position = Vector3(0, 0, -8.4)
+	_nozzle_flame.position = Vector3(0, 0,
+		NOZZLE_LIP_Z - BURNER_CORE_LENGTH * 0.05 * 0.5)
 	_nozzle_flame.material_override = _nozzle_glow
 	_nozzle_flame.scale = Vector3(1, 0.05, 1)
 	body.add_child(_nozzle_flame)
@@ -930,13 +976,24 @@ func _update_extra_visuals(dt: float) -> void:
 		flap.rotation = Vector3(_flap_position * 0.5, 0, 0)
 	if _airbrake_panel:
 		_airbrake_panel.rotation = Vector3(-airbrake * 0.9, 0, 0)
-	# Nozzle flame length follows spool; blinding in afterburner.
+	# Nozzle-core length follows spool. Its alpha deliberately remains low even
+	# in afterburner; emission and the surrounding particle plume carry the heat
+	# without turning it into a solid arcade-style cone.
 	if _nozzle_flame:
-		var flame := clampf(spool * 0.35
-			+ (1.2 if afterburner else 0.0), 0.0, 1.4)
-		_nozzle_flame.scale = Vector3(1, maxf(flame, 0.03), 1)
-		_nozzle_glow.emission_energy_multiplier = flame * 7.0
-		_nozzle_glow.albedo_color.a = clampf(flame, 0.0, 0.9)
+		var burner := 1.0 if afterburner else 0.0
+		var flame := clampf(spool * 0.24 + burner * 0.86, 0.0, 1.10)
+		var width := lerpf(0.72, 1.0, clampf(spool + burner * 0.35, 0.0, 1.0))
+		var length_scale := maxf(flame, 0.025)
+		_nozzle_flame.scale = Vector3(width, length_scale, width)
+		# Scaling a centred cylinder would make its forward edge wander or even
+		# detach. Re-anchor that edge to the physical nozzle lip every frame.
+		_nozzle_flame.position.z = NOZZLE_LIP_Z \
+			- BURNER_CORE_LENGTH * length_scale * 0.5
+		_nozzle_glow.emission = Color(0.38, 0.68, 1.0).lerp(
+			Color(1.0, 0.56, 0.22), burner * 0.28)
+		_nozzle_glow.emission_energy_multiplier = 0.45 + flame * 1.65
+		_nozzle_glow.albedo_color = Color(0.50, 0.72, 1.0,
+			clampf(spool * 0.025 + burner * 0.065, 0.0, 0.09))
 	# Wingtip vortices condense under hard G or deep AoA.
 	var trail_on := speed() > 60.0 and (g_load > 5.0 or absf(alpha) > 0.24)
 	for trail in _wingtip_trails:

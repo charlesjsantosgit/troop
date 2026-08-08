@@ -3,6 +3,6 @@
   "minimum_bootstrap": 1,
   "network_protocol": 5,
   "release_title": "TROOP 0.3",
-  "notes": "TROOP 0.3 vehicle controls update: easier W plus Up Arrow takeoffs and assisted Up/Down flight, automatic Jeep coast-down shifts with an accurate analog tachometer, and stable correctly oriented motorcycle steering with short Ctrl wheelies.",
+  "notes": "TROOP 0.3 vehicle polish: repaired jet surfaces and aiming, easy arrow-assisted takeoffs, automatic Jeep downshifts with an accurate analog tachometer, correctly sized motorcycle handling with sustained Ctrl wheelies, seated riders, realistic exhaust, a live FPS meter, and uncapped 9.81 m/s^2 player freefall.",
   "requires_installer": false
 }

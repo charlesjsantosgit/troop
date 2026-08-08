@@ -1,6 +1,7 @@
 extends Node
 ## Boot + session orchestration. CLI modes (after `--`):
 ##   movetest            headless movement/generation assertions
+##   freefalltest        focused 9.81 m/s^2 / no-terminal release gate
 ##   smoke               build world, print stats, quit
 ##   shot <name> <out>   spawn world and save a screenshot
 ##   nettest-host / nettest-join <ip>   two-instance replication check
@@ -81,6 +82,12 @@ func _ready() -> void:
 			var mt = load("res://tests/movetest.gd").new()
 			add_child(mt)
 			mt.run(self)
+		"freefalltest":
+			mode = "freefalltest"
+			_start_solo("FallTester", 1337, 2)
+			var ft = load("res://tests/movetest.gd").new()
+			add_child(ft)
+			ft.run_freefall(self)
 		"generationtest":
 			mode = "generationtest"
 			Gen.setup(1337)
@@ -1490,6 +1497,106 @@ func _do_debug_shot(what: String, out: String) -> void:
 			cam.make_current()
 			for i in range(8):
 				await get_tree().process_frame
+		"debug-bike-fit":
+			# Orthographic side profile for the actual loaded motorcycle. Perspective
+			# no longer masks an oversized wheel/fork, and the real mounted rig proves
+			# saddle, paw, peg, suspension-sag, and tire-contact alignment together.
+			if hud:
+				hud.visible = false
+			world.set_time_of_day_override(12.0)
+			var fit_bike := world.vehicle_by_id("v:debug#bike") as Motorcycle
+			fit_bike.settle_at(Vector3(-6.0, DebugWorldBuilder.GROUND_Y, 18.0), 0.0)
+			p.enter_vehicle(fit_bike)
+			for i in range(90):
+				await get_tree().physics_frame
+			fit_bike.linear_velocity = Vector3.ZERO
+			fit_bike.angular_velocity = Vector3.ZERO
+			fit_bike.freeze = true
+			fit_bike.reset_physics_interpolation()
+			fit_bike._update_visuals(0.0)
+			cam.projection = Camera3D.PROJECTION_ORTHOGONAL
+			cam.size = 2.60
+			cam.global_position = fit_bike.global_position \
+				+ fit_bike.global_basis.x * 5.0 + Vector3.UP * 0.72
+			cam.look_at(fit_bike.global_position + Vector3.UP * 0.72)
+			cam.make_current()
+			for i in range(18):
+				await get_tree().process_frame
+		"debug-exhaust-ground":
+			# Rear three-quarter diagnostic: real pipe locations, full-size occupied
+			# models, and deterministic loaded output for all combustion vehicles.
+			if hud:
+				hud.visible = false
+			p.set_physics_process(false)
+			p.rig.visible = false
+			world.set_time_of_day_override(12.0)
+			world.set_expensive_effects(true)
+			var exhaust_ground_vehicles: Array[Vehicle] = [
+				world.vehicle_by_id("v:debug#bike"),
+				world.vehicle_by_id("v:debug#jeep"),
+				world.vehicle_by_id("v:debug#boat"),
+			]
+			var exhaust_positions := [Vector3(-3.2, DebugWorldBuilder.GROUND_Y, 17.0),
+				Vector3(0.0, DebugWorldBuilder.GROUND_Y, 18.0),
+				Vector3(3.8, DebugWorldBuilder.GROUND_Y, 18.0)]
+			for i in range(exhaust_ground_vehicles.size()):
+				var exhaust_vehicle := exhaust_ground_vehicles[i]
+				exhaust_vehicle.settle_at(exhaust_positions[i], 0.0)
+				exhaust_vehicle.freeze = true
+				exhaust_vehicle.reset_physics_interpolation()
+				exhaust_vehicle.set_physics_process(false)
+			# Render interpolation must observe the moved frozen chassis before the
+			# mannequin reads rider_render_transform(), or it remains at the old yard.
+			for frame in range(3):
+				await get_tree().process_frame
+			for i in range(exhaust_ground_vehicles.size()):
+				_add_vehicle_preview_rider(exhaust_ground_vehicles[i],
+					["Pip", "Kito", "Mango"][i])
+			# A low, nearly rearward angle keeps all three outlets separated instead
+			# of letting the foreground airboat hide the Jeep and bike tailpipes.
+			cam.fov = 46.0
+			cam.global_position = Vector3(5.8, 2.55, 9.2)
+			cam.look_at(Vector3(0.3, 1.30, 17.7))
+			cam.make_current()
+			for frame in range(70):
+				for exhaust_vehicle in exhaust_ground_vehicles:
+					for emitter in exhaust_vehicle.exhaust_emitters:
+						emitter.update_output(1.0 / 30.0, 1.0)
+				await get_tree().process_frame
+		"debug-exhaust-jet":
+			# Separate scale-appropriate rear view: translucent turbine heat plume
+			# around the existing luminous burner core, never generic black smoke.
+			if hud:
+				hud.visible = false
+			p.set_physics_process(false)
+			p.rig.visible = false
+			world.set_time_of_day_override(12.0)
+			world.set_expensive_effects(true)
+			var exhaust_jet := world.vehicle_by_id("v:debug#jet") as FighterJet
+			# Other yard machines can sit directly behind the nozzle from this angle
+			# and masquerade as colour in the plume; isolate the jet for this check.
+			for vehicle_value in world.vehicles.values():
+				var other_vehicle := vehicle_value as Vehicle
+				if other_vehicle != exhaust_jet:
+					other_vehicle.visible = false
+			exhaust_jet.settle_at(Vector3(0.0, DebugWorldBuilder.GROUND_Y, 20.0), 0.0)
+			exhaust_jet.freeze = true
+			exhaust_jet.reset_physics_interpolation()
+			exhaust_jet.set_physics_process(false)
+			for frame in range(3):
+				await get_tree().process_frame
+			_add_vehicle_preview_rider(exhaust_jet, "Ace")
+			exhaust_jet.spool = 1.0
+			exhaust_jet.afterburner = true
+			exhaust_jet._update_extra_visuals(1.0 / 30.0)
+			cam.fov = 54.0
+			cam.global_position = Vector3(9.2, 5.0, 4.2)
+			cam.look_at(Vector3(0.0, 2.55, 18.0))
+			cam.make_current()
+			for frame in range(70):
+				for emitter in exhaust_jet.exhaust_emitters:
+					emitter.update_output(1.0 / 30.0, 1.0, 1.0)
+				await get_tree().process_frame
 		"debug-dashboard":
 			# Integrated instrument regression: the real mounted-player HUD at a
 			# stable, unmistakable mid-dial Jeep reading.
@@ -1507,8 +1614,29 @@ func _do_debug_shot(what: String, out: String) -> void:
 				if hud:
 					hud._update_vehicle_cluster()
 				await get_tree().process_frame
+		"debug-flight-reticle":
+			# Real mounted-jet view with a deterministic mouse command. This catches
+			# a cosmetic sight that drifts from flight control, overlaps the weapon
+			# crosshair, or lets its dot escape the circular authority boundary.
+			world.set_time_of_day_override(12.0)
+			var reticle_jet := world.vehicle_by_id("v:debug#jet")
+			p.enter_vehicle(reticle_jet)
+			for i in range(12):
+				await get_tree().physics_frame
+			reticle_jet.linear_velocity = Vector3.ZERO
+			reticle_jet.angular_velocity = Vector3.ZERO
+			reticle_jet.freeze = true
+			reticle_jet.reset_physics_interpolation()
+			p.cam.apply_look(Vector2(480.0, -280.0))
+			for i in range(18):
+				if hud:
+					hud._update_aircraft_aim_reticle(false)
+				await get_tree().process_frame
 	if what != "debug-wings" and what != "debug-course" \
 			and what != "debug-vehicles" and what != "debug-ride" \
+			and what != "debug-bike-fit" \
+			and what != "debug-exhaust-ground" \
+			and what != "debug-exhaust-jet" \
 			and not what.begins_with("debug-jet"):
 		cam.queue_free()
 	for i in range(8):

@@ -18,8 +18,11 @@ const ACCEL := 45.0
 const AIR_ACCEL := 16.0
 const FRICTION := 38.0
 const OVERSPEED_DRAG := 5.0
+# Earth gravity for unsupported player flight. Keep this separate from the
+# stronger authored traversal gravity below so changing freefall does not make
+# vine swings or downhill slides lose their established momentum.
+const FREEFALL_ACCELERATION := 9.81
 const GRAVITY := 20.0
-const TERMINAL := 48.0
 const JUMP_VEL := 8.8
 const JUMP_CUT := 26.0
 const DOUBLE_JUMP_VEL := 7.8
@@ -308,10 +311,25 @@ func _physics_process(dt: float) -> void:
 			S.SWING: _st_swing(dt, inp)
 			S.SWIM: _st_swim(dt, inp)
 
-	velocity = velocity.limit_length(ABS_MAX)
+	_limit_velocity_for_state()
 	move_and_slide()
 	_post(dt, inp, pre_floor, pre_vy)
 	_combat(inp)
+
+
+## Preserve the existing safety bound for authored/powered movement, but never
+## turn it into a terminal velocity for a freely falling monkey. Horizontal
+## momentum remains bounded independently so a long fall cannot become a
+## sideways teleport when it lands.
+func _limit_velocity_for_state() -> void:
+	var freefalling := state == S.AIR and not fly_mode \
+		and velocity.y < 0.0 and not wallsliding
+	if not freefalling:
+		velocity = velocity.limit_length(ABS_MAX)
+		return
+	var planar := Vector3(velocity.x, 0.0, velocity.z).limit_length(ABS_MAX)
+	velocity.x = planar.x
+	velocity.z = planar.z
 
 
 func _gather() -> Dictionary:
@@ -1083,10 +1101,20 @@ func _st_slide(dt: float, inp: Dictionary) -> void:
 func _st_air(dt: float, inp: Dictionary) -> void:
 	coyote_t = maxf(coyote_t - dt, 0.0)
 	quad_t = maxf(quad_t - dt, 0.0)
-	velocity.y -= GRAVITY * dt
-	velocity.y = maxf(velocity.y, -TERMINAL)
-	if velocity.y > 0.0 and not inp.jump_held:
-		velocity.y -= JUMP_CUT * dt
+	# Preserve the authored, responsive jump arc while applying physical Earth
+	# gravity from the exact instant the monkey is no longer rising. Split an
+	# apex-crossing tick so the descending fraction is never accelerated by the
+	# stronger jump or jump-cut tuning.
+	if velocity.y > 0.0:
+		var ascent_acceleration := GRAVITY \
+			+ (0.0 if inp.jump_held else JUMP_CUT)
+		var time_to_apex := velocity.y / ascent_acceleration
+		if time_to_apex >= dt:
+			velocity.y -= ascent_acceleration * dt
+		else:
+			velocity.y = -FREEFALL_ACCELERATION * (dt - time_to_apex)
+	else:
+		velocity.y -= FREEFALL_ACCELERATION * dt
 
 	var wish := _wish_dir(inp)
 	var hvel := Vector3(velocity.x, 0, velocity.z)
@@ -1325,6 +1353,11 @@ func _post(dt: float, inp: Dictionary, pre_floor: bool, pre_vy: float) -> void:
 	elif state in [S.GROUND, S.SLIDE] and not is_on_floor():
 		state = S.AIR
 		coyote_t = COYOTE
+		# Ground adhesion uses -2 m/s while supported. Do not carry that artificial
+		# floor-stick impulse over a ledge; unsupported motion begins from the real
+		# current vertical speed and then gains exactly 9.81 m/s each second.
+		if velocity.y < 0.0:
+			velocity.y = 0.0
 	elif state == S.SWING and is_on_floor():
 		_release(false)
 
@@ -1381,7 +1414,8 @@ func _post(dt: float, inp: Dictionary, pre_floor: bool, pre_vy: float) -> void:
 	if wind:
 		var sp := velocity.length()
 		wind.volume_db = lerpf(-60.0, -10.0, clampf(sp / 38.0, 0.0, 1.0))
-		wind.pitch_scale = 0.85 + sp / 70.0
+		# Presentation saturates without feeding a hidden limit back into physics.
+		wind.pitch_scale = clampf(0.85 + sp / 70.0, 0.85, 2.4)
 
 
 func _attach(t: Dictionary) -> void:
@@ -1715,6 +1749,12 @@ func _st_vehicle(dt: float, inp: Dictionary) -> void:
 	var throttle := maxf(-inp.dir.y, 0.0)
 	var brake := maxf(inp.dir.y, 0.0)
 	vehicle.set_inputs(throttle, brake, -inp.dir.x, inp.jump_held, inp.sprint)
+	# Arrow pitch is an assisted attitude mode, not vertical mouse pursuit. Keep
+	# that channel on the current nose so releasing an arrow cannot hand control
+	# back to a stale pitch-down target, while preserving horizontal mouse aim.
+	if cam and vehicle.kind == Vehicle.Kind.JET \
+			and absf(float(inp.get("vehicle_pitch", 0.0))) > 0.04:
+		cam.center_aircraft_pitch_aim()
 	vehicle.set_driver_view(cam.vehicle_aim_direction() if cam else global_basis.z,
 		inp)
 	global_position = vehicle.seat_global()
