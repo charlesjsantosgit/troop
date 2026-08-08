@@ -42,6 +42,48 @@ func _run() -> void:
 	_check(net.MAX_COLLECTED_IDS == 200000 and net.MAX_CHEST_CLAIMS == 50000,
 		"authoritative persistent-ID stores have explicit snapshot-aligned ceilings")
 
+	var empty_wraps := PackedVector3Array()
+	var fast_fall := Vector3(12.0, -800.0, 5.0)
+	_check(net._valid_state(Vector3(0, 1000, 0), 0.0, fast_fall, 0,
+		false, Vector3.ZERO, 0.0, empty_wraps, net.WEAPON_REVOLVER, 0,
+		0.0, -1, "", Vector3.ZERO),
+		"ordinary on-foot state accepts physically valid fast freefall")
+	_check(not net._valid_state(Vector3(0, 1000, 0), 0.0,
+		Vector3(net.MAX_PLAYER_SPEED + 1.0, -800.0, 0.0), 0, false,
+		Vector3.ZERO, 0.0, empty_wraps, net.WEAPON_REVOLVER, 0, 0.0,
+		-1, "", Vector3.ZERO) \
+		and not net._valid_state(Vector3(0, 1000, 0), 0.0,
+			Vector3(0.0, net.MAX_PLAYER_SPEED + 1.0, 0.0), 0, false,
+			Vector3.ZERO, 0.0, empty_wraps, net.WEAPON_REVOLVER, 0, 0.0,
+			-1, "", Vector3.ZERO),
+		"freefall exception keeps strict horizontal and upward speed limits")
+	_check(not net._valid_state(Vector3(0, 1000, 0), 0.0, fast_fall, 0,
+		true, Vector3.ZERO, 1.0, empty_wraps, net.WEAPON_REVOLVER, 0,
+		0.0, -1, "", Vector3.ZERO) \
+		and not net._valid_state(Vector3(0, 1000, 0), 0.0, fast_fall, 0,
+			false, Vector3.ZERO, 0.0, empty_wraps, net.WEAPON_REVOLVER, 0,
+			0.0, 1, "v:security#bike", Vector3.ZERO) \
+		and not net._valid_state(Vector3(0, 1000, 0), 0.0, fast_fall, 0,
+			false, Vector3.ZERO, 0.0, empty_wraps, net.WEAPON_REVOLVER, 0,
+			0.0, -1, "", Vector3.ZERO, true),
+		"swinging, mounted, and flight states retain the total velocity envelope")
+	var safe_defeat_velocity: Vector3 = net._safe_defeat_velocity(fast_fall)
+	_check(net._valid_defeat(Vector3(0, 1000, 0), 0.0, fast_fall,
+		Vector3.ZERO),
+		"physically valid fast-fall defeat passes ingress validation")
+	_check(safe_defeat_velocity.length() <= net.MAX_PLAYER_SPEED + 0.001 \
+			and safe_defeat_velocity.normalized().dot(
+				fast_fall.normalized()) > 0.9999,
+		"fast-fall defeat is bounded before spawning replicated ragdolls",
+		"raw=%s safe=%s length=%.3f" % [fast_fall, safe_defeat_velocity,
+			safe_defeat_velocity.length()])
+	_check(not net._valid_defeat(Vector3(0, 1000, 0), 0.0,
+			Vector3(0.0, -net.MAX_ON_FOOT_FALL_REPLICATION_SPEED - 1.0, 0.0),
+			Vector3.ZERO) \
+		and not net._valid_vine_release("v:security#fall", Vector3.ZERO,
+			fast_fall, 8.0, empty_wraps),
+		"impossible defeat and fast vine-release payloads stay bounded")
+
 	var owned_vehicle := "v:security#owned"
 	var other_vehicle := "v:security#other"
 	var unclaimed_vehicle := "v:security#unclaimed"
@@ -104,10 +146,10 @@ func _run() -> void:
 	quit(0 if passed == total else 1)
 
 
-func _check(condition: bool, label: String) -> void:
+func _check(condition: bool, label: String, info := "") -> void:
 	total += 1
 	if condition:
 		passed += 1
 		print("  [ok] " + label)
 	else:
-		print("  [FAIL] " + label)
+		print("  [FAIL] " + label + ((" :: " + info) if info != "" else ""))

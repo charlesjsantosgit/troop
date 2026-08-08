@@ -23,6 +23,14 @@ const DIRECTION_CHANGE_MAX_TOTAL_SPEED := 0.9
 # chassis is held on all four brakes. This still rejects meaningful driveline
 # motion without deadlocking the familiar hold-S-to-reverse control.
 const DIRECTION_CHANGE_MAX_WHEEL_SPEED := 2.5
+# Numerical guardrails sit far outside every authored machine envelope (the
+# jet tops out near 313 m/s). They catch an unstable rigid-body step before a
+# squared aero term or visual transform can turn it into NaN and poison the
+# complete physics world.
+const MAX_SAFE_WORLD_COORDINATE := 1000000.0
+const MAX_SAFE_LINEAR_SPEED := 1000.0
+const MAX_SAFE_ANGULAR_SPEED := 60.0
+const MAX_SAFE_WHEEL_SPIN := 2500.0
 
 
 ## Render-only adapter consumed by MonkeyRig. The rig expects the vehicle pose
@@ -119,6 +127,10 @@ var _unladen_mass := 0.0
 var _unladen_center_of_mass := Vector3.ZERO
 var _driver_load_applied := false
 var _rider_render_pose: RiderRenderPose
+var exhaust_emitters: Array[VehicleExhaust] = []
+var physics_recovery_count := 0
+var _last_safe_position := Vector3.ZERO
+var _last_safe_yaw := 0.0
 
 
 func _ready() -> void:
@@ -215,6 +227,48 @@ func rider_render_pose() -> RiderRenderPose:
 
 func has_rider_target(slot: StringName) -> bool:
 	return rider_target_global(slot).is_finite()
+
+
+## Register one exact pipe/nozzle outlet in unscaled vehicle-local space. The
+## exhaust component owns only bounded presentation; it never affects physics.
+func add_exhaust(outlet: Vector3, direction: Vector3,
+		profile_kind: int) -> VehicleExhaust:
+	var emitter := VehicleExhaust.new()
+	emitter.position = outlet
+	emitter.setup(profile_kind, direction)
+	add_child(emitter)
+	exhaust_emitters.append(emitter)
+	if world:
+		emitter.set_quality(bool(world.get("_high_effects")),
+			bool(world.get("_fullscreen_performance")))
+	return emitter
+
+
+func set_effect_quality(high_effects: bool,
+		fullscreen_performance: bool) -> void:
+	for emitter in exhaust_emitters:
+		emitter.set_quality(high_effects, fullscreen_performance)
+
+
+## Ground machines derive a clean-engine vapor level from live RPM and load.
+## Airboat/jet override this because their spool state replaces VehicleEngine.
+func exhaust_activity(profile_kind: int) -> float:
+	var running := driver != null or remote_controlled
+	var rpm_fraction := _remote_rpm if remote_controlled \
+		else engine.rpm_fraction()
+	var load := 0.60 if remote_controlled else input_throttle
+	return VehicleExhaust.sampled_intensity(profile_kind, running,
+		rpm_fraction, load)
+
+
+func exhaust_boost() -> float:
+	return 0.0
+
+
+func _update_exhaust(dt: float) -> void:
+	var boost_amount := exhaust_boost()
+	for emitter in exhaust_emitters:
+		emitter.update_output(dt, exhaust_activity(emitter.profile), boost_amount)
 
 
 func interaction_position() -> Vector3:
@@ -384,6 +438,8 @@ func settle_at(pos: Vector3, yaw: float) -> void:
 		global_position = Vector3(pos.x, ground - lowest + 0.01, pos.z)
 	linear_velocity = Vector3.ZERO
 	angular_velocity = Vector3.ZERO
+	_last_safe_position = global_position
+	_last_safe_yaw = yaw
 	reset_physics_interpolation()
 
 
@@ -394,13 +450,23 @@ func apply_rest_state(pos: Vector3, yaw: float, pitch: float,
 	global_basis = Basis.from_euler(Vector3(pitch, yaw, roll), EULER_ORDER_YXZ)
 	linear_velocity = Vector3.ZERO
 	angular_velocity = Vector3.ZERO
+	_last_safe_position = global_position
+	_last_safe_yaw = yaw
 
 
 func _physics_process(dt: float) -> void:
+	# RigidBody integration happens before this callback. Validate immediately so
+	# a single bad solver step can never reach tire probes, v^2 aero, audio, or
+	# child transforms, then validate once more after subclass simulation.
+	if _sanity_clamp():
+		return
 	if remote_controlled:
 		_advance_remote(dt)
+		if _sanity_clamp():
+			return
 		_update_visuals(dt)
 		_update_audio(dt, _remote_rpm, 0.6)
+		_update_exhaust(dt)
 		return
 	if driver == null:
 		_idle_timer += dt
@@ -413,17 +479,21 @@ func _physics_process(dt: float) -> void:
 		input_handbrake = true
 		if sleeping:
 			_update_audio(dt, 0.0, 0.0)
+			_update_exhaust(dt)
 			return
 	else:
 		_idle_timer = 0.0
 	_simulate(dt)
+	if _sanity_clamp():
+		return
 	if driver == null:
 		_apply_parked_hold(dt)
 	_update_visuals(dt)
 	_update_audio(dt, engine.rpm_fraction(),
 		input_throttle if driver else 0.0)
+	_update_exhaust(dt)
 	_detect_impacts()
-	_sanity_clamp()
+	_try_sleep_parked()
 
 
 ## A real parking brake resists the whole parked chassis, not merely wheel spin.
@@ -432,15 +502,19 @@ func _physics_process(dt: float) -> void:
 func _apply_parked_hold(_dt: float) -> void:
 	if kind != Kind.BIKE and kind != Kind.JEEP:
 		return
-	var grounded := false
-	for wheel in wheels:
-		grounded = grounded or wheel.in_contact
-	if not grounded or global_basis.y.y < 0.35:
+	if not _has_parked_support() \
+			or (kind != Kind.BIKE and global_basis.y.y < 0.35):
 		return
 	var planar := Vector3(linear_velocity.x, 0.0, linear_velocity.z)
 	if planar.length() < 4.0:
 		apply_central_force(-planar * mass * 5.0)
-		apply_torque(-Vector3.UP * angular_velocity.y * mass * 1.2)
+		if kind == Kind.BIKE:
+			# A real rider leaves the steering lock and stand supporting the light
+			# one-track chassis. Dampen all rocking axes so a bike resting on its
+			# chassis or stand does not endlessly teeter after the monkey leaves.
+			apply_torque(-angular_velocity * mass * 2.2)
+		else:
+			apply_torque(-Vector3.UP * angular_velocity.y * mass * 1.2)
 
 
 ## Core ground-vehicle simulation; subclasses extend or replace.
@@ -676,17 +750,131 @@ func _detect_impacts() -> void:
 		driver_impact.emit(delta)
 
 
-func _sanity_clamp() -> void:
-	if not (is_finite(global_position.x) and is_finite(global_position.y)
-			and is_finite(global_position.z)):
-		global_position = Vector3(0, Gen.height(0, 0) + 2.0, 0)
-		linear_velocity = Vector3.ZERO
-		angular_velocity = Vector3.ZERO
-		return
+## Returns true when this frame was recovered and callers must stop using the
+## pre-recovery state. Normal motion is never clamped by these guardrails.
+func _sanity_clamp() -> bool:
+	if not _physics_state_is_safe():
+		_recover_invalid_physics()
+		return true
 	var floor_y := terrain_height_at(global_position.x, global_position.z)
 	if global_position.y < floor_y - 1.6:
 		global_position.y = floor_y + 0.8
 		linear_velocity.y = maxf(linear_velocity.y, -1.0)
+	_last_safe_position = global_position
+	_last_safe_yaw = global_basis.get_euler(EULER_ORDER_YXZ).y
+	return false
+
+
+func _physics_state_is_safe() -> bool:
+	if not global_position.is_finite() \
+			or absf(global_position.x) > MAX_SAFE_WORLD_COORDINATE \
+			or absf(global_position.y) > MAX_SAFE_WORLD_COORDINATE \
+			or absf(global_position.z) > MAX_SAFE_WORLD_COORDINATE:
+		return false
+	if not linear_velocity.is_finite() or not angular_velocity.is_finite() \
+			or linear_velocity.length() > MAX_SAFE_LINEAR_SPEED \
+			or angular_velocity.length() > MAX_SAFE_ANGULAR_SPEED:
+		return false
+	var basis := global_basis
+	if not basis.x.is_finite() or not basis.y.is_finite() \
+			or not basis.z.is_finite():
+		return false
+	for axis in [basis.x, basis.y, basis.z]:
+		var axis_length: float = (axis as Vector3).length()
+		if axis_length < 0.75 or axis_length > 1.25:
+			return false
+	var determinant := basis.determinant()
+	if not is_finite(determinant) or determinant < 0.5 or determinant > 1.5:
+		return false
+	if not is_finite(engine.rpm) or engine.rpm < 0.0 or engine.rpm > 20000.0 \
+			or not is_finite(_steer_target) or not is_finite(_steer_current) \
+			or absf(_steer_target) > 10.0 or absf(_steer_current) > 10.0:
+		return false
+	for wheel in wheels:
+		if not is_finite(wheel.spin) or absf(wheel.spin) > MAX_SAFE_WHEEL_SPIN \
+				or not is_finite(wheel.spin_angle) \
+				or not is_finite(wheel.steer_angle) \
+				or not wheel.contact_point.is_finite() \
+				or not wheel.contact_normal.is_finite() \
+				or not is_finite(wheel.compression) \
+				or wheel.compression < -0.01 \
+				or wheel.compression > wheel.travel + 0.01 \
+				or not is_finite(wheel.compression_velocity) \
+				or not is_finite(wheel.load) or wheel.load < 0.0 \
+				or wheel.load > maxf(mass * 9.81 * 100.0, 1000000.0):
+			return false
+	return true
+
+
+func _recover_invalid_physics() -> void:
+	physics_recovery_count += 1
+	var recovery := _last_safe_position
+	if not recovery.is_finite() \
+			or absf(recovery.x) > MAX_SAFE_WORLD_COORDINATE \
+			or absf(recovery.z) > MAX_SAFE_WORLD_COORDINATE:
+		recovery = Vector3.ZERO
+	settle_at(recovery, _last_safe_yaw if is_finite(_last_safe_yaw) else 0.0)
+	input_throttle = 0.0
+	input_brake = 1.0
+	input_steer = 0.0
+	input_handbrake = true
+	input_aux = false
+	_steer_target = 0.0
+	_steer_current = 0.0
+	_prev_velocity = Vector3.ZERO
+	engine.rpm = engine.idle_rpm
+	for wheel in wheels:
+		wheel.spin = 0.0
+		wheel.spin_angle = 0.0
+		wheel.steer_angle = 0.0
+		wheel.compression_velocity = 0.0
+		wheel.load = 0.0
+		wheel.slip_ratio = 0.0
+		wheel.slip_angle = 0.0
+		wheel.contact_point = global_position
+		wheel.contact_normal = Vector3.UP
+		wheel.drive_torque = 0.0
+		wheel.brake_torque = 0.0
+	_reset_special_physics_state()
+	sleeping = driver == null and not remote_controlled
+	reset_physics_interpolation()
+
+
+## Subclasses clear transient assists that could immediately reapply the force
+## which preceded a numerical recovery.
+func _reset_special_physics_state() -> void:
+	pass
+
+
+func _try_sleep_parked() -> void:
+	# Below these speeds the rider's parking brake/feet can settle the machine
+	# more realistically than letting the rigid body accumulate tiny tire and
+	# sidestand corrections forever.
+	if driver != null or remote_controlled or _idle_timer < 1.25 \
+			or linear_velocity.length() > 0.40 \
+			or angular_velocity.length() > 0.85:
+		return
+	if kind == Kind.BIKE:
+		var pose := global_basis.get_euler(EULER_ORDER_YXZ)
+		# A motorcycle is parked only on its authored kickstand attitude. Do not
+		# let generic rigid-body sleep bless a bike lying on its side.
+		if absf(pose.x) > 0.25 \
+				or absf(angle_difference(pose.z, -0.12)) > 0.25:
+			return
+	if _has_parked_support():
+		linear_velocity = Vector3.ZERO
+		angular_velocity = Vector3.ZERO
+		sleeping = true
+
+
+## Park only on authored suspension contact. Chassis-distance or analytic
+## terrain heuristics can mistake a low airborne machine (or a bridge above the
+## terrain field) for support and freeze it before the wheels touch.
+func _has_parked_support() -> bool:
+	for wheel in wheels:
+		if wheel.in_contact:
+			return true
+	return false
 
 
 ## Default wheel visual update: position follows suspension, spin + steer.

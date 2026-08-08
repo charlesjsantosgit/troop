@@ -27,6 +27,11 @@ const FIRST_PERSON_PITCH_MAX := 1.55334   #  89 degrees
 const THIRD_PERSON_PITCH_MIN := -1.35
 const THIRD_PERSON_PITCH_MAX := 0.75
 const CAMERA_PITCH_LIMIT := 1.562
+# The virtual flight cursor is radial rather than a pair of rectangular axis
+# clamps. Full ring travel requests a 30-degree pursuit direction, enough to
+# reach full FBW authority without allowing an accidental mouse sweep to point
+# behind the aircraft.
+const AIRCRAFT_AIM_CONE_RADIANS := 0.5235987756
 
 # Procedural movement is applied to the camera mount, independently of look and
 # weapon recoil. These component-wise limits are deliberately conservative:
@@ -89,6 +94,7 @@ var _death_follow_target: Node3D
 var _vehicle_view := false
 var _vehicle: Vehicle = null
 var _vehicle_local_yaw := 0.0
+var _aircraft_aim_world_direction := Vector3.FORWARD
 
 
 func _ready() -> void:
@@ -320,6 +326,7 @@ func begin_vehicle_view(v: Vehicle) -> void:
 	# on the aircraft nose instead of inheriting an unrelated on-foot/selfie aim
 	# that can command a violent turn during the takeoff roll.
 	if v.kind == Vehicle.Kind.JET:
+		_aircraft_aim_world_direction = v.global_basis.z.normalized()
 		_set_look_direction(vehicle_basis.z)
 	else:
 		# Ground and water cockpits use vehicle-relative freelook. Center the local
@@ -342,6 +349,7 @@ func end_vehicle_view() -> void:
 		_set_look_direction(_vehicle_relative_look_direction())
 	_vehicle_view = false
 	_vehicle = null
+	_aircraft_aim_world_direction = Vector3.FORWARD
 	_zero_movement_output()
 	_apply_view_mode(preferred_view_mode)
 	var orbit_yaw := yaw + (PI if front_view else 0.0)
@@ -361,9 +369,94 @@ func aim_direction() -> Vector3:
 func vehicle_aim_direction() -> Vector3:
 	if not _vehicle_view:
 		return aim_direction()
+	if _is_aircraft_vehicle_view():
+		return _aircraft_control_aim_direction()
 	if _is_relative_vehicle_cockpit():
 		return _vehicle_relative_look_direction()
 	return _look_direction(false)
+
+
+## Read-only HUD/test view of the same radial input used by flight control.
+## Screen coordinates are intentional: +x is right and +y is down.
+func aircraft_aim_normalized() -> Vector2:
+	return _aircraft_offset_for_direction(_aircraft_aim_world_direction) \
+		if _is_aircraft_vehicle_view() else Vector2.ZERO
+
+
+func aircraft_aim_limit_radians() -> float:
+	return AIRCRAFT_AIM_CONE_RADIANS
+
+
+func center_aircraft_aim() -> void:
+	if _is_aircraft_vehicle_view():
+		_aircraft_aim_world_direction = _vehicle.global_basis.z.normalized()
+	else:
+		_aircraft_aim_world_direction = Vector3.FORWARD
+
+
+## Arrow-assisted pitch owns only the vertical channel. Keep any horizontal
+## mouse pursuit command so Up/Down can still be combined with a deliberate
+## heading change without the dot snapping sideways to centre.
+func center_aircraft_pitch_aim() -> void:
+	if not _is_aircraft_vehicle_view():
+		return
+	var current_offset := aircraft_aim_normalized()
+	_aircraft_aim_world_direction = _aircraft_direction_from_offset(
+		Vector2(current_offset.x, 0.0))
+
+
+func _is_aircraft_vehicle_view() -> bool:
+	return _vehicle_view and is_instance_valid(_vehicle) \
+		and _vehicle.kind == Vehicle.Kind.JET
+
+
+func _aircraft_control_aim_direction() -> Vector3:
+	if not is_instance_valid(_vehicle):
+		return _look_direction(false)
+	return _aircraft_direction_from_offset(
+		_aircraft_offset_for_direction(_aircraft_aim_world_direction))
+
+
+## Mode-matching view frame used by both flight control and the HUD dot. Chase
+## view is horizon-stabilized; cockpit view uses the jet's rolled up axis so a
+## screen-right dot still means screen-right while banked or inverted.
+## Basis +X/+Y are screen right/up and -Z is straight through the jet's nose.
+func _aircraft_control_basis() -> Basis:
+	# Flight control runs in the physics tick, so use the current rigid-body basis
+	# here. Render interpolation is reserved for the camera presentation below;
+	# feeding its one-tick-old frame back into physics causes lag at high roll rate.
+	var vehicle_basis := _vehicle.global_basis
+	var forward := vehicle_basis.z.normalized()
+	var reference_up := vehicle_basis.y.normalized() \
+		if first_person and not front_view else Vector3.UP
+	if absf(forward.dot(reference_up)) > 0.97:
+		reference_up = vehicle_basis.y.normalized()
+	if absf(forward.dot(reference_up)) > 0.97:
+		reference_up = vehicle_basis.x.normalized()
+	return Basis.looking_at(forward, reference_up)
+
+
+func _aircraft_offset_for_direction(world_direction: Vector3) -> Vector2:
+	if not is_instance_valid(_vehicle) \
+			or world_direction.length_squared() < 0.001:
+		return Vector2.ZERO
+	var local_direction := (_aircraft_control_basis().inverse() \
+		* world_direction.normalized()).normalized()
+	var yaw_angle := atan2(local_direction.x, -local_direction.z)
+	var pitch_angle := atan2(local_direction.y,
+		Vector2(local_direction.x, local_direction.z).length())
+	return (Vector2(yaw_angle, -pitch_angle) \
+		/ AIRCRAFT_AIM_CONE_RADIANS).limit_length(1.0)
+
+
+func _aircraft_direction_from_offset(next_offset: Vector2) -> Vector3:
+	var offset := next_offset.limit_length(1.0)
+	var yaw_angle := offset.x * AIRCRAFT_AIM_CONE_RADIANS
+	var pitch_angle := -offset.y * AIRCRAFT_AIM_CONE_RADIANS
+	var pitch_cosine := cos(pitch_angle)
+	var camera_local_direction := Vector3(sin(yaw_angle) * pitch_cosine,
+		sin(pitch_angle), -cos(yaw_angle) * pitch_cosine)
+	return (_aircraft_control_basis() * camera_local_direction).normalized()
 
 
 func _look_direction(include_front: bool) -> Vector3:
@@ -423,6 +516,20 @@ func pitch_limits() -> Vector2:
 
 func apply_look(relative: Vector2) -> void:
 	var look_sensitivity := effective_sensitivity()
+	if _is_aircraft_vehicle_view():
+		# FRONT deliberately hides the flight cursor, so mouse motion there must not
+		# silently change a control target the player cannot see.
+		if front_view:
+			return
+		# Mouse travel moves a fixed world pursuit point inside the HUD circle.
+		# Diagonal input shares the same radial maximum as horizontal/vertical;
+		# as the jet catches the point, its displayed offset moves back to centre.
+		var normalized_delta := relative * look_sensitivity \
+			/ AIRCRAFT_AIM_CONE_RADIANS
+		var next_offset := (aircraft_aim_normalized() \
+			+ normalized_delta).limit_length(1.0)
+		_aircraft_aim_world_direction = _aircraft_direction_from_offset(next_offset)
+		return
 	var limits := pitch_limits()
 	if _is_relative_vehicle_cockpit():
 		_vehicle_local_yaw = wrapf(_vehicle_local_yaw \
@@ -479,6 +586,18 @@ func _process(dt: float) -> void:
 	elif _vehicle_view:
 		grounded = true
 		motion_velocity = _vehicle.linear_velocity
+	# Unlike on-foot freelook, the aircraft camera follows the airframe while
+	# the bounded HUD dot owns mouse steering. The chase view is horizon-stable;
+	# cockpit mode applies the jet's real roll below.
+	if _is_aircraft_vehicle_view():
+		var aircraft_forward := _vehicle.get_global_transform_interpolated() \
+			.basis.z.normalized()
+		# Retain the last heading through a vertical loop instead of letting atan2
+		# flip the chase camera by 180 degrees when horizontal length approaches 0.
+		if Vector2(aircraft_forward.x, aircraft_forward.z).length_squared() > 0.0004:
+			yaw = atan2(-aircraft_forward.x, -aircraft_forward.z)
+		pitch = clampf(asin(clampf(aircraft_forward.y, -1.0, 1.0)),
+			-CAMERA_PITCH_LIMIT, CAMERA_PITCH_LIMIT)
 	var sp: float = motion_velocity.length()
 	var height := DEATH_FOLLOW_HEIGHT if _death_view \
 		else (FIRST_PERSON_HEIGHT if first_person \
@@ -509,7 +628,10 @@ func _process(dt: float) -> void:
 		# the vehicle-relative freelook direction built above. Both inherit the
 		# machine's up axis so chassis roll and pitch remain readable.
 		var vehicle_basis := _vehicle.get_global_transform_interpolated().basis
-		var look_direction := vehicle_aim_direction()
+		# The dot must roam around a fixed forward sight picture, so a jet cockpit
+		# looks through the nose rather than turning the camera toward the dot.
+		var look_direction := vehicle_basis.z.normalized() \
+			if _is_aircraft_vehicle_view() else vehicle_aim_direction()
 		var cockpit_up := vehicle_basis.y.normalized()
 		if absf(look_direction.dot(cockpit_up)) > 0.97:
 			cockpit_up = vehicle_basis.x.normalized()

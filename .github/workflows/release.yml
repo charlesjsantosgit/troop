@@ -91,6 +91,8 @@ jobs:
           "$GODOT_BIN" --headless --path . --script res://tests/updatetest.gd
           "$GODOT_BIN" --headless --path . --script res://tests/voicetest.gd
           "$GODOT_BIN" --headless --path . --script res://tests/netsecuritytest.gd
+          "$GODOT_BIN" --headless --path . res://scenes/main.tscn \
+            --quit-after 30000 -- freefalltest
 
       - name: Run vehicle physics and world regressions
         shell: bash

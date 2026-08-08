@@ -7,6 +7,7 @@ extends Node
 
 var fails := 0
 var total := 0
+const MONKEY_STANDING_VISUAL_HEIGHT := 1.35
 
 
 func check(cname: String, ok: bool, info := "") -> void:
@@ -45,9 +46,34 @@ func reset_bike_control_fixture(bike: Motorcycle) -> void:
 	var pos := bike.global_position
 	if not (is_finite(pos.x) and is_finite(pos.y) and is_finite(pos.z)):
 		pos = Vector3(-6.0, DebugWorldBuilder.GROUND_Y, 120.0)
-	bike.settle_at(Vector3(pos.x, DebugWorldBuilder.GROUND_Y, pos.z + 12.0), 0.0)
+	# Vehicle.settle_at intentionally follows Gen.height for the streaming game
+	# world. This suite drives on a separate, real flat debug collider, so author
+	# the identical static-sag placement against that plane instead of dropping
+	# the bike from an unrelated analytic terrain height at far test distances.
+	var lowest := 0.0
+	var per_wheel_load: float = bike.mass * 9.8 \
+		/ maxf(float(bike.wheels.size()), 1.0)
+	for wheel in bike.wheels:
+		var sag: float = clampf(per_wheel_load / wheel.spring_rate,
+			0.0, wheel.travel * 0.8)
+		wheel.compression = sag
+		lowest = minf(lowest, wheel.local_pos.y \
+			- (wheel.travel - sag) - wheel.radius)
+	bike.global_basis = Basis(Vector3.UP, 0.0)
+	bike.global_position = Vector3(pos.x,
+		DebugWorldBuilder.GROUND_Y - lowest + 0.01, pos.z + 12.0)
+	bike.linear_velocity = Vector3.ZERO
+	bike.angular_velocity = Vector3.ZERO
+	bike._last_safe_position = bike.global_position
+	bike._last_safe_yaw = 0.0
+	bike.reset_physics_interpolation()
 	bike._prev_velocity = Vector3.ZERO
 	bike.sleeping = false
+	bike.input_throttle = 0.0
+	bike.input_brake = 0.0
+	bike.input_steer = 0.0
+	bike.input_handbrake = false
+	bike.input_aux = false
 	bike._steer_target = 0.0
 	bike._steer_current = 0.0
 	bike.lean_target = 0.0
@@ -199,8 +225,208 @@ func run(main) -> void:
 	var jeep = w.vehicle_by_id("v:debug#jeep")
 	var boat = w.vehicle_by_id("v:debug#boat")
 	var jet = w.vehicle_by_id("v:debug#jet")
-	check("vehicle yard spawns all four kinds",
-		bike != null and jeep != null and boat != null and jet != null)
+	var vehicle_yard_ok: bool = bike != null and jeep != null \
+		and boat != null and jet != null
+	check("vehicle yard spawns all four kinds", vehicle_yard_ok)
+	if not vehicle_yard_ok:
+		print("VEHICLETEST %d/%d FAIL" % [total - fails, total])
+		main.get_tree().quit(1)
+		return
+	# Five dedicated outlets cover the four machines (the airboat has twin
+	# headers). Keep this registry separate from unrelated jet wingtip trails.
+	var exhaust_counts_ok: bool = bike.exhaust_emitters.size() == 1 \
+		and jeep.exhaust_emitters.size() == 1 \
+		and boat.exhaust_emitters.size() == 2 \
+		and jet.exhaust_emitters.size() == 1
+	check("every vehicle has its exact modeled exhaust outlet count",
+		exhaust_counts_ok)
+	if not exhaust_counts_ok:
+		print("VEHICLETEST %d/%d FAIL" % [total - fails, total])
+		main.get_tree().quit(1)
+		return
+	var exhaust_profiles_ok: bool = bike.exhaust_emitters[0].profile \
+		== VehicleExhaust.Profile.BIKE \
+		and jeep.exhaust_emitters[0].profile == VehicleExhaust.Profile.JEEP \
+		and boat.exhaust_emitters[0].profile == VehicleExhaust.Profile.AIRBOAT \
+		and boat.exhaust_emitters[1].profile == VehicleExhaust.Profile.AIRBOAT \
+		and jet.exhaust_emitters[0].profile == VehicleExhaust.Profile.JET
+	check("exhaust outlets use machine-specific vapor and turbine profiles",
+		exhaust_profiles_ok)
+	var exhaust_setup_ok := true
+	var exhaust_parked_off := true
+	var normal_exhaust_capacity := 0
+	var exhaust_vehicles: Array[Vehicle] = [bike, jeep, boat, jet]
+	for exhaust_vehicle: Vehicle in exhaust_vehicles:
+		for emitter: VehicleExhaust in exhaust_vehicle.exhaust_emitters:
+			var gpu := emitter.particles
+			var process := gpu.process_material as ParticleProcessMaterial
+			var quad := gpu.draw_pass_1 as QuadMesh
+			var draw_material: StandardMaterial3D = quad.material \
+				as StandardMaterial3D if quad else null
+			var alignment_ok := false
+			if emitter.profile == VehicleExhaust.Profile.JET:
+				alignment_ok = draw_material != null \
+					and draw_material.billboard_mode \
+						== BaseMaterial3D.BILLBOARD_DISABLED \
+					and gpu.transform_align \
+						== GPUParticles3D.TRANSFORM_ALIGN_Z_BILLBOARD_Y_TO_VELOCITY
+			else:
+				alignment_ok = draw_material != null \
+					and draw_material.billboard_mode \
+						== BaseMaterial3D.BILLBOARD_PARTICLES
+			normal_exhaust_capacity += gpu.amount
+			exhaust_setup_ok = exhaust_setup_ok and process != null \
+				and quad != null and draw_material != null \
+				and draw_material.transparency \
+					== BaseMaterial3D.TRANSPARENCY_ALPHA \
+				and alignment_ok \
+				and draw_material.albedo_texture != null \
+				and draw_material.vertex_color_use_as_albedo \
+				and process.color_ramp != null and process.scale_curve != null \
+				and process.direction.normalized().distance_to(
+					emitter.outlet_direction) < 0.001 \
+				and not gpu.local_coords and gpu.fixed_fps == 20 \
+				and is_equal_approx(gpu.speed_scale, 1.0) \
+				and gpu.cast_shadow \
+					== GeometryInstance3D.SHADOW_CASTING_SETTING_OFF \
+				and gpu.visibility_aabb.position.is_finite() \
+				and gpu.visibility_aabb.size.is_finite() \
+				and gpu.visibility_aabb.size.length() > 0.1 \
+				and gpu.visibility_range_end > 0.0 \
+				and is_equal_approx(process.inherit_velocity_ratio, 1.0) \
+				and gpu.amount > 0 and gpu.amount <= 40
+			exhaust_parked_off = exhaust_parked_off \
+				and emitter.target_intensity < 0.001 \
+				and emitter.intensity < 0.001 and not gpu.emitting
+	check("exhaust uses bounded world-space GPU particles with no shadows",
+		exhaust_setup_ok and normal_exhaust_capacity <= 160,
+		"capacity=%d" % normal_exhaust_capacity)
+	check("parked unoccupied engines emit no exhaust", exhaust_parked_off)
+	var bike_outlet: VehicleExhaust = bike.exhaust_emitters[0]
+	var jeep_outlet: VehicleExhaust = jeep.exhaust_emitters[0]
+	var jet_outlet: VehicleExhaust = jet.exhaust_emitters[0]
+	var airboat_left: VehicleExhaust = boat.exhaust_emitters[0]
+	var airboat_right: VehicleExhaust = boat.exhaust_emitters[1]
+	check("outlets sit on the visible bike pipe, Jeep tailpipe, and jet nozzle",
+		bike_outlet.position.distance_to(
+			Vector3(0.14, 0.604, -0.91) * Motorcycle.MODEL_SCALE) < 0.002 \
+		and bike_outlet.outlet_direction.dot(Vector3(0, 0, -1)) > 0.99 \
+		and jeep_outlet.position.distance_to(
+			Vector3(0.55, -0.285, -1.786)) < 0.002 \
+		and jeep_outlet.outlet_direction.y < -0.85 \
+		and jeep_outlet.outlet_direction.z < -0.30 \
+		and jet_outlet.position.distance_to(
+			Vector3(0, 0, FighterJet.NOZZLE_LIP_Z)) < 0.002 \
+		and jet_outlet.outlet_direction.dot(Vector3(0, 0, -1)) > 0.99)
+	check("airboat twin headers are mirrored and share only immutable mesh data",
+		airboat_left.position.distance_to(Vector3(-0.96, 0.60, -1.41)) < 0.002 \
+		and airboat_right.position.distance_to(
+			Vector3(0.96, 0.60, -1.41)) < 0.002 \
+		and absf(airboat_left.position.x + airboat_right.position.x) < 0.001 \
+		and airboat_left.outlet_direction.x < -0.40 \
+		and airboat_right.outlet_direction.x > 0.40 \
+		and airboat_left.outlet_direction.z < -0.80 \
+		and airboat_right.outlet_direction.z < -0.80 \
+		and airboat_left.particles.draw_pass_1 \
+			== airboat_right.particles.draw_pass_1 \
+		and airboat_left.particles.process_material \
+			!= airboat_right.particles.process_material)
+	var exhaust_response_ok := true
+	for profile_kind in range(VehicleExhaust.Profile.JET + 1):
+		var off := VehicleExhaust.sampled_intensity(
+			profile_kind, false, 1.0, 1.0, 1.0)
+		var idle := VehicleExhaust.sampled_intensity(
+			profile_kind, true, 0.18, 0.0)
+		var high_unloaded := VehicleExhaust.sampled_intensity(
+			profile_kind, true, 0.82, 0.0)
+		var loaded := VehicleExhaust.sampled_intensity(
+			profile_kind, true, 0.82, 0.78)
+		exhaust_response_ok = exhaust_response_ok and off == 0.0 \
+			and idle > 0.0 and high_unloaded > idle \
+			and loaded > high_unloaded and loaded <= 1.0
+	check("every exhaust profile responds monotonically to RPM and load",
+		exhaust_response_ok)
+	# High quality remains bounded, fullscreen mode reduces every emitter, and
+	# leaving both modes restores the exact normal capacity.
+	w.set_expensive_effects(true)
+	var high_budgets_ok := true
+	var high_exhaust_capacity := 0
+	for exhaust_vehicle: Vehicle in exhaust_vehicles:
+		for emitter: VehicleExhaust in exhaust_vehicle.exhaust_emitters:
+			high_exhaust_capacity += emitter.particles.amount
+			high_budgets_ok = high_budgets_ok \
+				and emitter.particles.amount \
+					== VehicleExhaust.particle_budget(emitter.profile, true, false)
+	check("high-quality exhaust budget stays bounded",
+		high_budgets_ok and high_exhaust_capacity > normal_exhaust_capacity \
+		and high_exhaust_capacity <= 160,
+		"normal=%d high=%d" % [normal_exhaust_capacity,
+			high_exhaust_capacity])
+	w.set_fullscreen_performance(true)
+	var performance_budgets_ok := true
+	var performance_exhaust_capacity := 0
+	for exhaust_vehicle: Vehicle in exhaust_vehicles:
+		for emitter: VehicleExhaust in exhaust_vehicle.exhaust_emitters:
+			performance_exhaust_capacity += emitter.particles.amount
+			performance_budgets_ok = performance_budgets_ok \
+				and emitter.particles.amount \
+					== VehicleExhaust.particle_budget(emitter.profile, true, true) \
+				and emitter.particles.amount > 0
+	check("fullscreen performance lowers the complete exhaust budget",
+		performance_budgets_ok \
+		and performance_exhaust_capacity < normal_exhaust_capacity,
+		"normal=%d performance=%d" % [normal_exhaust_capacity,
+			performance_exhaust_capacity])
+	w.set_fullscreen_performance(false)
+	w.set_expensive_effects(false)
+	var restored_normal_capacity := 0
+	var normal_restored_ok := true
+	for exhaust_vehicle: Vehicle in exhaust_vehicles:
+		for emitter: VehicleExhaust in exhaust_vehicle.exhaust_emitters:
+			restored_normal_capacity += emitter.particles.amount
+			normal_restored_ok = normal_restored_ok \
+				and emitter.particles.amount \
+					== VehicleExhaust.particle_budget(emitter.profile, false, false)
+	check("exhaust budget restores after adaptive quality exits",
+		normal_restored_ok \
+		and restored_normal_capacity == normal_exhaust_capacity)
+	# Multiplayer uses replicated RPM even though local throttle is untouched.
+	jeep.set_remote_controlled(true, 77)
+	jeep._remote_rpm = 0.72
+	jeep._update_exhaust(0.25)
+	check("remote vehicle exhaust follows replicated engine RPM",
+		jeep_outlet.target_intensity > 0.45 \
+		and jeep_outlet.particles.emitting)
+	jeep.set_remote_controlled(false)
+	jeep._update_exhaust(0.25)
+	# Jet packets encode the independent burner bit alongside normalized spool;
+	# decode it through the real remote-state method, not a local-only shortcut.
+	jet.spool = 1.0
+	jet.afterburner = true
+	var encoded_jet_aux: Vector3 = jet.state_aux()
+	jet.spool = 0.0
+	jet.afterburner = false
+	jet.set_remote_controlled(true, 78)
+	jet.apply_remote_state(jet.seat_global(), jet.yaw_angle(),
+		encoded_jet_aux, Vector3.ZERO)
+	jet._update_exhaust(0.25)
+	jet._update_extra_visuals(0.0)
+	check("remote jet replicates spool, afterburner, core, and plume boost",
+		encoded_jet_aux.z > FighterJet.REMOTE_AFTERBURNER_OFFSET \
+		and jet.spool > 0.99 and jet.afterburner \
+		and jet._remote_rpm > 0.99 and jet_outlet.boost > 0.70 \
+		and jet_outlet.target_intensity > 0.90 \
+		and jet._nozzle_glow.albedo_color.a > 0.07,
+		"encoded=%.2f spool=%.2f ab=%s rpm=%.2f boost=%.2f target=%.2f alpha=%.3f" % [
+			encoded_jet_aux.z, jet.spool, jet.afterburner, jet._remote_rpm,
+			jet_outlet.boost, jet_outlet.target_intensity,
+			jet._nozzle_glow.albedo_color.a])
+	jet.set_remote_controlled(false)
+	jet.spool = 0.0
+	jet.afterburner = false
+	jet.engine.rpm = 62.0
+	jet._update_exhaust(0.25)
+	jet._update_extra_visuals(0.0)
 	check("vehicle id grammar accepted",
 		Net._valid_vehicle_id("v:debug#bike")
 		and Net._valid_vehicle_id("v:3,-7#0")
@@ -246,6 +472,24 @@ func run(main) -> void:
 		jet_meshes_cull_back)
 	check("jet model hierarchy contains no mirrored transforms",
 		jet_body != null and hierarchy_has_positive_determinants(jet_body))
+	var burner_mesh := jet._nozzle_flame.mesh as CylinderMesh
+	var burner_anchor_ok := burner_mesh != null
+	for burner_sample in [[0.18, false], [1.0, false], [1.0, true]]:
+		jet.spool = float(burner_sample[0])
+		jet.afterburner = bool(burner_sample[1])
+		jet._update_extra_visuals(0.0)
+		var burner_length: float = burner_mesh.height \
+			* jet._nozzle_flame.scale.y if burner_mesh else 0.0
+		var burner_forward_edge: float = jet._nozzle_flame.position.z \
+			+ burner_length * 0.5
+		burner_anchor_ok = burner_anchor_ok \
+			and absf(burner_forward_edge - FighterJet.NOZZLE_LIP_Z) < 0.002 \
+			and jet._nozzle_glow.albedo_color.a <= 0.10
+	jet.spool = 0.0
+	jet.afterburner = false
+	jet._update_extra_visuals(0.0)
+	check("jet burner core stays translucent and anchored at every power",
+		burner_anchor_ok)
 
 	# --- parked settling ----------------------------------------------------
 	await sim(150)
@@ -277,6 +521,10 @@ func run(main) -> void:
 	check("mounting stows the weapon and disables the capsule",
 		p.is_weapon_stowed() and p._collision_shape.disabled)
 	await sim(18)
+	var jeep_idle_exhaust := jeep_outlet.intensity
+	check("occupied Jeep settles into a light idle vapor",
+		jeep_idle_exhaust > 0.08 and jeep_outlet.particles.emitting,
+		"intensity=%.3f" % jeep_idle_exhaust)
 	check("jeep rider is planted on authored seat and controls",
 		rider_contract_ok(p, jeep))
 	main.hud._update_vehicle_cluster()
@@ -288,6 +536,9 @@ func run(main) -> void:
 			jeep.engine.rpm / 6000.0) \
 		and is_equal_approx(main.hud.vehicle_tachometer.redline_fraction,
 			5100.0 / 6000.0))
+	main.hud._update_aircraft_aim_reticle(false)
+	check("aircraft aim reticle stays hidden in ground vehicles",
+		not main.hud.aircraft_aim_reticle.visible)
 	# Ground and water cockpits use vehicle-relative freelook. Rotate the parked
 	# chassis without touching the camera and prove its centered sightline follows.
 	var parked_jeep_basis: Basis = jeep.global_basis
@@ -330,6 +581,15 @@ func run(main) -> void:
 		"%.1f m/s" % drive_speed)
 	check("gearbox upshifted beyond first", jeep.engine.gear >= 2,
 		"gear=%d" % jeep.engine.gear)
+	check("Jeep exhaust thickens smoothly under real drivetrain load",
+		jeep_outlet.target_intensity > jeep_idle_exhaust + 0.25 \
+		and jeep_outlet.intensity > jeep_idle_exhaust + 0.20 \
+		and jeep_outlet.particles.amount_ratio > 0.35 \
+		and (jeep_outlet.particles.process_material \
+			as ParticleProcessMaterial).initial_velocity_max > 1.40 \
+		and is_equal_approx(jeep_outlet.particles.speed_scale, 1.0),
+		"idle=%.3f target=%.3f live=%.3f" % [jeep_idle_exhaust,
+			jeep_outlet.target_intensity, jeep_outlet.intensity])
 	main.hud._update_vehicle_cluster()
 	check("analog tach needle follows raw engine RPM exactly",
 		absf(main.hud.vehicle_tachometer.rpm - jeep.engine.rpm) < 0.01 \
@@ -450,6 +710,12 @@ func run(main) -> void:
 		and absf(jeep.linear_velocity.y) < 3.5,
 		"brake=%.2f handbrake=%s velocity=%s" % [jeep.input_brake,
 			str(jeep.input_handbrake), jeep.linear_velocity])
+	check("parked Jeep stops spawning vapor after its plume clears",
+		jeep_outlet.target_intensity < 0.001 \
+		and jeep_outlet.intensity < 0.012 \
+		and not jeep_outlet.particles.emitting,
+		"target=%.4f live=%.4f" % [jeep_outlet.target_intensity,
+			jeep_outlet.intensity])
 
 	# --- motorcycle ----------------------------------------------------------
 	mounted = await mount(p, w, bike)
@@ -457,6 +723,86 @@ func run(main) -> void:
 	await sim(18)
 	check("bike rider is planted on authored saddle and controls",
 		rider_contract_ok(p, bike))
+	var bike_idle_exhaust := bike_outlet.intensity
+	check("bike thumper has a subtle pulsing idle exhaust",
+		bike_idle_exhaust > 0.08 and bike_outlet.particles.emitting,
+		"intensity=%.3f" % bike_idle_exhaust)
+	var bike_front: VehicleWheel = bike.wheels[0]
+	var bike_rear: VehicleWheel = bike.wheels[1]
+	var bike_wheelbase := absf(bike_front.local_pos.z - bike_rear.local_pos.z)
+	var bike_wheelbase_ratio := bike_wheelbase / MONKEY_STANDING_VISUAL_HEIGHT
+	var bike_tire_ratio := 2.0 * maxf(bike_front.radius, bike_rear.radius) \
+		/ MONKEY_STANDING_VISUAL_HEIGHT
+	var bike_model := bike.get_node_or_null("Body") as Node3D
+	check("bike is proportioned to the full-size monkey rider",
+		bike_wheelbase_ratio >= 0.88 and bike_wheelbase_ratio <= 1.02 \
+		and bike_tire_ratio >= 0.38 and bike_tire_ratio <= 0.46 \
+		and bike_model != null \
+		and bike_model.scale.distance_to(Vector3.ONE * Motorcycle.MODEL_SCALE) \
+			< 0.001,
+		"wheelbase=%.3f rider ratio=%.3f tire ratio=%.3f" % [
+			bike_wheelbase, bike_wheelbase_ratio, bike_tire_ratio])
+	# Let the added 38 kg rider payload settle before measuring the loaded ride
+	# height and sag. These values guard the visible lowering without allowing a
+	# cosmetic-only scale or a suspension that sits on its bumpstops.
+	await sim(72)
+	var bike_ground: float = bike.terrain_height_at(
+		bike.global_position.x, bike.global_position.z)
+	var bike_chassis_height: float = bike.global_position.y - bike_ground
+	var saddle_top := bike.get_node_or_null("Body/SaddleTop") as Node3D
+	var saddle_height := -INF
+	if saddle_top:
+		saddle_height = saddle_top.global_position.y - bike_ground
+	check("loaded bike has a visibly lower saddle and chassis",
+		bike_chassis_height >= 0.42 and bike_chassis_height <= 0.54 \
+		and saddle_height / MONKEY_STANDING_VISUAL_HEIGHT >= 0.68 \
+		and saddle_height / MONKEY_STANDING_VISUAL_HEIGHT <= 0.82,
+		"chassis=%.3f saddle=%.3f rider ratio=%.3f" % [bike_chassis_height,
+			saddle_height, saddle_height / MONKEY_STANDING_VISUAL_HEIGHT])
+	var suspension_healthy := bike_front.in_contact and bike_rear.in_contact
+	for bike_wheel: VehicleWheel in [bike_front, bike_rear]:
+		var sag_ratio := bike_wheel.compression / bike_wheel.travel
+		suspension_healthy = suspension_healthy \
+			and bike_wheel.travel >= 0.18 and bike_wheel.travel <= 0.23 \
+			and sag_ratio >= 0.22 and sag_ratio <= 0.65 \
+			and bike_wheel.compression < bike_wheel.travel * 0.80
+	check("lower bike retains useful loaded suspension travel", suspension_healthy,
+		"front %.3f/%.3f rear %.3f/%.3f" % [bike_front.compression,
+			bike_front.travel, bike_rear.compression, bike_rear.travel])
+	var expected_front_hub := bike_front.local_pos \
+		- Vector3.UP * (bike_front.travel - bike_front.compression)
+	var expected_rear_hub := bike_rear.local_pos \
+		- Vector3.UP * (bike_rear.travel - bike_rear.compression)
+	var front_hub_error: float = bike.to_local(
+		bike._front_wheel_visual.global_position).distance_to(expected_front_hub)
+	var rear_hub_error: float = bike.to_local(
+		bike._rear_wheel_visual.global_position).distance_to(expected_rear_hub)
+	var front_patch_error := absf(bike._front_wheel_visual.global_position.distance_to(
+		bike_front.contact_point) - bike_front.radius)
+	var rear_patch_error := absf(bike._rear_wheel_visual.global_position.distance_to(
+		bike_rear.contact_point) - bike_rear.radius)
+	check("resized wheel meshes remain on physical suspension hubs",
+		front_hub_error < 0.01 and rear_hub_error < 0.01 \
+		and front_patch_error < 0.02 and rear_patch_error < 0.02,
+		"hub %.3f/%.3f patch %.3f/%.3f" % [front_hub_error,
+			rear_hub_error, front_patch_error, rear_patch_error])
+	var bike_collision: CollisionShape3D
+	for child in bike.get_children():
+		if child is CollisionShape3D \
+				and (child as CollisionShape3D).shape is BoxShape3D:
+			bike_collision = child as CollisionShape3D
+			break
+	var collision_matches := false
+	var collision_ratio := 0.0
+	if bike_collision:
+		var collision_box := bike_collision.shape as BoxShape3D
+		collision_ratio = collision_box.size.z / bike_wheelbase
+		var collision_bottom := bike_collision.position.y - collision_box.size.y * 0.5
+		var skid_plate_bottom := 0.075 * Motorcycle.MODEL_SCALE
+		collision_matches = collision_ratio >= 1.10 and collision_ratio <= 1.25 \
+			and absf(collision_bottom - skid_plate_bottom) <= 0.04
+	check("bike collision hull follows the resized frame", collision_matches,
+		"length/wheelbase=%.3f" % collision_ratio)
 	p.ti.dir = Vector2(-1, 0)
 	await sim(1)
 	var gathered_bike_left: bool = bike.input_steer > 0.99
@@ -480,6 +826,14 @@ func run(main) -> void:
 	bike.reset_physics_interpolation()
 	p.ti.dir = Vector2(0, -1)
 	await sim(120)
+	check("bike exhaust responds to real throttle and RPM",
+		bike_outlet.target_intensity > bike_idle_exhaust + 0.30 \
+		and bike_outlet.particles.amount_ratio > 0.40 \
+		and (bike_outlet.particles.process_material \
+			as ParticleProcessMaterial).initial_velocity_max > 1.10 \
+		and is_equal_approx(bike_outlet.particles.speed_scale, 1.0),
+		"idle=%.3f target=%.3f" % [bike_idle_exhaust,
+			bike_outlet.target_intensity])
 	check("bike balance keeps it upright while accelerating",
 		absf(bike.global_basis.get_euler(EULER_ORDER_YXZ).z) < 0.4,
 		"roll=%.2f" % bike.global_basis.get_euler(EULER_ORDER_YXZ).z)
@@ -513,7 +867,8 @@ func run(main) -> void:
 			break
 		await sim(1)
 	# Ctrl is a one-frame trigger; the authored balance assist persists after the
-	# key is released. Hold A during it to prove steering is physically reduced.
+	# key is released. Hold A through the raised phase to prove the chassis barely
+	# changes heading while the front contact patch is airborne.
 	p.ti.dir = Vector2(-1, -1)
 	p.ti.crouch_just = true
 	p.ti.crouch_held = true
@@ -521,36 +876,69 @@ func run(main) -> void:
 	p.ti.crouch_held = false
 	var wheelie_triggered: bool = bike.wheelie_active()
 	var peak_nose_up := 0.0
-	var saw_front_lift := false
-	var saw_rear_support := false
+	var peak_front_clearance := 0.0
+	var lifted_frames := 0
+	var rear_supported_lifted_frames := 0
+	var current_sustained_lift := 0
+	var longest_sustained_lift := 0
 	var maximum_wheelie_steer := 0.0
-	for i in range(90):
-		# One brief A sample proves the airborne steering cap; ride the rest of
-		# the manoeuvre straight so the fixture measures the wheelie, not a
-		# deliberate post-landing lowside after its 1.2-second assist ends.
-		if i == 10:
+	var wheelie_start_yaw: float = bike.yaw_angle()
+	var maximum_wheelie_yaw_change := 0.0
+	for i in range(150):
+		# Straighten before the settle phase so this fixture measures the wheelie,
+		# not a deliberate post-landing lowside after the assist releases.
+		if i == 80:
 			p.ti.dir = Vector2(0, -1)
 		await sim(1)
-		peak_nose_up = maxf(peak_nose_up,
-			-bike.global_basis.get_euler(EULER_ORDER_YXZ).x)
-		saw_front_lift = saw_front_lift or not bike.wheels[0].in_contact
-		saw_rear_support = saw_rear_support or bike.wheels[1].in_contact
+		var nose_up: float = -bike.global_basis.get_euler(EULER_ORDER_YXZ).x
+		peak_nose_up = maxf(peak_nose_up, nose_up)
+		var front_center_local: Vector3 = bike.wheels[0].local_pos \
+			- Vector3.UP * (bike.wheels[0].travel - bike.wheels[0].compression)
+		var front_center_world: Vector3 = bike.to_global(front_center_local)
+		var front_clearance: float = front_center_world.y \
+			- bike.wheels[0].radius - DebugWorldBuilder.GROUND_Y
+		peak_front_clearance = maxf(peak_front_clearance, front_clearance)
+		if not bike.wheels[0].in_contact and front_clearance > 0.12:
+			lifted_frames += 1
+			current_sustained_lift += 1
+			longest_sustained_lift = maxi(longest_sustained_lift,
+				current_sustained_lift)
+			if bike.wheels[1].in_contact:
+				rear_supported_lifted_frames += 1
+		else:
+			current_sustained_lift = 0
 		if bike.wheelie_active():
 			maximum_wheelie_steer = maxf(maximum_wheelie_steer,
 				absf(bike._steer_target))
-	check("Ctrl pops a brief, protected motorcycle wheelie",
-		wheelie_triggered and peak_nose_up > 0.14 and peak_nose_up < 0.55 \
-		and saw_front_lift and saw_rear_support,
-		"peak=%.2f front_lift=%s rear_support=%s" % [peak_nose_up,
-			str(saw_front_lift), str(saw_rear_support)])
+			maximum_wheelie_yaw_change = maxf(maximum_wheelie_yaw_change,
+				absf(angle_difference(wheelie_start_yaw, bike.yaw_angle())))
+	var rear_support_ratio := float(rear_supported_lifted_frames) \
+		/ maxf(float(lifted_frames), 1.0)
+	check("Ctrl raises and sustains a real motorcycle wheelie",
+		wheelie_triggered and peak_nose_up >= 0.42 and peak_nose_up < 0.64 \
+			and peak_front_clearance >= 0.25 \
+			and longest_sustained_lift >= 45 and rear_support_ratio >= 0.80 \
+			and bike.driver == p,
+		"peak=%.2f clearance=%.2f sustained=%d support=%.0f%%" % [
+			peak_nose_up, peak_front_clearance, longest_sustained_lift,
+			rear_support_ratio * 100.0])
 	check("wheelie sharply limits turning while the front is raised",
-		maximum_wheelie_steer <= bike.max_steer_angle * 0.22,
-		"steer=%.3f max=%.3f" % [maximum_wheelie_steer,
-			bike.max_steer_angle * 0.22])
+		maximum_wheelie_steer <= bike.max_steer_angle * 0.12 \
+			and maximum_wheelie_yaw_change < 0.10,
+		"steer=%.3f max=%.3f yaw=%.3f" % [maximum_wheelie_steer,
+			bike.max_steer_angle * 0.12, maximum_wheelie_yaw_change])
 	neutral(p)
-	await sim(75)
+	await sim(90)
 	check("wheelie timer ends and returns steering authority",
 		not bike.wheelie_active())
+	var landed_pose: Vector3 = bike.global_basis.get_euler(EULER_ORDER_YXZ)
+	check("lower suspension lands a wheelie without bottoming or bouncing",
+		bike_front.in_contact and bike_rear.in_contact \
+		and absf(landed_pose.x) < 0.15 and absf(landed_pose.z) < 0.30 \
+		and bike_front.compression < bike_front.travel * 0.80 \
+		and bike_rear.compression < bike_rear.travel * 0.80,
+		"pitch=%.3f roll=%.3f compression=%.3f/%.3f" % [landed_pose.x,
+			landed_pose.z, bike_front.compression, bike_rear.compression])
 
 	# Lean into a right-hander and assert actual heading/displacement, not merely
 	# an internally consistent target sign. This catches the old inverted bank.
@@ -578,13 +966,60 @@ func run(main) -> void:
 		corner_right)
 	check("D banks and turns the bike right with responsive movement",
 		lean_matches and lean > 0.0 and right_heading > 0.10 \
-		and right_displacement > 0.35 and bike.driver == p \
+			and right_displacement > 0.35 and bike.driver == p \
 		and bike.global_basis.y.y > 0.68,
 		"lean=%.2f target=%.2f heading=%.2f side=%.2f forward=%.2f" % [
 			lean, bike.lean_target, right_heading, right_displacement,
 			bike.global_basis.z.normalized().dot(corner_forward)])
-	await dismount(p)
-	check("bike drops to its stand when parked", bike.driver == null)
+	# Isolate stand placement from the completed high-speed corner. A lowside is
+	# allowed when that manoeuvre is overcooked; parking specifically begins from
+	# the real two-wheel, walking-pace state in which E is accepted.
+	neutral(p)
+	reset_bike_control_fixture(bike)
+	await sim(30)
+	# Hold neutral for the same settle window as the ordinary dismount helper,
+	# then capture the exact pre-E state so the test cannot pass by snapping a
+	# side-laid bike back upright inside Motorcycle.end_drive().
+	neutral(p)
+	await sim(30)
+	var pre_dismount_bike_pose: Vector3 = bike.global_basis.get_euler(
+		EULER_ORDER_YXZ)
+	var pre_dismount_near_ground: bool = bike._both_wheels_near_ground()
+	var pre_dismount_speed: float = bike.speed()
+	var pre_dismount_up: float = bike.global_basis.y.y
+	var pre_dismount_upright: bool = pre_dismount_up > 0.72 \
+		and absf(pre_dismount_bike_pose.x) < 0.28 \
+		and absf(pre_dismount_bike_pose.z) < 0.60
+	p.ti.interact_just = true
+	await sim(3)
+	p.ti.interact_just = false
+	await sim(10)
+	check("bike drops to its stand only from a grounded upright park",
+		bike.driver == null and pre_dismount_near_ground \
+			and pre_dismount_upright and pre_dismount_speed < 1.0,
+		"driver=%s pre_pose=%s up=%.3f speed=%.3f near=%s" % [
+			str(bike.driver), pre_dismount_bike_pose,
+			pre_dismount_up, pre_dismount_speed,
+			str(pre_dismount_near_ground)])
+	await sim(90)
+	var parked_bike_pose: Vector3 = bike.global_basis.get_euler(
+		EULER_ORDER_YXZ)
+	var parked_bike_supported: bool = bike._has_parked_support()
+	check("parked bike sleeps without a numerical physics runaway",
+		bike.sleeping and bike.global_position.is_finite() \
+			and bike.linear_velocity.is_finite() \
+			and bike.angular_velocity.is_finite() \
+			and bike.linear_velocity.length() < 0.2 \
+			and parked_bike_supported \
+			and absf(parked_bike_pose.x) < 0.25 \
+			and absf(angle_difference(parked_bike_pose.z, -0.12)) < 0.25 \
+			and bike.physics_recovery_count == 0,
+		("sleep=%s support=%s pose=%s recoveries=%d pos=%s linear=%s "
+		+ "angular=%s pre_pose=%s pre_near=%s") % [
+			str(bike.sleeping), str(parked_bike_supported), parked_bike_pose,
+			bike.physics_recovery_count, bike.global_position,
+			bike.linear_velocity, bike.angular_velocity, pre_dismount_bike_pose,
+			str(pre_dismount_near_ground)])
 
 	# --- airboat over grass ---------------------------------------------------
 	mounted = await mount(p, w, boat)
@@ -592,6 +1027,13 @@ func run(main) -> void:
 	await sim(18)
 	check("airboat rider is planted on authored bench and controls",
 		rider_contract_ok(p, boat))
+	var airboat_idle_exhaust := airboat_left.intensity
+	check("airboat twin headers both idle with the prop engine",
+		airboat_idle_exhaust > 0.06 and airboat_left.particles.emitting \
+		and airboat_right.particles.emitting \
+		and absf(airboat_left.intensity - airboat_right.intensity) < 0.001,
+		"left=%.3f right=%.3f" % [airboat_left.intensity,
+			airboat_right.intensity])
 	# One wet float point marks the whole boat as in water. That must not turn
 	# off analytic support beneath the dry half when its shoreline chunk has
 	# streamed out. Probe the fallback without applying forces, then restore the
@@ -635,6 +1077,19 @@ func run(main) -> void:
 		"speed=%.2f spool=%.2f throttle=%.2f brake=%.2f driver=%s pos=%s" % [
 			boat.speed(), boat.spool, boat.input_throttle, boat.input_brake,
 			str(boat.driver != null), boat.global_position])
+	check("airboat exhaust stretches with fan spool on both headers",
+		airboat_left.target_intensity > airboat_idle_exhaust + 0.50 \
+		and airboat_right.target_intensity > airboat_idle_exhaust + 0.50 \
+		and (airboat_left.particles.process_material \
+			as ParticleProcessMaterial).initial_velocity_max > 2.65 \
+		and (airboat_right.particles.process_material \
+			as ParticleProcessMaterial).initial_velocity_max > 2.65 \
+		and is_equal_approx(airboat_left.particles.speed_scale, 1.0) \
+		and is_equal_approx(airboat_right.particles.speed_scale, 1.0),
+		"idle=%.3f target=%.3f speed=%.2f" % [airboat_idle_exhaust,
+			airboat_left.target_intensity,
+			(airboat_left.particles.process_material \
+				as ParticleProcessMaterial).initial_velocity_max])
 	var fan_before_chop: float = boat.spool
 	p.ti.dir = Vector2(0, 1)
 	await sim(15)
@@ -656,6 +1111,66 @@ func run(main) -> void:
 		p.cam.vehicle_aim_direction().dot(jet.global_basis.z) > 0.995)
 	check("jet rider is planted in cockpit and on all controls",
 		rider_contract_ok(p, jet))
+	var jet_idle_exhaust := jet_outlet.intensity
+	check("fighter turbine shows only a thin idle heat plume",
+		jet_idle_exhaust > 0.06 and jet_idle_exhaust < 0.30 \
+		and jet_outlet.particles.emitting,
+		"intensity=%.3f" % jet_idle_exhaust)
+	main.hud._process(0.0)
+	var flight_reticle: AircraftAimReticle = main.hud.aircraft_aim_reticle
+	check("fighter jet shows a centered dot inside its flight-limit circle",
+		flight_reticle.visible and not main.hud.crosshair.visible \
+		and flight_reticle.normalized_aim.length() < 0.03 \
+		and flight_reticle.dot_offset.length() < 2.0 \
+		and AircraftAimReticle.DOT_TRAVEL_RADIUS \
+			+ AircraftAimReticle.DOT_RADIUS < AircraftAimReticle.RING_RADIUS,
+		"visible=%s combat=%s aim=%s dot=%s geometry=%.1f<%.1f" % [
+			flight_reticle.visible, main.hud.crosshair.visible,
+			flight_reticle.normalized_aim, flight_reticle.dot_offset,
+			AircraftAimReticle.DOT_TRAVEL_RADIUS + AircraftAimReticle.DOT_RADIUS,
+			AircraftAimReticle.RING_RADIUS])
+	# Exercise the real captured-mouse path: screen-right and screen-up move the
+	# dot into the matching quadrant while the exact same normalized command is
+	# converted into the jet's pursuit direction.
+	p.cam.apply_look(Vector2(105.0, -62.0))
+	await sim(2)
+	main.hud._process(0.0)
+	var moderate_flight_aim: Vector2 = p.cam.aircraft_aim_normalized()
+	var moderate_control_dot: float = jet._aim.dot(
+		p.cam.vehicle_aim_direction())
+	check("flight dot follows the real mouse command and jet control aim",
+		moderate_flight_aim.x > 0.05 and moderate_flight_aim.y < -0.03 \
+		and moderate_flight_aim.length() < 1.0 \
+		and flight_reticle.normalized_aim.distance_to(moderate_flight_aim) < 0.001 \
+		and flight_reticle.dot_offset.distance_to(moderate_flight_aim \
+			* AircraftAimReticle.DOT_TRAVEL_RADIUS) < 0.01 \
+		and moderate_control_dot > 0.9999,
+		"camera=%s hud=%s dot_error=%.4f control_dot=%.6f" % [
+			moderate_flight_aim, flight_reticle.normalized_aim,
+			flight_reticle.dot_offset.distance_to(moderate_flight_aim \
+				* AircraftAimReticle.DOT_TRAVEL_RADIUS), moderate_control_dot])
+	p.cam.apply_look(Vector2(100000.0, -100000.0))
+	await sim(2)
+	main.hud._process(0.0)
+	var maximum_flight_aim: Vector2 = p.cam.aircraft_aim_normalized()
+	var requested_aim_angle: float = jet.global_basis.z.angle_to(
+		p.cam.vehicle_aim_direction())
+	check("flight dot and physical pursuit aim share one circular maximum",
+		maximum_flight_aim.length() >= 0.998 \
+		and maximum_flight_aim.length() <= 1.001 \
+		and flight_reticle.normalized_aim.distance_to(maximum_flight_aim) < 0.001 \
+		and flight_reticle.dot_offset.length() \
+			+ AircraftAimReticle.DOT_RADIUS < AircraftAimReticle.RING_RADIUS \
+		and requested_aim_angle <= p.cam.aircraft_aim_limit_radians() + 0.01 \
+		and jet._aim.dot(p.cam.vehicle_aim_direction()) > 0.9999,
+		"cursor=%.3f angle=%.1f°" % [maximum_flight_aim.length(),
+			rad_to_deg(requested_aim_angle)])
+	p.cam.center_aircraft_aim()
+	await sim(2)
+	main.hud._process(0.0)
+	check("centering the flight dot restores straight-ahead pursuit",
+		flight_reticle.normalized_aim.length() < 0.03 \
+		and p.cam.vehicle_aim_direction().dot(jet.global_basis.z) > 0.999)
 	check("jet HUD teaches the arrow pitch controls",
 		main.hud._vehicle_hint(jet).contains("NOSE UP") \
 		and main.hud._vehicle_hint(jet).contains("NOSE DOWN") \
@@ -664,19 +1179,30 @@ func run(main) -> void:
 		and main.hud._vehicle_hint(jet).contains(
 			Settings.binding_text(&"vehicle_pitch_down")))
 	p.ti.vehicle_pitch = 1.0
+	p.cam.apply_look(Vector2(300.0, -300.0))
 	await sim(1)
 	var gathered_up: bool = jet._pitch_input > 0.99
+	var arrow_mouse_aim: Vector2 = p.cam.aircraft_aim_normalized()
+	p.cam.center_aircraft_aim()
 	p.ti.vehicle_pitch = -1.0
 	await sim(1)
 	var gathered_down: bool = jet._pitch_input < -0.99
 	neutral(p)
 	await sim(1)
-	check("Up and Down arrows reach the jet as direct pitch commands",
-		gathered_up and gathered_down and absf(jet._pitch_input) < 0.001)
+	check("arrow pitch preserves horizontal mouse aim and clears stale vertical aim",
+		gathered_up and gathered_down and absf(jet._pitch_input) < 0.001 \
+		and arrow_mouse_aim.x > 0.05 and absf(arrow_mouse_aim.y) < 0.03 \
+		and p.cam.aircraft_aim_normalized().length() < 0.03)
 	var flight_aim: Vector3 = p.cam.vehicle_aim_direction()
+	var flight_cursor_before_front: Vector2 = p.cam.aircraft_aim_normalized()
 	p.cam._apply_view_mode(CameraRig.ViewMode.FRONT)
-	check("front camera never reverses the jet control aim",
-		p.cam.vehicle_aim_direction().dot(flight_aim) > 0.999)
+	p.cam.apply_look(Vector2(100000.0, -100000.0))
+	main.hud._process(0.0)
+	check("front camera hides and cannot invisibly change the flight cursor",
+		p.cam.vehicle_aim_direction().dot(flight_aim) > 0.999 \
+		and p.cam.aircraft_aim_normalized().distance_to(
+			flight_cursor_before_front) < 0.001 \
+		and not flight_reticle.visible)
 	# Cockpit presentation follows the aircraft attitude while the pursuit aim
 	# stays in world space. Roll the parked airframe between physics ticks so the
 	# assertion is deterministic and cannot disturb the takeoff run below.
@@ -688,8 +1214,22 @@ func run(main) -> void:
 	p.cam._process(1.0 / 60.0)
 	check("cockpit camera follows the jet's rolled horizon",
 		p.cam.global_basis.y.dot(jet.global_basis.y) > 0.98)
+	p.cam.center_aircraft_aim()
+	p.cam.apply_look(Vector2(300.0, 0.0))
+	main.hud._process(0.0)
+	var rolled_cockpit_aim: Vector3 = p.cam.vehicle_aim_direction()
+	var cockpit_screen_right: float = p.cam.cam_basis().x.dot(rolled_cockpit_aim)
+	var cockpit_screen_up: float = p.cam.cam_basis().y.dot(rolled_cockpit_aim)
+	check("rolled cockpit dot and physical aim use the same screen axes",
+		flight_reticle.normalized_aim.x > 0.05 \
+		and absf(flight_reticle.normalized_aim.y) < 0.001 \
+		and cockpit_screen_right > 0.03 \
+		and absf(cockpit_screen_up) < cockpit_screen_right * 0.05,
+		"dot=%s screen=(%.3f, %.3f)" % [flight_reticle.normalized_aim,
+			cockpit_screen_right, cockpit_screen_up])
 	jet.global_basis = parked_jet_basis
 	jet.reset_physics_interpolation()
+	p.cam.center_aircraft_aim()
 	p.cam._apply_view_mode(CameraRig.ViewMode.SHOULDER)
 	p.cam._process(1.0 / 60.0)
 	check("leaving the rolled jet cockpit clears pitch and roll",
@@ -724,6 +1264,11 @@ func run(main) -> void:
 	check("turbine spools and the jet rolls out",
 		jet.spool > 0.8 and jet.forward_speed() > 16.0,
 		"spool=%.2f v=%.1f" % [jet.spool, jet.forward_speed()])
+	check("jet heat plume follows real turbine spool",
+		jet_outlet.target_intensity > jet_idle_exhaust + 0.55 \
+		and jet_outlet.particles.amount_ratio > 0.60,
+		"idle=%.3f target=%.3f ratio=%.3f" % [jet_idle_exhaust,
+			jet_outlet.target_intensity, jet_outlet.particles.amount_ratio])
 	# Hold the same two keys through rotation; no precisely timed mouse pull is
 	# required. Stop as soon as the main gear is clearly airborne.
 	for i in range(900):
@@ -748,16 +1293,31 @@ func run(main) -> void:
 		and jet.global_basis.y.y > 0.80
 	check("holding W and Up Arrow produces an easy, straight takeoff",
 		stable_rotation_run,
-		"alt=%.1f v=%.1f run=%.0fm heading=%.3f lateral=%.1fm up=%.2f spool=%.2f pos=%s" % [
+		"alt=%.1f v=%.1f run=%.0fm heading=%.3f lateral=%.1fm up=%.2f spool=%.2f driver=%s player_vehicle=%s recoveries=%d pos=%s" % [
 			jet.global_position.y, jet.forward_speed(), takeoff_distance,
 			rotation_heading_dot, rotation_lateral,
-			jet.global_basis.y.y, jet.spool, jet.global_position])
+			jet.global_basis.y.y, jet.spool, str(jet.driver != null),
+			str(p.vehicle == jet), jet.physics_recovery_count,
+			jet.global_position])
 	if not stable_rotation_run:
 		print("VEHICLETEST %d/%d FAIL" % [total - fails, total])
 		main.get_tree().quit(1)
 		return
 	p.ti.sprint = true   # afterburner
 	await sim(480)
+	var jet_particle_material := jet_outlet.particles.process_material \
+		as ParticleProcessMaterial
+	check("afterburner accelerates a translucent blue-white exhaust plume",
+		jet_outlet.boost > 0.95 \
+		and jet_particle_material.initial_velocity_max > 45.0 \
+		and is_equal_approx(jet_outlet.particles.speed_scale, 1.0) \
+		and jet_outlet.particles.transform_align \
+			== GPUParticles3D.TRANSFORM_ALIGN_Z_BILLBOARD_Y_TO_VELOCITY \
+		and jet_particle_material.color.b > jet_particle_material.color.r \
+		and jet_particle_material.color.a < 0.35,
+		"boost=%.2f speed=%.2f color=%s" % [jet_outlet.boost,
+			jet_particle_material.initial_velocity_max,
+			jet_particle_material.color])
 	var altitude: float = jet.global_position.y - 2.0
 	check("Up Arrow keeps the jet in a protected climb", altitude > 25.0,
 		"alt=%.0fm v=%.0f" % [altitude, jet.speed()])
@@ -788,6 +1348,39 @@ func run(main) -> void:
 	check("altitude-scaled far plane feeds the pilot's view",
 		w.current_view_distance > 4000.0,
 		"%.0f m" % w.current_view_distance)
+	# Release arrow assistance, place the mouse dot at the right edge, and prove
+	# this is a pursuit target rather than a cosmetic cursor or endless roll
+	# stick: the nose closes on its fixed world direction and the dot recentres.
+	p.ti.vehicle_pitch = 0.0
+	p.cam.center_aircraft_aim()
+	await sim(2)
+	var right_turn_start_forward: Vector3 = jet.global_basis.z.normalized()
+	var right_turn_screen_right: Vector3 = right_turn_start_forward \
+		.cross(Vector3.UP).normalized()
+	p.cam.apply_look(Vector2(100000.0, 0.0))
+	await sim(1)
+	var right_turn_target: Vector3 = p.cam.vehicle_aim_direction()
+	var right_target_lateral: float = (right_turn_target \
+		- right_turn_start_forward * right_turn_target.dot(
+			right_turn_start_forward)).dot(right_turn_screen_right)
+	var right_turn_alignment_before: float = jet.global_basis.z.dot(
+		right_turn_target)
+	var right_cursor_before: float = p.cam.aircraft_aim_normalized().length()
+	await sim(120)
+	var right_turn_alignment_after: float = jet.global_basis.z.dot(
+		right_turn_target)
+	var right_cursor_after: float = p.cam.aircraft_aim_normalized().length()
+	check("jet turns toward the bounded mouse dot and brings it toward centre",
+		right_cursor_before > 0.99 \
+		and right_target_lateral > 0.1 \
+		and right_turn_alignment_after > right_turn_alignment_before + 0.03 \
+		and right_cursor_after < right_cursor_before - 0.08 \
+		and jet.global_basis.z.dot(right_turn_screen_right) > 0.02,
+		"lateral=%.2f dot %.2f→%.2f alignment %.3f→%.3f" % [
+			right_target_lateral, right_cursor_before,
+			right_cursor_after, right_turn_alignment_before,
+			right_turn_alignment_after])
+	p.cam.center_aircraft_aim()
 	# Bail out at altitude: monkey leaves, the jet flies on unmanned.
 	var bail_pos: Vector3 = p.global_position
 	p.ti.interact_just = true
@@ -798,7 +1391,17 @@ func run(main) -> void:
 	check("bailed monkey falls free of the jet",
 		p.global_position.distance_to(jet.global_position) > 40.0
 		and p.global_position.y < bail_pos.y + 5.0)
+	main.hud._update_aircraft_aim_reticle(false)
+	check("aircraft aim reticle hides after leaving the jet",
+		not flight_reticle.visible)
 	neutral(p)
+	check("all vehicle physics stayed finite without emergency recovery",
+		bike.physics_recovery_count == 0 and jeep.physics_recovery_count == 0 \
+			and boat.physics_recovery_count == 0 \
+			and jet.physics_recovery_count == 0,
+		"bike=%d jeep=%d boat=%d jet=%d" % [bike.physics_recovery_count,
+			jeep.physics_recovery_count, boat.physics_recovery_count,
+			jet.physics_recovery_count])
 
 	print("VEHICLETEST %d/%d %s" % [total - fails, total,
 		"PASS" if fails == 0 else "FAIL"])

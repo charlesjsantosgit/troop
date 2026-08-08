@@ -81,6 +81,13 @@ func _ready() -> void:
 	cage_shape.position = Vector3(0, 0.95, -1.45)
 	add_child(cage_shape)
 	_build_body()
+	for side in [-1.0, 1.0]:
+		# Side-exit dry stacks clear the prop cage instead of sending exhaust
+		# through its fan/blur geometry. The outward cant keeps both banks visible
+		# from the normal rear chase view and away from the seated monkey.
+		add_exhaust(Vector3(side * 0.96, 0.60, -1.41),
+			Vector3(side * 0.46, 0.25, -0.85),
+			VehicleExhaust.Profile.AIRBOAT)
 
 
 func mount_verb() -> String:
@@ -150,6 +157,13 @@ func _simulate(dt: float) -> void:
 	if driver:
 		_assist_recovery(dt)
 	_emit_wake(dt)
+
+
+func exhaust_activity(profile_kind: int) -> float:
+	if remote_controlled:
+		return super(profile_kind)
+	return VehicleExhaust.sampled_intensity(profile_kind, driver != null,
+		spool, spool)
 
 
 ## Signed longitudinal planar flow adds speed authority. Vertical wave motion
@@ -320,6 +334,18 @@ func _build_body() -> void:
 
 	# Engine block + fuel tank ahead of the cage.
 	add_box(body, Vector3(0.6, 0.42, 0.5), Vector3(0, 0.32, -1.18), cage_mat)
+	# Twin dry headers rise from the engine, cross to the hull edges, and turn
+	# aft outside the prop cage. Their open caps coincide with the two registered
+	# particle outlets above, so no exhaust is hidden by the spinning fan.
+	for side in [-1.0, 1.0]:
+		add_cylinder(body, 0.034, 0.042, 0.30,
+			Vector3(side * 0.34, 0.43, -1.12), cage_mat)
+		add_cylinder(body, 0.034, 0.034, 0.62,
+			Vector3(side * 0.65, 0.58, -1.12), cage_mat,
+			Vector3(0, 0, PI / 2.0))
+		add_cylinder(body, 0.038, 0.034, 0.30,
+			Vector3(side * 0.96, 0.60, -1.26), cage_mat,
+			Vector3(PI / 2.0, 0, 0))
 	add_cylinder(body, 0.16, 0.16, 0.55, Vector3(0, 0.30, 0.85),
 		paint_material(Color(0.72, 0.15, 0.1), 0.3, 0.5),
 		Vector3(0, 0, PI / 2.0))

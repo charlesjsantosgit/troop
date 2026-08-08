@@ -100,6 +100,10 @@ func _ready() -> void:
 	cage_shape.position = Vector3(0, 1.18, -0.15)
 	add_child(cage_shape)
 	_build_body()
+	# Outlet sits at the lower/aft cap of the modeled tailpipe, not at the
+	# vehicle origin, so puffs cannot appear through the spare tire or tub.
+	add_exhaust(Vector3(0.55, -0.285, -1.786),
+		Vector3(0, -0.939, -0.343), VehicleExhaust.Profile.JEEP)
 
 
 func mount_verb() -> String:

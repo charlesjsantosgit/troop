@@ -6,8 +6,10 @@ extends CanvasLayer
 enum ScopeTarget { NONE, BODY, HEAD }
 
 const SNIPER_SCOPE_RANGE := 800.0
+const FPS_REFRESH_SECONDS := 0.25
 
 var player  # MonkeyPlayer
+var fps_label: Label
 var score_label: Label
 var speed_label: Label
 var speed_fill: ColorRect
@@ -21,6 +23,7 @@ var hint: Label
 var roster: Label
 var minimap: Minimap
 var crosshair: CombatCrosshair
+var aircraft_aim_reticle: AircraftAimReticle
 var spread_label: Label
 var camera_badge: Label
 var weapon_slots: Label
@@ -40,6 +43,8 @@ var _sniper_scope_active := false
 var _last_health := 0.0
 var _voice_error := ""
 var _voice_error_t := 0.0
+var _fps_refresh_remaining := 0.0
+var _displayed_fps := -1
 
 
 func _ready() -> void:
@@ -70,8 +75,18 @@ func _ready() -> void:
 		_panel_style(Color(0.055, 0.055, 0.03, 0.86), Color(1.0, 0.68, 0.12, 0.75)))
 	add_child(weapon_panel)
 
+	# Keep the performance readout in the actual top-left corner and move the
+	# larger score below it so the two remain readable at every window size.
+	fps_label = _label(13)
+	fps_label.name = "FPSMeter"
+	fps_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	fps_label.position = Vector2(margin, margin)
+	fps_label.text = "FPS --"
+	fps_label.add_theme_color_override("font_color", Color(0.72, 1.0, 0.58, 0.92))
+	add_child(fps_label)
+
 	score_label = _label(24)
-	score_label.position = Vector2(margin, margin)
+	score_label.position = Vector2(margin, margin + 24)
 	add_child(score_label)
 
 	minimap = Minimap.new()
@@ -207,6 +222,20 @@ func _ready() -> void:
 	crosshair.offset_bottom = 110
 	add_child(crosshair)
 
+	aircraft_aim_reticle = AircraftAimReticle.new()
+	aircraft_aim_reticle.name = "AircraftAimReticle"
+	aircraft_aim_reticle.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	aircraft_aim_reticle.anchor_left = 0.5
+	aircraft_aim_reticle.anchor_right = 0.5
+	aircraft_aim_reticle.anchor_top = 0.5
+	aircraft_aim_reticle.anchor_bottom = 0.5
+	aircraft_aim_reticle.offset_left = -80
+	aircraft_aim_reticle.offset_right = 80
+	aircraft_aim_reticle.offset_top = -80
+	aircraft_aim_reticle.offset_bottom = 80
+	aircraft_aim_reticle.visible = false
+	add_child(aircraft_aim_reticle)
+
 	spread_label = _label(11)
 	spread_label.anchor_left = 0.5
 	spread_label.anchor_right = 0.5
@@ -304,6 +333,9 @@ func _ready() -> void:
 	sniper_scope.set_anchors_preset(Control.PRESET_FULL_RECT)
 	add_child(sniper_scope)
 	move_child(damage_overlay, get_child_count() - 1)
+	# Diagnostics stay readable over the optical and damage layers while all
+	# normal combat information keeps the intended scope presentation.
+	move_child(fps_label, get_child_count() - 1)
 	player.health_changed.connect(_on_health_changed)
 	_last_health = player.health
 	if player.world is World:
@@ -444,6 +476,7 @@ func clear_sniper_scope() -> void:
 
 
 func _process(dt: float) -> void:
+	_update_fps_meter(dt)
 	if not player or not is_instance_valid(player):
 		return
 	_help_t = maxf(_help_t - dt, 0.0)
@@ -468,7 +501,8 @@ func _process(dt: float) -> void:
 	var weapon = player.active_weapon if player.active_weapon else player.gun
 	var front_camera: bool = player.cam != null and player.cam.front_view
 	_update_sniper_scope(weapon, front_camera)
-	spread_label.visible = not _sniper_scope_active
+	var aircraft_aim_active := _update_aircraft_aim_reticle(front_camera)
+	spread_label.visible = not _sniper_scope_active and not aircraft_aim_active
 	camera_badge.visible = not _sniper_scope_active
 	hint.visible = not _sniper_scope_active
 	voice_label.visible = not _sniper_scope_active
@@ -538,8 +572,9 @@ func _process(dt: float) -> void:
 		reticle_color = Color(0.32, 1.0, 0.42, 0.96)
 	if player.melee_mode:
 		reticle_color = Color(0.62, 1.0, 0.32, 0.96)
-	crosshair.visible = not front_camera and not _sniper_scope_active
-	if front_camera:
+	crosshair.visible = not front_camera and not _sniper_scope_active \
+		and not aircraft_aim_active
+	if front_camera or aircraft_aim_active:
 		spread_label.text = ""
 	else:
 		var aim_distance := _aim_distance(80.0)
@@ -630,6 +665,36 @@ func _process(dt: float) -> void:
 		hint.text = ""
 
 
+func _update_fps_meter(dt: float) -> void:
+	# Engine's measured frame rate is more representative than 1 / dt, which is
+	# noisy and misleading when a single frame stalls. Polling four times per
+	# second keeps the display responsive without formatting text every frame.
+	_fps_refresh_remaining -= dt
+	if _fps_refresh_remaining > 0.0 or fps_label == null:
+		return
+	_fps_refresh_remaining = FPS_REFRESH_SECONDS
+	var measured_fps := maxi(0, roundi(Engine.get_frames_per_second()))
+	if measured_fps == _displayed_fps:
+		return
+	_displayed_fps = measured_fps
+	fps_label.text = "FPS %d" % measured_fps
+	fps_label.add_theme_color_override("font_color",
+		Color(0.72, 1.0, 0.58, 0.92) if measured_fps >= 60 else (
+		Color(1.0, 0.78, 0.28, 0.94) if measured_fps >= 30 else
+		Color(1.0, 0.38, 0.28, 0.96)))
+
+
+func _update_aircraft_aim_reticle(front_camera: bool) -> bool:
+	var jet_active: bool = player != null and is_instance_valid(player) \
+		and player.vehicle != null and is_instance_valid(player.vehicle) \
+		and player.vehicle.kind == Vehicle.Kind.JET and player.cam != null \
+		and not front_camera and not _sniper_scope_active
+	aircraft_aim_reticle.visible = jet_active
+	aircraft_aim_reticle.set_aim(player.cam.aircraft_aim_normalized() \
+		if jet_active else Vector2.ZERO)
+	return jet_active
+
+
 func _update_vehicle_cluster() -> void:
 	var v: Vehicle = player.vehicle if player else null
 	if v == null or not is_instance_valid(v):
@@ -686,7 +751,7 @@ func _update_vehicle_cluster() -> void:
 func _vehicle_hint(v: Vehicle) -> String:
 	match v.kind:
 		Vehicle.Kind.JET:
-			return "%s NOSE UP · %s NOSE DOWN · W/S THROTTLE · A/D ROLL · MOUSE AIM\nSHIFT BURNER · G/F GEAR/FLAPS · SPACE AIRBRAKE · CTRL BRAKES · E EXIT" % [
+			return "%s NOSE UP · %s NOSE DOWN · W/S THROTTLE · A/D ROLL · MOUSE DOT AIM\nSHIFT BURNER · G/F GEAR/FLAPS · SPACE AIRBRAKE · CTRL BRAKES · E EXIT" % [
 				Settings.binding_text(&"vehicle_pitch_up"),
 				Settings.binding_text(&"vehicle_pitch_down")]
 		Vehicle.Kind.BOAT:

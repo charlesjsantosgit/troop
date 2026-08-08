@@ -46,6 +46,10 @@ const MAX_STATE_PACKETS_PER_SECOND := 30
 const MAX_WORLD_COORDINATE := 1000000.0
 # The fighter jet tops out at ~313 m/s (700 mph); leave validation headroom.
 const MAX_PLAYER_SPEED := 340.0
+# This is an ingress sanity envelope, not gameplay terminal velocity. A fall
+# across the complete +/-1,000,000 m world cannot physically reach 6,500 m/s
+# under 9.81 m/s^2 gravity, even if it begins at MAX_PLAYER_SPEED.
+const MAX_ON_FOOT_FALL_REPLICATION_SPEED := 6500.0
 const MAX_WRAPS := 6
 const MAX_COLLECTED_IDS := 200000
 const MAX_CHEST_CLAIMS := 50000
@@ -514,7 +518,7 @@ func srv_state(pos: Vector3, yaw: float, vel: Vector3, anim: int,
 			or not _allow_rate(sender, "state", MAX_STATE_PACKETS_PER_SECOND) \
 			or not _valid_state(pos, yaw, vel, anim,
 			swinging, anchor, rope_tail, wraps, weapon_kind, weapon_ammo,
-			healing_progress, vehicle_kind, vehicle_id, vehicle_aux) \
+			healing_progress, vehicle_kind, vehicle_id, vehicle_aux, flying) \
 			or not _sender_owns_vehicle_state(sender, vehicle_kind, vehicle_id):
 		return
 	peer_state.emit(sender, pos, yaw, vel, anim, swinging, anchor, rope_tail,
@@ -538,7 +542,7 @@ func cl_state(id: int, pos: Vector3, yaw: float, vel: Vector3, anim: int,
 		return
 	if not _valid_state(pos, yaw, vel, anim, swinging, anchor, rope_tail,
 			wraps, weapon_kind, weapon_ammo, healing_progress, vehicle_kind,
-			vehicle_id, vehicle_aux):
+			vehicle_id, vehicle_aux, flying):
 		return
 	peer_state.emit(id, pos, yaw, vel, anim, swinging, anchor, rope_tail,
 		wraps, weapon_kind, weapon_stowed, melee_mode, weapon_ammo,
@@ -955,8 +959,10 @@ func send_defeat(pos: Vector3, yaw: float, velocity: Vector3,
 		impulse: Vector3, headshot: bool) -> void:
 	if not active or not _valid_defeat(pos, yaw, velocity, impulse):
 		return
+	var presentation_velocity := _safe_defeat_velocity(velocity)
 	if is_host:
-		_relay_defeat(local_id(), pos, yaw, velocity, impulse, headshot)
+		_relay_defeat(local_id(), pos, yaw, presentation_velocity, impulse,
+			headshot)
 	else:
 		rpc_id(1, "srv_defeat", pos, yaw, velocity, impulse, headshot)
 
@@ -968,9 +974,11 @@ func srv_defeat(pos: Vector3, yaw: float, velocity: Vector3,
 	if not _registered_peer(sender) or not _allow_rate(sender, "defeat", 4) \
 			or not _valid_defeat(pos, yaw, velocity, impulse):
 		return
+	var presentation_velocity := _safe_defeat_velocity(velocity)
 	if not is_dedicated:
-		peer_defeated.emit(sender, pos, yaw, velocity, impulse, headshot)
-	_relay_defeat(sender, pos, yaw, velocity, impulse, headshot)
+		peer_defeated.emit(sender, pos, yaw, presentation_velocity, impulse,
+			headshot)
+	_relay_defeat(sender, pos, yaw, presentation_velocity, impulse, headshot)
 
 
 func _relay_defeat(sender: int, pos: Vector3, yaw: float, velocity: Vector3,
@@ -985,7 +993,8 @@ func _relay_defeat(sender: int, pos: Vector3, yaw: float, velocity: Vector3,
 func cl_defeat(defeated_id: int, pos: Vector3, yaw: float, velocity: Vector3,
 		impulse: Vector3, headshot: bool) -> void:
 	if names.has(defeated_id) and _valid_defeat(pos, yaw, velocity, impulse):
-		peer_defeated.emit(defeated_id, pos, yaw, velocity, impulse, headshot)
+		peer_defeated.emit(defeated_id, pos, yaw,
+			_safe_defeat_velocity(velocity), impulse, headshot)
 
 
 # ---- push-to-talk voice (isolated unreliable channel 1) -------------------
@@ -1197,11 +1206,13 @@ func _valid_state(pos: Vector3, yaw: float, vel: Vector3, anim: int,
 		_swinging: bool, anchor: Vector3, rope_tail: float,
 		wraps: PackedVector3Array, weapon_kind: int, weapon_ammo: int,
 		healing_progress: float, vehicle_kind := -1, vehicle_id := "",
-		vehicle_aux := Vector3.ZERO) -> bool:
+		vehicle_aux := Vector3.ZERO, flying := false) -> bool:
 	if not _finite_vec(pos) or not _finite_vec(vel) or not is_finite(yaw) \
 			or not is_finite(rope_tail) or not is_finite(healing_progress):
 		return false
-	if _outside_world(pos) or vel.length() > MAX_PLAYER_SPEED or anim < 0 \
+	var allow_fast_fall := vehicle_kind == -1 and not _swinging and not flying
+	if _outside_world(pos) or not _valid_actor_velocity(vel, allow_fast_fall) \
+			or anim < 0 \
 			or anim > 32 or weapon_kind < WEAPON_REVOLVER \
 			or weapon_kind > WEAPON_SNIPER or weapon_ammo < 0 \
 			or weapon_ammo > 999 or healing_progress < 0.0 \
@@ -1330,7 +1341,29 @@ func _valid_defeat(pos: Vector3, yaw: float, velocity: Vector3,
 		impulse: Vector3) -> bool:
 	return _finite_vec(pos) and _finite_vec(velocity) and _finite_vec(impulse) \
 		and is_finite(yaw) and not _outside_world(pos) \
-		and velocity.length() <= MAX_PLAYER_SPEED and impulse.length() <= 180.0
+		and _valid_actor_velocity(velocity, true) and impulse.length() <= 180.0
+
+
+## Live actors retain uncapped physical freefall. Once defeated, that velocity
+## seeds nine separate rigid bodies, so bound only the replicated ragdoll's
+## initial presentation impulse to the project's pre-existing network envelope.
+## This prevents one accepted fast-fall payload from becoming a physics attack
+## on every peer while preserving its direction and all ordinary momentum.
+func _safe_defeat_velocity(value: Vector3) -> Vector3:
+	return value.limit_length(MAX_PLAYER_SPEED)
+
+
+## Vehicles, swings, ascent and planar movement keep the strict speed envelope.
+## Only negative Y on an ordinary on-foot state gets the larger physically
+## unreachable network allowance required to replicate uncapped freefall.
+func _valid_actor_velocity(value: Vector3, allow_fast_fall: bool) -> bool:
+	if not _finite_vec(value):
+		return false
+	if not allow_fast_fall:
+		return value.length() <= MAX_PLAYER_SPEED
+	return Vector2(value.x, value.z).length() <= MAX_PLAYER_SPEED \
+		and value.y <= MAX_PLAYER_SPEED \
+		and value.y >= -MAX_ON_FOOT_FALL_REPLICATION_SPEED
 
 
 func _finite_vec(value: Vector3) -> bool:

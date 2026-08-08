@@ -280,6 +280,10 @@ func _apply_effect_quality() -> void:
 		seasonal_weather.set_quality(_high_effects, _fullscreen_performance)
 	if water_fx:
 		water_fx.set_effect_quality(_high_effects, _fullscreen_performance)
+	for vehicle_value in vehicles.values():
+		if is_instance_valid(vehicle_value):
+			(vehicle_value as Vehicle).set_effect_quality(_high_effects,
+				_fullscreen_performance)
 
 
 func set_season_override(next_season: SeasonalCycle.Season) -> void:
@@ -488,6 +492,7 @@ func spawn_vehicle(kind: int, vid: String, pos: Vector3,
 			v = SafariJeep.new()
 	v.setup(vid, self)
 	add_child(v)
+	v.set_effect_quality(_high_effects, _fullscreen_performance)
 	v.settle_at(pos, yaw)
 	vehicles[vid] = v
 	# Late joiners: apply the host's resting transform and any live claim.

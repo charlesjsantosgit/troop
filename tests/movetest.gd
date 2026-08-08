@@ -55,6 +55,79 @@ func reset(p, w) -> void:
 	await sim(45)
 
 
+func run_freefall(main) -> void:
+	print("FREEFALLTEST begin")
+	var w = main.world
+	var p = w.local_player
+	p.test_mode = true
+	await _test_physical_freefall(p, w)
+	print("FREEFALLTEST %d/%d %s" % [total - fails, total,
+		"PASS" if fails == 0 else "FAIL"])
+	get_tree().quit(0 if fails == 0 else 1)
+
+
+func _test_physical_freefall(p, w) -> void:
+	# Freefall uses physical Earth gravity forever: the horizontal safety bound
+	# remains, but neither the old 48 m/s terminal clamp nor the old 58 m/s
+	# whole-vector clamp may touch negative vertical velocity.
+	await reset(p, w)
+	var saved_collision_mask: int = p.collision_mask
+	p.collision_mask = 0
+	p.global_position = w.spawn_point() + Vector3.UP * 2000.0
+	p.reset_physics_interpolation()
+	p.state = p.S.AIR
+	var physics_dt: float = 1.0 / float(Engine.physics_ticks_per_second)
+	p.velocity = Vector3(0.0, 0.05, 0.0)
+	p.ti.jump_held = true
+	await sim(1)
+	var apex_remaining_dt: float = physics_dt - 0.05 / p.GRAVITY
+	var apex_expected_velocity: float = \
+		-p.FREEFALL_ACCELERATION * apex_remaining_dt
+	check("apex-crossing tick switches immediately to Earth gravity",
+		absf(p.velocity.y - apex_expected_velocity) < 0.002,
+		"vy=%.5f expected=%.5f" % [p.velocity.y, apex_expected_velocity])
+	p.ti.jump_held = false
+	p.velocity = Vector3.ZERO
+	await sim(60)
+	var from_rest_velocity: float = p.velocity.y
+	p.global_position = w.spawn_point() + Vector3.UP * 2000.0
+	p.reset_physics_interpolation()
+	p.velocity = Vector3(200.0, -90.0, 0.0)
+	await sim(2)
+	var fast_fall_expected: float = -90.0 \
+		- p.FREEFALL_ACCELERATION * physics_dt * 2.0
+	check("horizontal safety cap does not cap vertical freefall",
+		hspeed(p) <= p.ABS_MAX + 0.05 \
+			and absf(p.velocity.y - fast_fall_expected) < 0.01,
+		"h=%.2f vy=%.3f expected=%.3f" % [hspeed(p), p.velocity.y,
+			fast_fall_expected])
+	p.velocity.x = 0.0
+	p.velocity.z = 0.0
+	var fast_stage_start: float = p.velocity.y
+	await sim(60)
+	var early_fall_velocity: float = p.velocity.y
+	await sim(60)
+	var late_fall_velocity: float = p.velocity.y
+	var from_rest_acceleration: float = -from_rest_velocity / (60.0 * physics_dt)
+	var early_acceleration: float = -(early_fall_velocity - fast_stage_start) \
+		/ (60.0 * physics_dt)
+	var late_acceleration: float = -(late_fall_velocity - early_fall_velocity) \
+		/ (60.0 * physics_dt)
+	check("freefall accelerates constantly at 9.81 m/s^2",
+		absf(p.FREEFALL_ACCELERATION - 9.81) < 0.0001 \
+			and absf(from_rest_acceleration - 9.81) < 0.01 \
+			and absf(early_acceleration - 9.81) < 0.01 \
+			and absf(late_acceleration - 9.81) < 0.01,
+		"rest=%.3f early=%.3f late=%.3f" % [from_rest_acceleration,
+			early_acceleration, late_acceleration])
+	check("freefall has no gameplay terminal speed",
+		late_fall_velocity < -p.ABS_MAX \
+			and late_fall_velocity < fast_stage_start,
+		"vy=%.3f former_limit=%.1f" % [late_fall_velocity, p.ABS_MAX])
+	p.collision_mask = saved_collision_mask
+	await reset(p, w)
+
+
 func run(main) -> void:
 	print("MOVETEST begin (seed=%d)" % Gen.world_seed)
 	var w = main.world
@@ -277,11 +350,8 @@ func run(main) -> void:
 	await sim(5)
 	check("void respawn", p.global_position.y > -10.0, "y=%.1f" % p.global_position.y)
 
-	# 20 — absolute speed cap
-	p.state = p.S.AIR
-	p.velocity = Vector3(200, 40, 0)
-	await sim(2)
-	check("absolute speed cap", p.velocity.length() <= p.ABS_MAX + 1.0, "%.1f" % p.velocity.length())
+	# 20 — exact physical freefall, also exposed as the focused release gate.
+	await _test_physical_freefall(p, w)
 
 	# 21 — grab range is realistic: nothing targeted from afar, near vine acquired
 	await reset(p, w)
