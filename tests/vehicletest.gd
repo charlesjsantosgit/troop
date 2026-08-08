@@ -1006,7 +1006,8 @@ func run(main) -> void:
 		EULER_ORDER_YXZ)
 	var parked_bike_supported: bool = bike._has_parked_support()
 	check("parked bike sleeps without a numerical physics runaway",
-		bike.sleeping and bike.global_position.is_finite() \
+		bike.sleeping and bike.freeze and bike._kickstand_engaged \
+			and bike.global_position.is_finite() \
 			and bike.linear_velocity.is_finite() \
 			and bike.angular_velocity.is_finite() \
 			and bike.linear_velocity.length() < 0.2 \
@@ -1020,6 +1021,11 @@ func run(main) -> void:
 			bike.physics_recovery_count, bike.global_position,
 			bike.linear_velocity, bike.angular_velocity, pre_dismount_bike_pose,
 			str(pre_dismount_near_ground)])
+	var remounted_from_stand: bool = await mount(p, w, bike)
+	check("mounting retracts the bike stand before controls resume",
+		remounted_from_stand and not bike.freeze \
+			and not bike._kickstand_engaged and bike.driver == p)
+	await dismount(p)
 
 	# --- airboat over grass ---------------------------------------------------
 	mounted = await mount(p, w, boat)

@@ -52,6 +52,7 @@ var _handlebar: Node3D
 var _headlight: SpotLight3D
 var _shock_spring: MeshInstance3D
 var _body_visual: Node3D
+var _kickstand_engaged := false
 
 
 func _init() -> void:
@@ -162,6 +163,14 @@ func ejects_rider_on_crash() -> bool:
 	return true
 
 
+func begin_drive(player: Node3D) -> void:
+	# A frozen parked body represents the three-point support of both tires and
+	# the sidestand. Retract it before Vehicle applies the rider payload so the
+	# chassis is fully physical again from the first driven tick.
+	_kickstand_engaged = false
+	super(player)
+
+
 func end_drive() -> Vector3:
 	# A grounded, upright rider can place the bike directly on its kickstand.
 	# Requiring both wheel rays prevents Ctrl-wheelie or low-speed hop dismounts
@@ -173,13 +182,69 @@ func end_drive() -> Vector3:
 	var exit_position := super()
 	_reset_special_physics_state()
 	if can_set_stand:
-		global_basis = Basis.from_euler(Vector3(0.0, pose.y, -0.12),
-			EULER_ORDER_YXZ)
-		linear_velocity = Vector3.ZERO
-		angular_velocity = Vector3.ZERO
-		sleeping = true
-		reset_physics_interpolation()
+		_engage_kickstand(pose.y)
 	return exit_position
+
+
+func apply_rest_state(pos: Vector3, yaw: float, pitch: float,
+		roll: float) -> void:
+	# Rest transforms are authoritative on late-joining peers. Reconstruct the
+	# same physical stand state instead of letting a replicated parked bike fall
+	# over as soon as its kinematic driver claim is released.
+	_kickstand_engaged = false
+	freeze = false
+	super(pos, yaw, pitch, roll)
+	if absf(pitch) < 0.03 and absf(angle_difference(roll, -0.12)) < 0.03 \
+			and _both_wheels_near_ground():
+		_engage_kickstand(yaw)
+
+
+func _engage_kickstand(yaw: float) -> void:
+	global_basis = Basis.from_euler(Vector3(0.0, yaw, -0.12),
+		EULER_ORDER_YXZ)
+	# Keep at least one real tire ray in contact after rotating about the chassis
+	# origin. Without this small ground fit, a near-limit suspension ray can sit
+	# a few millimetres high and make a parked bike visibly hover.
+	var closest_clearance := INF
+	for wheel in wheels:
+		var attach := global_position + global_basis * wheel.local_pos
+		var rest := wheel.radius + wheel.travel
+		var probe: Dictionary = probe_ground(attach, rest + 0.08)
+		if is_finite(float(probe.distance)):
+			closest_clearance = minf(closest_clearance,
+				float(probe.distance) - rest)
+	if is_finite(closest_clearance) and closest_clearance > -0.002:
+		global_position -= global_basis.y * (closest_clearance + 0.004)
+	_refresh_kickstand_contacts()
+	_update_visuals(0.0)
+	linear_velocity = Vector3.ZERO
+	angular_velocity = Vector3.ZERO
+	_kickstand_engaged = true
+	# The authored stand is the third support point that a two-ray motorcycle
+	# cannot otherwise express. Freeze only this verified, walking-pace parked
+	# state; begin_drive always retracts it before accepting controls.
+	freeze_mode = RigidBody3D.FREEZE_MODE_STATIC
+	freeze = true
+	sleeping = true
+	reset_physics_interpolation()
+
+
+func _refresh_kickstand_contacts() -> void:
+	for wheel in wheels:
+		var attach := global_position + global_basis * wheel.local_pos
+		var rest := wheel.radius + wheel.travel
+		var probe: Dictionary = probe_ground(attach, rest + 0.02)
+		wheel.in_contact = float(probe.distance) < rest
+		if not wheel.in_contact:
+			continue
+		wheel.contact_normal = probe.normal
+		wheel.compression = clampf(rest - float(probe.distance), 0.0,
+			wheel.travel)
+		wheel.compression_velocity = 0.0
+		wheel.contact_point = attach - global_basis.y \
+			* (rest - wheel.compression)
+		wheel.spin = 0.0
+		wheel.load = wheel.spring_rate * wheel.compression
 
 
 func _both_wheels_near_ground() -> bool:
