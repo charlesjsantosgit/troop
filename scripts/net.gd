@@ -1111,22 +1111,24 @@ func srv_state(pos: Vector3, yaw: float, vel: Vector3, anim: int,
 			healing_progress: float, flying := false, vehicle_kind := -1,
 			vehicle_id := "", vehicle_aux := Vector3.ZERO) -> void:
 	var sender := multiplayer.get_remote_sender_id()
+	var authorized_flying := _server_authorized_flying(sender, flying)
 	if not _registered_peer(sender) \
 			or not _allow_rate(sender, "state", MAX_STATE_PACKETS_PER_SECOND) \
 			or not _valid_state(pos, yaw, vel, anim,
 			swinging, anchor, rope_tail, wraps, weapon_kind, weapon_ammo,
-			healing_progress, vehicle_kind, vehicle_id, vehicle_aux, flying) \
+			healing_progress, vehicle_kind, vehicle_id, vehicle_aux,
+			authorized_flying) \
 			or not _sender_owns_vehicle_state(sender, vehicle_kind, vehicle_id):
 		return
 	_remember_authoritative_state_position(sender, pos, vehicle_kind, vehicle_id)
 	peer_state.emit(sender, pos, yaw, vel, anim, swinging, anchor, rope_tail,
 		wraps, weapon_kind, weapon_stowed, melee_mode, weapon_ammo,
-		weapon_reloading, healing_progress, flying, vehicle_kind, vehicle_id,
-		vehicle_aux)
+		weapon_reloading, healing_progress, authorized_flying, vehicle_kind,
+		vehicle_id, vehicle_aux)
 	rpc("cl_state", sender, pos, yaw, vel, anim, swinging, anchor, rope_tail,
 		wraps, weapon_kind, weapon_stowed, melee_mode, weapon_ammo,
-		weapon_reloading, healing_progress, flying, vehicle_kind, vehicle_id,
-		vehicle_aux)
+		weapon_reloading, healing_progress, authorized_flying, vehicle_kind,
+		vehicle_id, vehicle_aux)
 
 
 @rpc("authority", "call_remote", "unreliable_ordered", 0)
@@ -2164,6 +2166,14 @@ func _valid_admin_target_arg(args: Dictionary) -> bool:
 
 func _registered_peer(id: int) -> bool:
 	return is_host and id > 1 and _registered.has(id) and names.has(id)
+
+
+## Flight mode is an admin ability. Never relay a client-authored wing state
+## unless the sender is both registered and present in the server's live admin
+## session map. Unauthorized true values are cleared instead of rejecting the
+## rest of an otherwise valid movement packet.
+func _server_authorized_flying(sender: int, requested_flying: bool) -> bool:
+	return requested_flying and _registered_peer(sender) and _admins.has(sender)
 
 
 func _sanitize_name(value: String, id: int) -> String:

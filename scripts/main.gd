@@ -198,6 +198,11 @@ func _ready() -> void:
 			var vt_node = load("res://tests/vehicletest.gd").new()
 			add_child(vt_node)
 			vt_node.call_deferred("run", self)
+		"wingtest":
+			mode = "wingtest"
+			var wing_test = load("res://tests/wingtest.gd").new()
+			add_child(wing_test)
+			wing_test.call_deferred("run")
 		"vehicleworldtest":
 			mode = "vehicleworldtest"
 			_start_solo("WorldTester", 1337, 2)
@@ -1411,6 +1416,9 @@ func _do_debug_shot(what: String, out: String) -> void:
 			for i in range(60):
 				await get_tree().process_frame
 		"debug-wings":
+			# Noon makes the ivory vane relief, feather overlap, and closed
+			# undersides readable instead of silhouetting the wings against stars.
+			world.set_time_of_day_override(12.0)
 			cam.queue_free()
 			p.set_fly_mode(true)
 			p.ti.jump_held = true

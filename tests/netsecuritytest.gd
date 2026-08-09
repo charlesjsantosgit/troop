@@ -48,20 +48,22 @@ func _run() -> void:
 		"registration identity canonicalizes public keys without exposing private key material")
 	var nonce_a := crypto.generate_random_bytes(net.ADMIN_NONCE_BYTES)
 	var nonce_b := crypto.generate_random_bytes(net.ADMIN_NONCE_BYTES)
+	var test_version := str(ProjectSettings.get_setting(
+		"application/config/version", "0.0.0"))
 	var context_a: PackedByteArray = net._registration_context_hash(88,
-		"Target", net.PROTOCOL_VERSION, "0.3.6", fingerprint_a, nonce_a)
+		"Target", net.PROTOCOL_VERSION, test_version, fingerprint_a, nonce_a)
 	var dirty_name := "  Target\t Pilot\n" + "Long".repeat(8)
 	var clean_name: String = net._sanitize_name(dirty_name, 88)
 	var dirty_name_context: PackedByteArray = net._registration_context_hash(88,
-		dirty_name, net.PROTOCOL_VERSION, "0.3.6", fingerprint_a, nonce_a)
+		dirty_name, net.PROTOCOL_VERSION, test_version, fingerprint_a, nonce_a)
 	var clean_name_context: PackedByteArray = net._registration_context_hash(88,
-		clean_name, net.PROTOCOL_VERSION, "0.3.6", fingerprint_a, nonce_a)
+		clean_name, net.PROTOCOL_VERSION, test_version, fingerprint_a, nonce_a)
 	_check(clean_name.length() <= net.MAX_NAME_LENGTH \
 		and not clean_name.contains("\t") and not clean_name.contains("\n") \
 		and dirty_name_context == clean_name_context,
 		"registration proof canonicalizes filtered and truncated player names identically")
 	var changed_context: PackedByteArray = net._registration_context_hash(88,
-		"Target", net.PROTOCOL_VERSION, "0.3.6", fingerprint_a, nonce_b)
+		"Target", net.PROTOCOL_VERSION, test_version, fingerprint_a, nonce_b)
 	var signature_a: PackedByteArray = net._sign_registration_context(
 		context_a, key_a)
 	var wrong_signature: PackedByteArray = net._sign_registration_context(
@@ -157,6 +159,18 @@ func _run() -> void:
 	gen.debug_world = false
 	gen.setup(1337)
 	net.world_seed = 1337
+	var fast_fall := Vector3(12.0, -800.0, 5.0)
+	var empty_wraps := PackedVector3Array()
+	var admin_flying: bool = net._server_authorized_flying(77, true)
+	var non_admin_flying: bool = net._server_authorized_flying(88, true)
+	var non_admin_grounded: bool = net._server_authorized_flying(88, false)
+	var stripped_flight_packet_valid: bool = net._valid_state(
+		Vector3(0, 1000, 0), 0.0, fast_fall, 0, false, Vector3.ZERO,
+		0.0, empty_wraps, net.WEAPON_REVOLVER, 0, 0.0, -1, "",
+		Vector3.ZERO, non_admin_flying)
+	_check(admin_flying and not non_admin_flying and not non_admin_grounded \
+		and stripped_flight_packet_valid,
+		"movement relay keeps admin flight, clears non-admin wings, and preserves the remaining valid packet")
 	_check(net._admin_target_fingerprint(77, 88) == fingerprint_a \
 		and net._admin_target_fingerprint(77, 77).is_empty() \
 		and net._admin_target_fingerprint(77, 99).is_empty() \
@@ -232,7 +246,7 @@ func _run() -> void:
 		"server time changes re-anchor one shared cycle and emit it to every world")
 	net._peer_key_fingerprints.erase(88)
 	var replay_context: PackedByteArray = net._registration_context_hash(99,
-		"Replay", net.PROTOCOL_VERSION, "0.3.6", fingerprint_a, nonce_a)
+		"Replay", net.PROTOCOL_VERSION, test_version, fingerprint_a, nonce_a)
 	var replay_signature: PackedByteArray = net._sign_registration_context(
 		replay_context, key_a)
 	net._pending_registrations[99] = {
@@ -347,8 +361,6 @@ func _run() -> void:
 	_check(net.MAX_COLLECTED_IDS == 200000 and net.MAX_CHEST_CLAIMS == 50000,
 		"authoritative persistent-ID stores have explicit snapshot-aligned ceilings")
 
-	var empty_wraps := PackedVector3Array()
-	var fast_fall := Vector3(12.0, -800.0, 5.0)
 	_check(net._valid_state(Vector3(0, 1000, 0), 0.0, fast_fall, 0,
 		false, Vector3.ZERO, 0.0, empty_wraps, net.WEAPON_REVOLVER, 0,
 		0.0, -1, "", Vector3.ZERO),

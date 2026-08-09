@@ -3,6 +3,6 @@
   "minimum_bootstrap": 1,
   "network_protocol": 6,
   "release_title": "TROOP 0.3",
-  "notes": "TROOP 0.3.6 expands the runway to 1,260 metres with six jet hangars; adds connected packed-dirt roads and hillier terrain; improves bike coasting turns, throttle-driven wheelies, parked stability, vehicle cameras, left-hand-drive Jeep seating, and hands-off jet stability; keeps remote jets visible beyond ten miles with distance-aware turbine audio based on a 130 dB source reference; limits enemy outlines to the outer body; adds nonce-signed installation-key admin grants, an authority-validated replicated vehicle catalog, and multiplayer-wide /time changes; and adds a Graphics page with an FPS meter plus Unlimited, 480, lower, and Custom limits.",
+  "notes": "TROOP 0.3.7 remakes admin-flight angel wings with 182 layered high-detail feathers, curved asymmetric vanes, natural ivory shading, and articulated shoulder, elbow, wrist, and covert motion. The gentle wingbeat responds to climbing and gliding, stays smooth across multiplayer state updates, and uses six GPU-instanced render batches for stable performance. Multiplayer now strips forged non-admin flight states while preserving valid movement packets.",
   "requires_installer": true
 }
