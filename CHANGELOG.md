@@ -29,6 +29,9 @@ the same version number.
   the front suspension and unloads the rear without destabilizing the chassis.
 - Coasting steering, wheelie response, and vehicle wheel behavior retain the
   easier control feel while staying physically readable.
+- Holding W and Up for takeoff now latches the runway heading until the pilot
+  gives deliberate A/D or horizontal mouse input, so small tire-solver yaw can
+  no longer accumulate into a sideways departure on a slower machine.
 - Local and remote monkey rigs now restore every authored body transform and
   clear stale look, recoil, hand, and seated solvers after vehicle exit, defeat,
   and repeated revive. Leaving a plane can no longer scatter limbs until the

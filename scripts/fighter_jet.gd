@@ -76,6 +76,8 @@ var _gear_position := 1.0          # 1 = down/locked, 0 = tucked away
 var _flap_position := 1.0
 var _aim := Vector3.FORWARD
 var _pitch_input := 0.0             # arrows: +1 nose up, -1 nose down
+var _assisted_heading := Vector3.FORWARD
+var _assisted_heading_active := false
 var _wheel_brakes := false
 var _roll_override := 0.0
 var _stall_beep_t := 0.0
@@ -192,6 +194,13 @@ func mount_verb() -> String:
 	return "PILOT"
 
 
+func begin_drive(player: Node3D) -> void:
+	super(player)
+	_pitch_input = 0.0
+	_assisted_heading = _flat_heading(global_basis.z)
+	_assisted_heading_active = false
+
+
 ## Ground exits need a stopped jet; airborne the monkey can always bail out.
 func allows_exit() -> bool:
 	if _wheels_grounded_count() > 0:
@@ -210,7 +219,28 @@ func _wheels_grounded_count() -> int:
 func set_driver_view(aim: Vector3, inp: Dictionary) -> void:
 	if aim.length_squared() > 0.01:
 		_aim = aim.normalized()
-	_pitch_input = clampf(float(inp.get("vehicle_pitch", 0.0)), -1.0, 1.0)
+	var was_assisted := _assisted_heading_active
+	var next_pitch := clampf(float(inp.get("vehicle_pitch", 0.0)), -1.0, 1.0)
+	var next_assisted := absf(next_pitch) > 0.04
+	if next_assisted:
+		var flat_forward := _flat_heading(global_basis.z)
+		var flat_aim := _flat_heading(_aim)
+		if not was_assisted:
+			# Capture the runway/compass heading on the arrow's rising edge.
+			# An untouched dot tracks the nose, so continuing to sample it would turn
+			# random tire yaw into the new target and let small errors accumulate.
+			_assisted_heading = flat_aim
+		elif absf(input_steer) > 0.04:
+			# A/D is deliberate heading input. Follow the pilot's turn so releasing
+			# the key holds the new course instead of snapping back to the runway.
+			_assisted_heading = flat_forward
+		elif absf(flat_forward.signed_angle_to(flat_aim, Vector3.UP)) \
+				> HANDS_OFF_AIM_DEADZONE * 1.5:
+			# A visible horizontal mouse-dot command remains authoritative while
+			# Up/Down owns only pitch.
+			_assisted_heading = flat_aim
+	_assisted_heading_active = next_assisted
+	_pitch_input = next_pitch
 	_wheel_brakes = bool(inp.get("crouch_held", false))
 	if bool(inp.get("vehicle_gear_just", false)):
 		_toggle_gear()
@@ -262,6 +292,7 @@ func _simulate(dt: float) -> void:
 		throttle_setpoint = 0.0
 		afterburner = false
 		_pitch_input = 0.0
+		_assisted_heading_active = false
 	spool = move_toward(spool, throttle_setpoint, 0.42 * dt)
 	engine.rpm = lerpf(62.0, 100.0, spool)
 	airbrake = move_toward(airbrake, 1.0 if input_handbrake else 0.0,
@@ -347,7 +378,10 @@ func _simulate(dt: float) -> void:
 ## damp yaw, and keep the wings level until rotation. Manual A/D progressively
 ## releases heading hold, preserving deliberate taxi steering.
 func _apply_ground_run_stability() -> void:
-	_apply_heading_hold(18.0, 7.0)
+	# Arrow-assisted takeoff gets a firm but bounded runway yaw damper. Ordinary
+	# taxi/mouse steering retains the softer controller below.
+	_apply_heading_hold(26.0 if _assisted_heading_active else 18.0,
+		9.0 if _assisted_heading_active else 7.0)
 	var forward_axis := global_basis.z.normalized()
 	var level_axis := global_basis.y.normalized().cross(Vector3.UP)
 	var roll_error := level_axis.dot(forward_axis)
@@ -357,7 +391,9 @@ func _apply_ground_run_stability() -> void:
 
 func _apply_heading_hold(error_gain: float, damping_gain: float) -> void:
 	var flat_forward := Vector3(global_basis.z.x, 0.0, global_basis.z.z)
-	var flat_aim := Vector3(_aim.x, 0.0, _aim.z)
+	var heading_target := _assisted_heading \
+		if _assisted_heading_active else _aim
+	var flat_aim := Vector3(heading_target.x, 0.0, heading_target.z)
 	if flat_forward.length_squared() > 0.001 \
 			and flat_aim.length_squared() > 0.001:
 		flat_forward = flat_forward.normalized()
@@ -367,6 +403,15 @@ func _apply_heading_hold(error_gain: float, damping_gain: float) -> void:
 		var yaw_rate := angular_velocity.dot(Vector3.UP)
 		apply_torque(Vector3.UP * mass * (heading_error * error_gain * heading_hold
 			- yaw_rate * damping_gain))
+
+
+func _flat_heading(direction: Vector3) -> Vector3:
+	var flat := Vector3(direction.x, 0.0, direction.z)
+	if flat.length_squared() > 0.001:
+		return flat.normalized()
+	var fallback := Vector3(global_basis.z.x, 0.0, global_basis.z.z)
+	return fallback.normalized() if fallback.length_squared() > 0.001 \
+		else Vector3.FORWARD
 
 
 ## Fly-by-wire pursuit of the camera aim: roll to put the target in the pull
