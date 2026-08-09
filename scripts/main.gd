@@ -198,6 +198,12 @@ func _ready() -> void:
 			var vt_node = load("res://tests/vehicletest.gd").new()
 			add_child(vt_node)
 			vt_node.call_deferred("run", self)
+		"suspensiontest":
+			_start_debug_world("SuspensionTester")
+			mode = "suspensiontest"
+			var suspension_test = load("res://tests/suspensiontest.gd").new()
+			add_child(suspension_test)
+			suspension_test.call_deferred("run", self)
 		"wingtest":
 			mode = "wingtest"
 			var wing_test = load("res://tests/wingtest.gd").new()
@@ -479,7 +485,7 @@ func _start_debug_world(pname: String) -> void:
 		Vector3(-6.0, 2.2, -4.0))
 	if chat_box:
 		chat_box.add_system_line("Debug world — parkour east, range south, "
-			+ "ropes west. You are admin here.")
+			+ "ropes west, suspension lab northwest. You are admin here.")
 
 
 func _start_solo(pname: String, seed_v: int, warm_r: int) -> void:
@@ -1415,6 +1421,50 @@ func _do_debug_shot(what: String, out: String) -> void:
 			cam.make_current()
 			for i in range(60):
 				await get_tree().process_frame
+		"debug-suspension-course":
+			# Wide, low-angle proof of all four severity lanes plus a real Jeep
+			# resting diagonally on the cross-axle surface.
+			if hud:
+				hud.visible = false
+			if chat_box:
+				chat_box.visible = false
+			world.set_time_of_day_override(12.0)
+			p.set_physics_process(false)
+			p.rig.visible = false
+			var suspension_course: DebugWorldBuilder
+			for child in world.get_children():
+				if child is DebugWorldBuilder:
+					suspension_course = child
+					break
+			var course_jeep := world.vehicle_by_id("v:debug#jeep") as SafariJeep
+			if suspension_course and course_jeep:
+				var lane_index := 2
+				var lane_x: float = DebugWorldBuilder.ROUGH_COURSE_LANE_CENTERS[
+					lane_index]
+				var lane_z := DebugWorldBuilder.ROUGH_COURSE_START_Z + 34.0
+				course_jeep.global_basis = Basis(Vector3.UP, 0.0)
+				course_jeep.global_position = Vector3(lane_x,
+					suspension_course.rough_course_world_height(
+						lane_index, lane_x, lane_z) + 0.82, lane_z)
+				course_jeep.linear_velocity = Vector3.ZERO
+				course_jeep.angular_velocity = Vector3.ZERO
+				course_jeep.freeze = false
+				course_jeep.sleeping = false
+				course_jeep.reset_physics_interpolation()
+				for i in range(120):
+					await get_tree().physics_frame
+				course_jeep.linear_velocity = Vector3.ZERO
+				course_jeep.angular_velocity = Vector3.ZERO
+				course_jeep.freeze = true
+				course_jeep.reset_physics_interpolation()
+				course_jeep._update_visuals(0.0)
+				_add_vehicle_preview_rider(course_jeep, "Kito")
+			cam.fov = 60.0
+			cam.global_position = Vector3(-27.2, 13.5, 19.0)
+			cam.look_at(Vector3(-29.0, 2.65, 68.0))
+			cam.make_current()
+			for i in range(60):
+				await get_tree().process_frame
 		"debug-wings":
 			# Noon makes the ivory vane relief, feather overlap, and closed
 			# undersides readable instead of silhouetting the wings against stars.
@@ -1660,6 +1710,7 @@ func _do_debug_shot(what: String, out: String) -> void:
 					hud._update_aircraft_aim_reticle(false)
 				await get_tree().process_frame
 	if what != "debug-wings" and what != "debug-course" \
+			and what != "debug-suspension-course" \
 			and what != "debug-vehicles" and what != "debug-ride" \
 			and what != "debug-bike-fit" \
 			and what != "debug-exhaust-ground" \

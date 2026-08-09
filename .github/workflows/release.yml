@@ -107,6 +107,8 @@ jobs:
           "$GODOT_BIN" --headless --path . res://scenes/main.tscn \
             --quit-after 180000 -- vehicletest
           "$GODOT_BIN" --headless --path . res://scenes/main.tscn \
+            --quit-after 60000 -- suspensiontest
+          "$GODOT_BIN" --headless --path . res://scenes/main.tscn \
             --quit-after 60000 -- vehicleworldtest
 
       - name: Build installers and cross-platform content pack
