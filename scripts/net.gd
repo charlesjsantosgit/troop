@@ -48,7 +48,7 @@ signal moon_cheese_purchase_result(quantity: int, accepted: bool,
 const PORT := 30623
 const MAX_CLIENTS := 24
 const CHANNEL_COUNT := 2
-const PROTOCOL_VERSION := 8
+const PROTOCOL_VERSION := 9
 const MAX_NAME_LENGTH := 20
 const REGISTRATION_TIMEOUT_SECONDS := 5.0
 const MAX_STATE_PACKETS_PER_SECOND := 30
@@ -87,13 +87,19 @@ const ROCKET_RECOVERY_SECONDS := 18.0
 const ROCKET_SYNC_SECONDS := 1.0
 const MOON_CHEESE_PRICE := 3
 const MAX_MOON_CHEESE_QUANTITY := 8
-const MOON_WORLD_ORIGIN_Y := 300000.0
+## Keep the playable Moon outside every ordinary aircraft/terrain band without
+## pushing CharacterBody and HeightMap contacts beyond useful float precision.
+## At the former y=300,000 origin, 32-bit transforms advanced in ~3 cm steps and
+## a low-gravity monkey could penetrate the ground before collision recovery.
+## y=48,000 retains sub-4 mm coordinate steps; the 36 km realm boundary still
+## leaves six times the planet's tallest 6 km summit for Earth aviation.
+const MOON_WORLD_ORIGIN_Y := 48000.0
 const MOON_CHEESE_SHOP_POSITION := Vector3(58.0, MOON_WORLD_ORIGIN_Y, -32.0)
 const MOON_CHEESE_SHOP_RANGE := 12.0
 # Earth terrain and aircraft live far below the elevated lunar scene. Keep a
 # wide dead band between them so a packet can belong to exactly one playable
 # realm, while still leaving ample headroom for high-altitude Earth flight.
-const MOON_REALM_MIN_Y := MOON_WORLD_ORIGIN_Y * 0.5
+const MOON_REALM_MIN_Y := 36000.0
 const MAX_COMBAT_ORIGIN_DISTANCE := 12.0
 const ADMIN_NONCE_BYTES := 32
 const ADMIN_BOOTSTRAP_PROOF_BYTES := 32

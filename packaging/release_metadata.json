@@ -1,8 +1,8 @@
 {
   "godot_compatibility": "4.7",
   "minimum_bootstrap": 1,
-  "network_protocol": 8,
-  "release_title": "TROOP 0.4.1 — FLIGHT READY",
-  "notes": "TROOP 0.4.1 publishes the previously local planet, Moon, road, vehicle, and character-recovery fixes in a fresh Windows build. Protocol v8 keeps the revised one-minute lunar voyage and multiplayer state authoritative. The rocket now climbs vertically before pointing toward the Moon, fitted articulated space suits move with the monkey, and shared 4K Pangaea Earth and lunar textures sharpen orbital views. Organic coast and hillside freeways gain deterministic bridges and warm-lit mountain tunnels. Altitude-aware terrain, canopy, sky, and collision streaming remain bounded at aircraft speed, with seamless LOD handoffs and mountain look-ahead. Motorcycle braking and handling are steadier, while vehicle dismount, defeat, and repeated revive restore every monkey body part without requiring a reconnect. Because the multiplayer protocol and project settings changed, Windows players must run the 0.4.1 installer once.",
+  "network_protocol": 9,
+  "release_title": "TROOP 0.4.2 — MOON WALK FIX",
+  "notes": "TROOP 0.4.2 fixes the Moon touchdown movement lock. The lunar landing pad now has reliable capsule contact, the Moon runs in a precision-safe coordinate band, and low-gravity ground recovery uses an appropriate collision margin. Touchdown also reapplies the on-foot collider after the final teleport and restores captured gameplay input, so W/A/S/D works as soon as the voyage camera returns. The regression gate now drives a real monkey from the rocket across the pad and onto generated lunar terrain. Protocol v9 keeps the revised Moon coordinates authoritative in multiplayer. Because the multiplayer protocol and project settings changed, Windows players must run the 0.4.2 installer once.",
   "requires_installer": true
 }

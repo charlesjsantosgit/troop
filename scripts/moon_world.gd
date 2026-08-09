@@ -233,6 +233,18 @@ func _build_terrain() -> void:
 	terrain_body.collision_layer = 1
 	terrain_body.collision_mask = 1
 	terrain_body.add_child(collision)
+	# The landing core is intentionally flat in height_at(). Give that critical
+	# spawn area a simple convex contact as well: convex sweeps are the most
+	# reliable way to recover a small CharacterBody immediately after a remote
+	# realm teleport, before it starts walking onto the surrounding terrain.
+	var landing_contact := CollisionShape3D.new()
+	landing_contact.name = "LunarLandingPadContact"
+	var landing_cylinder := CylinderShape3D.new()
+	landing_cylinder.radius = 6.0
+	landing_cylinder.height = 1.0
+	landing_contact.shape = landing_cylinder
+	landing_contact.position = Vector3(LANDING_XZ.x, -0.5, LANDING_XZ.y)
+	terrain_body.add_child(landing_contact)
 	add_child(terrain_body)
 
 

@@ -279,7 +279,7 @@ func _process(delta: float) -> void:
 		if _local_player_is_voyaging(state):
 			_update_voyage_camera(delta, -1.0, state)
 		elif voyage_camera.current:
-			_restore_player_camera()
+			_restore_player_camera(true)
 		_update_mission_label(state)
 	elif phase == Net.RocketMissionPhase.SPLASHDOWN_RECOVERY:
 		_update_recovery_label(state)
@@ -796,10 +796,13 @@ func _apply_local_realm(realm: int) -> void:
 			moon_world.visible = true
 			_ensure_local_suit()
 			player.set_environment_gravity(MoonWorld.LUNAR_GRAVITY)
-			player.set_expedition_locked(false)
 			var landing := moon_world.to_global(moon_world.actor_landing_position())
 			player.admin_teleport(landing)
-			_restore_player_camera()
+			# Release after the final transform write. Manifest and realm packets can
+			# arrive in either order, so this idempotently makes the on-foot capsule
+			# authoritative at the exact touchdown location.
+			player.set_expedition_locked(false)
+			_restore_player_camera(true)
 			show_notice("LUNAR TOUCHDOWN · 1.62 m/s² · vacuum suit active · I inventory")
 		_:
 			moon_world.visible = false
@@ -824,7 +827,7 @@ func _apply_local_realm(realm: int) -> void:
 				player.admin_teleport(rocket.ocean_splashdown_transform.origin
 					+ Vector3(4.0, 1.0, 0.0))
 			elif previous_realm == Net.PlayerRealm.TRANSIT \
-					or player.global_position.y > Net.MOON_WORLD_ORIGIN_Y * 0.5:
+					or player.global_position.y >= Net.MOON_REALM_MIN_Y:
 				# Admin extraction is not an arrival. Never preserve a cinematic cabin
 				# coordinate in the playable Earth realm, even early in ascent when it
 				# remains below the broad Moon/Earth network separator.
@@ -834,9 +837,23 @@ func _apply_local_realm(realm: int) -> void:
 	local_realm_changed.emit(realm)
 
 
-func _restore_player_camera() -> void:
+func _restore_player_camera(capture_gameplay_input := false) -> void:
 	if world.local_player and world.local_player.cam:
 		world.local_player.cam.make_current()
+	if capture_gameplay_input and _can_capture_gameplay_input():
+		Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
+
+
+func _can_capture_gameplay_input() -> bool:
+	if DisplayServer.get_name() == "headless" or is_ui_open() \
+			or not main or not is_instance_valid(main):
+		return false
+	# Do not steal the cursor from a pause/settings screen that remained open
+	# during a network realm update. In ordinary touchdown there is no modal UI,
+	# so W/A/S/D becomes live on the exact frame the player camera returns.
+	var main_menu: Variant = main.get("menu")
+	var pause_menu: Variant = main.get("pause_menu")
+	return not is_instance_valid(main_menu) and not is_instance_valid(pause_menu)
 
 
 func _on_voyage_progress(progress: float, _elapsed: float,

@@ -1,5 +1,28 @@
 # TROOP changelog
 
+## 0.4.2 — MOON WALK FIX
+
+This patch fixes the lunar touchdown state that could leave a monkey planted on
+the Moon with movement input ignored or unreliable ground contact.
+
+### Playable lunar touchdown
+
+- Touchdown now restores the player camera and captured gameplay input, so
+  W/A/S/D is live as soon as the one-minute voyage hands control back.
+- The on-foot collision capsule is reasserted after the final landing teleport.
+  This repairs either ordering of the separate multiplayer realm and rocket
+  manifest updates instead of preserving a stale seated/disabled collider.
+- A solid convex contact matches the flat landing-pad core, preventing a small
+  low-gravity capsule from being trapped or passing through on its first step.
+- The playable Moon moves from the imprecise 300 km physics band to 48 km,
+  retaining ample separation from Earth while improving contact precision.
+- Lunar gravity now uses a two-centimetre recovery margin and restores the
+  ordinary Earth margin automatically on return.
+- The integration gate now lands the real player, capsule-casts against the
+  pad, then walks away from the rocket and onto generated lunar terrain.
+- Multiplayer protocol **9** keeps Moon positions and realm validation aligned.
+  Windows players must run the **0.4.2 installer** once for this protocol update.
+
 ## 0.4.1 — FLIGHT READY
 
 This patch publishes the finished TROOP 0.4 planet and vehicle work in a new

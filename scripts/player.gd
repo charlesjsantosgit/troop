@@ -23,6 +23,12 @@ const OVERSPEED_DRAG := 5.0
 # stronger authored traversal gravity below so changing freefall does not make
 # vine swings or downhill slides lose their established momentum.
 const FREEFALL_ACCELERATION := 9.81
+const DEFAULT_COLLISION_SAFE_MARGIN := 0.001
+# TROOP keeps the Moon in a remote vertical coordinate band so Earth and lunar
+# players can coexist in one physics space. Its precision-safe y=48,000 origin
+# still uses ~4 mm float increments, so a two-centimetre recovery margin keeps
+# low-gravity contact stable without visibly lifting the 26 cm capsule.
+const LUNAR_COLLISION_SAFE_MARGIN := 0.02
 const GRAVITY := 20.0
 const JUMP_VEL := 8.8
 const JUMP_CUT := 26.0
@@ -199,6 +205,7 @@ func _ready() -> void:
 	# every knoll — jumps still clear it because move_and_slide skips the
 	# snap while velocity points away from the floor
 	floor_snap_length = 0.8
+	safe_margin = DEFAULT_COLLISION_SAFE_MARGIN
 
 	body_hitbox = CombatHitbox.new()
 	body_hitbox.name = "BodyHitbox"
@@ -1052,10 +1059,14 @@ func _update_nameplate() -> void:
 func set_environment_gravity(acceleration_mps2: float) -> void:
 	environment_gravity_mps2 = clampf(acceleration_mps2, 0.1,
 		FREEFALL_ACCELERATION)
+	safe_margin = LUNAR_COLLISION_SAFE_MARGIN \
+		if environment_gravity_mps2 < FREEFALL_ACCELERATION * 0.5 \
+		else DEFAULT_COLLISION_SAFE_MARGIN
 
 
 func reset_environment_gravity() -> void:
 	environment_gravity_mps2 = FREEFALL_ACCELERATION
+	safe_margin = DEFAULT_COLLISION_SAFE_MARGIN
 
 
 ## Move this actor to the equivalent local chart image after crossing the
@@ -1081,25 +1092,33 @@ func apply_planet_wrap(canonical_xz: Vector2, yaw_delta: float) -> void:
 
 
 func set_expedition_locked(locked: bool) -> void:
-	if expedition_locked == locked:
-		return
+	var changed := expedition_locked != locked
 	if locked:
-		if vehicle:
-			exit_vehicle()
-		if state == S.SWING:
-			_release(false)
+		if changed:
+			if vehicle:
+				exit_vehicle()
+			if state == S.SWING:
+				_release(false)
 		velocity = Vector3.ZERO
-		_collision_shape.set_deferred("disabled", true)
+		if _collision_shape:
+			_collision_shape.set_deferred("disabled", true)
 		collision_layer = 0
 		collision_mask = 0
-	else:
-		_collision_shape.set_deferred("disabled", false)
+	elif not defeated and vehicle == null:
+		# This write is deliberately idempotent. Realm and manifest packets are
+		# separate signals, while CollisionShape changes are deferred by physics;
+		# reasserting the on-foot state repairs either arrival order instead of
+		# leaving an unlocked boolean with a disabled capsule on the Moon.
+		if _collision_shape:
+			_collision_shape.set_deferred("disabled", false)
 		collision_layer = 1
 		collision_mask = 1
-		state = S.AIR
-		reset_physics_interpolation()
+		if changed:
+			state = S.AIR
+			reset_physics_interpolation()
 	expedition_locked = locked
-	_sync_weapon_presentation(true)
+	if changed:
+		_sync_weapon_presentation(true)
 
 
 func _replicate_expedition_pose(dt: float) -> void:
