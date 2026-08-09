@@ -95,6 +95,7 @@ var _vehicle_view := false
 var _vehicle: Vehicle = null
 var _vehicle_local_yaw := 0.0
 var _aircraft_aim_world_direction := Vector3.FORWARD
+var _aircraft_aim_tracks_nose := false
 
 
 func _ready() -> void:
@@ -327,6 +328,10 @@ func begin_vehicle_view(v: Vehicle) -> void:
 	# that can command a violent turn during the takeoff roll.
 	if v.kind == Vehicle.Kind.JET:
 		_aircraft_aim_world_direction = v.global_basis.z.normalized()
+		# Suspension settling can rotate a parked airframe slightly after entry.
+		# Keep a genuinely untouched cursor on the live nose until the player's
+		# first mouse command, then switch to the fixed-world pursuit target.
+		_aircraft_aim_tracks_nose = true
 		_set_look_direction(vehicle_basis.z)
 	else:
 		# Ground and water cockpits use vehicle-relative freelook. Center the local
@@ -350,6 +355,7 @@ func end_vehicle_view() -> void:
 	_vehicle_view = false
 	_vehicle = null
 	_aircraft_aim_world_direction = Vector3.FORWARD
+	_aircraft_aim_tracks_nose = false
 	_zero_movement_output()
 	_apply_view_mode(preferred_view_mode)
 	var orbit_yaw := yaw + (PI if front_view else 0.0)
@@ -379,6 +385,8 @@ func vehicle_aim_direction() -> Vector3:
 ## Read-only HUD/test view of the same radial input used by flight control.
 ## Screen coordinates are intentional: +x is right and +y is down.
 func aircraft_aim_normalized() -> Vector2:
+	if _is_aircraft_vehicle_view() and _aircraft_aim_tracks_nose:
+		return Vector2.ZERO
 	return _aircraft_offset_for_direction(_aircraft_aim_world_direction) \
 		if _is_aircraft_vehicle_view() else Vector2.ZERO
 
@@ -390,8 +398,10 @@ func aircraft_aim_limit_radians() -> float:
 func center_aircraft_aim() -> void:
 	if _is_aircraft_vehicle_view():
 		_aircraft_aim_world_direction = _vehicle.global_basis.z.normalized()
+		_aircraft_aim_tracks_nose = true
 	else:
 		_aircraft_aim_world_direction = Vector3.FORWARD
+		_aircraft_aim_tracks_nose = false
 
 
 ## Arrow-assisted pitch owns only the vertical channel. Keep any horizontal
@@ -399,6 +409,9 @@ func center_aircraft_aim() -> void:
 ## heading change without the dot snapping sideways to centre.
 func center_aircraft_pitch_aim() -> void:
 	if not _is_aircraft_vehicle_view():
+		return
+	if _aircraft_aim_tracks_nose:
+		_aircraft_aim_world_direction = _vehicle.global_basis.z.normalized()
 		return
 	var current_offset := aircraft_aim_normalized()
 	_aircraft_aim_world_direction = _aircraft_direction_from_offset(
@@ -413,6 +426,8 @@ func _is_aircraft_vehicle_view() -> bool:
 func _aircraft_control_aim_direction() -> Vector3:
 	if not is_instance_valid(_vehicle):
 		return _look_direction(false)
+	if _aircraft_aim_tracks_nose:
+		return _vehicle.global_basis.z.normalized()
 	return _aircraft_direction_from_offset(
 		_aircraft_offset_for_direction(_aircraft_aim_world_direction))
 
@@ -521,6 +536,11 @@ func apply_look(relative: Vector2) -> void:
 		# silently change a control target the player cannot see.
 		if front_view:
 			return
+		if relative.length_squared() < 0.000001:
+			return
+		if _aircraft_aim_tracks_nose:
+			_aircraft_aim_world_direction = _vehicle.global_basis.z.normalized()
+			_aircraft_aim_tracks_nose = false
 		# Mouse travel moves a fixed world pursuit point inside the HUD circle.
 		# Diagonal input shares the same radial maximum as horizontal/vertical;
 		# as the jet catches the point, its displayed offset moves back to centre.
