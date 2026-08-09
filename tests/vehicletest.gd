@@ -1126,8 +1126,8 @@ func run(main) -> void:
 	var flight_reticle: AircraftAimReticle = main.hud.aircraft_aim_reticle
 	check("fighter jet shows a centered dot inside its flight-limit circle",
 		flight_reticle.visible and not main.hud.crosshair.visible \
-		and flight_reticle.normalized_aim.length() < 0.03 \
-		and flight_reticle.dot_offset.length() < 2.0 \
+		and flight_reticle.normalized_aim.length() < 0.001 \
+		and flight_reticle.dot_offset.length() < 0.1 \
 		and AircraftAimReticle.DOT_TRAVEL_RADIUS \
 			+ AircraftAimReticle.DOT_RADIUS < AircraftAimReticle.RING_RADIUS,
 		"visible=%s combat=%s aim=%s dot=%s geometry=%.1f<%.1f" % [
