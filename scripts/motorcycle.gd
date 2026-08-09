@@ -365,15 +365,23 @@ func _advance_steering(dt: float) -> void:
 			wheel.steer_angle = _steer_current
 
 
+## One deterministic hydraulic-lever step. Keeping the ramp as a pure helper
+## makes its real-time contract independent of how many physics ticks a slow
+## render frame batches together on a player's machine or a CI runner.
+static func brake_pressure_step(current: float, requested: float,
+		dt: float) -> float:
+	var brake_seconds := BRAKE_APPLY_SECONDS \
+		if requested > current else BRAKE_RELEASE_SECONDS
+	return move_toward(current, requested,
+		maxf(dt, 0.0) / maxf(brake_seconds, 0.001))
+
+
 func _simulate(dt: float) -> void:
 	_tuck = move_toward(_tuck, 1.0 if input_aux else 0.0, 3.0 * dt)
 	drag_area = lerpf(0.55, 0.40, _tuck)
 	_wheelie_cooldown = maxf(_wheelie_cooldown - dt, 0.0)
 	var requested_brake := input_brake if driver else 1.0
-	var brake_seconds := BRAKE_APPLY_SECONDS \
-		if requested_brake > _brake_pressure else BRAKE_RELEASE_SECONDS
-	_brake_pressure = move_toward(_brake_pressure, requested_brake,
-		dt / maxf(brake_seconds, 0.001))
+	_brake_pressure = brake_pressure_step(_brake_pressure, requested_brake, dt)
 	var unscaled_steer := input_steer
 	var raw_brake := input_brake
 	var speed_before_braking := _planar_forward_speed()

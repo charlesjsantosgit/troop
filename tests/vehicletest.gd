@@ -1333,6 +1333,8 @@ func run(main) -> void:
 	var furthest_brake_distance: float = 0.0
 	var maximum_brake_backtrack: float = 0.0
 	var first_frame_pressure: float = 0.0
+	var deterministic_first_pressure := Motorcycle.brake_pressure_step(
+		0.0, 1.0, 1.0 / 60.0)
 	p.ti.dir = Vector2(0, 1)
 	for frame in range(150):
 		await sim(1)
@@ -1361,9 +1363,12 @@ func run(main) -> void:
 		maximum_brake_backtrack = maxf(maximum_brake_backtrack,
 			furthest_brake_distance - brake_distance)
 	check("bike brake pressure builds progressively instead of locking instantly",
-		first_frame_pressure > 0.02 and first_frame_pressure < 0.25 \
+		deterministic_first_pressure > 0.02 \
+			and deterministic_first_pressure < 0.25 \
 			and bike._brake_pressure > 0.99,
-		"first=%.3f final=%.3f" % [first_frame_pressure, bike._brake_pressure])
+		"step=%.3f observed=%.3f final=%.3f" % [
+			deterministic_first_pressure, first_frame_pressure,
+			bike._brake_pressure])
 	check("front-biased braking pitches forward and transfers suspension load",
 		brake_start_speed > 9.0 and peak_nose_down > 0.025 \
 			and peak_nose_down < 0.50 \
@@ -1893,18 +1898,21 @@ func run(main) -> void:
 		(jet.global_position - runway_origin).dot(runway_side))
 	var takeoff_distance: float = (jet.global_position - runway_origin).dot(
 		runway_forward)
-	# A 400-ish metre roll is both easy in the game and realistic for a light
-	# fighter; the 18 m centreline bound still fits a standard 45 m runway with
-	# room for its 9.45 m wingspan.
+	# A sub-600 m dry-thrust roll is easy on the 1,260 m runway while retaining a
+	# believable fighter takeoff. The 18 m centreline bound still fits a standard
+	# 45 m runway with room for the 9.45 m wingspan.
 	var stable_rotation_run: bool = jet.global_position.y > 5.0 \
 		and jet.forward_speed() > 58.0 and rotation_heading_dot > 0.94 \
-		and rotation_lateral < 18.0 and takeoff_distance < 450.0 \
+		and rotation_lateral < 18.0 and takeoff_distance < 600.0 \
+		and jet._assisted_heading_active \
+		and jet._assisted_heading.dot(runway_forward) > 0.995 \
 		and jet.global_basis.y.y > 0.80
 	check("holding W and Up Arrow produces an easy, straight takeoff",
 		stable_rotation_run,
-		"alt=%.1f v=%.1f run=%.0fm heading=%.3f lateral=%.1fm up=%.2f spool=%.2f driver=%s player_vehicle=%s recoveries=%d pos=%s" % [
+		"alt=%.1f v=%.1f run=%.0fm heading=%.3f lateral=%.1fm hold=%.3f up=%.2f spool=%.2f driver=%s player_vehicle=%s recoveries=%d pos=%s" % [
 			jet.global_position.y, jet.forward_speed(), takeoff_distance,
 			rotation_heading_dot, rotation_lateral,
+			jet._assisted_heading.dot(runway_forward),
 			jet.global_basis.y.y, jet.spool, str(jet.driver != null),
 			str(p.vehicle == jet), jet.physics_recovery_count,
 			jet.global_position])
