@@ -2,8 +2,8 @@ class_name LunarRocket
 extends RigidBody3D
 ## Four-seat physical lander and deterministic cinematic voyage controller.
 ## Parked/landed states are a real RigidBody3D; transit freezes contact physics
-## and follows an exact clock so all peers can present the same 180 s outbound
-## and 120 s return without integrating divergent orbital trajectories.
+## and follows an exact clock so all peers can present the same one-minute
+## outbound and shorter return without integrating divergent trajectories.
 
 signal state_changed(state: int, state_name: String)
 signal voyage_progress(progress: float, elapsed_seconds: float,
@@ -41,10 +41,10 @@ const MAX_CREW := 4
 ## The lowest landing foot is at -4.36 m in model space. A small compression
 ## allowance leaves the pads visibly planted instead of burying half the hull.
 const ORIGIN_ABOVE_LANDING_SURFACE := 4.40
-const OUTBOUND_DURATION_SECONDS := 180.0
-const RETURN_DURATION_SECONDS := 120.0
-const OUTBOUND_PHASE_TIMES := [28.0, 62.0, 154.0, 180.0]
-const RETURN_PHASE_TIMES := [15.0, 75.0, 108.0, 120.0]
+const OUTBOUND_DURATION_SECONDS := 60.0
+const RETURN_DURATION_SECONDS := 45.0
+const OUTBOUND_PHASE_TIMES := [10.0, 20.0, 48.0, 60.0]
+const RETURN_PHASE_TIMES := [6.0, 28.0, 40.0, 45.0]
 const SEAT_OFFSETS := [
 	Vector3(-0.62, 1.42, -0.28), Vector3(0.62, 1.42, -0.28),
 	Vector3(-0.62, 1.42, 0.72), Vector3(0.62, 1.42, 0.72),
@@ -374,24 +374,88 @@ func _emit_camera_cue_for_state(next_state: int) -> void:
 
 func _flight_transform(progress: float) -> Transform3D:
 	progress = clampf(progress, 0.0, 1.0)
+	if progress <= 0.0:
+		return earth_launch_transform if outbound else moon_landing_transform
+	if progress >= 1.0:
+		return moon_landing_transform if outbound else ocean_splashdown_transform
+	var origin := _flight_origin(progress)
+	# Aim the rocket's long local +Y axis along the actual path tangent. A
+	# centred finite difference remains stable at every cinematic phase and, in
+	# particular, prevents the old yaw-only hull from travelling broadside.
+	var tangent_step := 0.0005
+	var before := _flight_origin(maxf(progress - tangent_step, 0.0))
+	var after := _flight_origin(minf(progress + tangent_step, 1.0))
+	var path_tangent := (after - before).normalized()
+	if path_tangent.length_squared() < 0.5:
+		path_tangent = Vector3.UP if outbound else Vector3.DOWN
 	var start := earth_launch_transform if outbound else moon_landing_transform
 	var finish := moon_landing_transform if outbound \
 		else ocean_splashdown_transform
-	var lateral := start.basis.x.normalized()
-	# The Moon realm lives 300 km above the Earth chart. Traverse that complete
-	# distance continuously—never an endpoint teleport—while a broad lateral arc
-	# keeps the trajectory readable against the receding planet.
+	var endpoint_blend := smoothstep(0.90, 1.0, progress)
+	# Outbound points the nose (+Y) into the Moon-bound tangent. Return points the
+	# heat shield (-Y) into the reentry tangent, matching the physical hull.
+	var hull_axis := path_tangent if outbound else -path_tangent
+	var flight_basis := _basis_with_up(hull_axis, start.basis.z)
+	# Land on the exact authored basis so there is no visible rotation snap when
+	# scripted flight hands control back to the physical craft.
+	var basis_rotation := flight_basis.get_rotation_quaternion().slerp(
+		finish.basis.get_rotation_quaternion(), endpoint_blend)
+	return Transform3D(Basis(basis_rotation).orthonormalized(), origin)
+
+
+func _flight_origin(progress: float) -> Vector3:
+	progress = clampf(progress, 0.0, 1.0)
+	var start := earth_launch_transform if outbound else moon_landing_transform
+	var finish := moon_landing_transform if outbound \
+		else ocean_splashdown_transform
+	if outbound:
+		# The first sixth is a genuine vertical launch: X/Z are pinned and the
+		# eased altitude has positive velocity immediately. Horizontal correction
+		# begins only after the runway is far below, and has zero endpoint velocity.
+		var launch_fraction := OUTBOUND_PHASE_TIMES[0] \
+			/ OUTBOUND_DURATION_SECONDS
+		# The playable Moon normally lives in a distant realm, but standalone
+		# fixtures and future realm layouts may author its landing pad below the
+		# Earth pad. Liftoff is still a physical upward climb, never a signed lerp
+		# toward the destination altitude.
+		var launch_height := 18_000.0
+		if progress <= launch_fraction:
+			var launch_t := progress / launch_fraction
+			var ascent := launch_height * (1.0 - pow(1.0 - launch_t, 1.65))
+			return start.origin + Vector3.UP * ascent
+		var lateral_t := smoothstep(launch_fraction, 1.0, progress)
+		var y := lerpf(start.origin.y + launch_height, finish.origin.y,
+			lateral_t)
+		var horizontal := Vector2(start.origin.x, start.origin.z).lerp(
+			Vector2(finish.origin.x, finish.origin.z), lateral_t)
+		# A delayed, derivative-zero arc gives the cinematic a readable orbital
+		# silhouette without kicking sideways at liftoff or sliding at touchdown.
+		var arc := pow(sin(lateral_t * PI), 2.0) * 4_500.0
+		var arc_direction := Vector2(-1.0, 0.0).rotated(
+			atan2(finish.origin.z - start.origin.z,
+				finish.origin.x - start.origin.x) + PI * 0.5)
+		horizontal += arc_direction * arc
+		return Vector3(horizontal.x, y, horizontal.y)
+	# Return keeps the heat-shield path compact and faster, with no endpoint
+	# lateral impulse. Unlike ascent it may travel horizontally toward the ocean.
 	var travel_t := smoothstep(0.0, 1.0, progress)
-	var curve := lateral * sin(progress * PI) \
-		* (18_000.0 if outbound else -14_000.0)
-	var origin := start.origin.lerp(finish.origin, travel_t) + curve
-	var base_rotation := start.basis.get_rotation_quaternion().slerp(
-		finish.basis.get_rotation_quaternion(), travel_t)
-	var pitch := sin(progress * PI) * (0.14 if outbound else -0.18)
-	var roll := sin(progress * TAU) * 0.035
-	var basis := Basis(base_rotation) * Basis(Vector3.RIGHT, pitch) \
-		* Basis(Vector3.FORWARD, roll)
-	return Transform3D(basis.orthonormalized(), origin)
+	var midpoint_lift := pow(sin(progress * PI), 2.0) * 9_000.0
+	return start.origin.lerp(finish.origin, travel_t) \
+		+ Vector3.UP * midpoint_lift
+
+
+static func _basis_with_up(up_axis: Vector3,
+		preferred_forward: Vector3) -> Basis:
+	var y_axis := up_axis.normalized()
+	var z_axis := preferred_forward - y_axis * preferred_forward.dot(y_axis)
+	if z_axis.length_squared() < 0.0001:
+		var fallback := Vector3.FORWARD if absf(y_axis.dot(Vector3.FORWARD)) < 0.92 \
+			else Vector3.RIGHT
+		z_axis = fallback - y_axis * fallback.dot(y_axis)
+	z_axis = z_axis.normalized()
+	var x_axis := y_axis.cross(z_axis).normalized()
+	z_axis = x_axis.cross(y_axis).normalized()
+	return Basis(x_axis, y_axis, z_axis)
 
 
 func _complete_moon_landing() -> void:

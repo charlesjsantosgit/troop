@@ -1,9 +1,9 @@
 class_name WorldMap
 extends Control
 ## Full-screen, spherical world atlas. Close local zooms reuse the same analytic
-## Gen fields as the terrain instead of a second camera; distant zooms use one
-## small equirectangular atlas wrapped onto an interactive globe. Tile and atlas
-## baking are both incremental and share a strict per-frame sampling budget.
+## Gen fields as the terrain instead of a second camera; distant zooms use
+## imported 4K equirectangular atlases wrapped onto interactive globes. Local
+## tile baking remains incremental and keeps a strict per-frame sampling budget.
 
 signal opened
 signal closed
@@ -18,42 +18,20 @@ const TILE_METERS_PER_PX := [2.0, 8.0, 32.0, 128.0, 512.0, 2048.0,
 	8192.0]
 const CACHE_TILE_LIMIT := 144
 const LOCAL_BAKE_SAMPLES_PER_FRAME := 64
+# Kept as a compatibility diagnostic: imported atlases perform zero runtime
+# terrain samples, so the actual value reported each frame is always zero.
 const GLOBE_BAKE_SAMPLES_PER_FRAME := 64
 const BAKE_TIME_BUDGET_USEC := 1800
 const LOCAL_PREVIEW_GRIDS := [2, 4, 8, 20, 40, 80, 160]
-const GLOBE_ATLAS_SIZE := Vector2i(192, 96)
-const GLOBE_PREVIEW_GRIDS := [Vector2i(8, 4), Vector2i(16, 8),
-	Vector2i(32, 16), Vector2i(64, 32), Vector2i(96, 48),
-	Vector2i(192, 96)]
-const MOON_ATLAS_SIZE := Vector2i(640, 320)
-const MOON_PREVIEW_GRID := Vector2i(80, 40)
-const MOON_RANDOM_CRATER_COUNT := 420
-const MOON_BASE_SAMPLES_PER_FRAME := 1024
-const MOON_CRATERS_PER_FRAME := 4
-const MOON_BAKE_TIME_BUDGET_USEC := 1800
-const MOON_PIXEL_PERMUTATION_STEP := 7919
+const GLOBE_ATLAS_SIZE := Vector2i(4096, 2048)
+const MOON_ATLAS_SIZE := Vector2i(4096, 2048)
+const GLOBE_LONGITUDE_STEPS := 96
+const GLOBE_LATITUDE_STEPS := 48
+const EARTH_ATLAS: Texture2D = preload(
+	"res://assets/textures/pangaea_earth_4k.jpg")
+const MOON_ATLAS: Texture2D = preload(
+	"res://assets/textures/lunar_surface_4k.jpg")
 const MOON_LIGHT_SCREEN := Vector3(-0.42, -0.30, 0.855)
-# lon, lat, angular radius, relief strength. Hero craters remain legible when
-# the atlas is reduced to the small selectable Moon beside Earth.
-const MOON_HERO_CRATERS := [
-	Vector4(-0.19, -0.75, 0.085, 1.00), Vector4(-0.36, 0.17, 0.067, 0.92),
-	Vector4(-0.16, 0.90, 0.055, 0.82), Vector4(-0.82, 0.41, 0.047, 0.88),
-	Vector4(-0.65, 0.14, 0.042, 0.78), Vector4(0.15, -0.31, 0.052, 0.78),
-	Vector4(0.78, -0.17, 0.064, 0.86), Vector4(1.04, 0.31, 0.050, 0.82),
-	Vector4(0.55, 0.56, 0.038, 0.72), Vector4(-1.34, -0.34, 0.068, 0.88),
-	Vector4(1.73, -0.18, 0.076, 0.90), Vector4(2.53, 0.27, 0.064, 0.84),
-	Vector4(-2.35, -0.46, 0.072, 0.88), Vector4(2.08, 0.76, 0.052, 0.78),
-	Vector4(-1.91, 0.62, 0.043, 0.74), Vector4(2.92, -0.14, 0.055, 0.80),
-]
-# Broad basaltic plains. The last two keep the rotated far side from becoming
-# a uniformly pale ball without pretending to be a photographic Moon texture.
-const MOON_MARIA := [
-	Vector4(-0.94, 0.10, 0.72, 0.50), Vector4(-0.28, 0.53, 0.43, 0.30),
-	Vector4(0.30, 0.49, 0.27, 0.21), Vector4(0.55, 0.15, 0.30, 0.24),
-	Vector4(1.02, 0.30, 0.21, 0.17), Vector4(0.86, -0.14, 0.31, 0.23),
-	Vector4(-0.24, -0.34, 0.25, 0.19), Vector4(2.45, 0.15, 0.34, 0.23),
-	Vector4(-2.42, -0.30, 0.29, 0.21),
-]
 const MIN_VIEW_SPAN_M := 320.0
 const GLOBE_BLEND_START_FRACTION := 0.075
 const GLOBE_FULL_FRACTION := 0.18
@@ -102,29 +80,18 @@ var _last_baked_samples := 0
 var _baked_seed := -1
 var _active_tier := 0
 
-# The global atlas is deliberately tiny (192 x 96 RGB = 54 KiB). It is only
-# baked when globe view is actually requested and is updated a few rows per
-# frame, so opening the map cannot create one giant texture or a frame spike.
-var _globe_image: Image
-var _globe_texture: ImageTexture
+# Both globe atlases are imported once and shared through Godot's resource
+# cache. They never invoke Gen or allocate/copy an 8.4-million-pixel Image at
+# runtime; only the nearby analytic terrain tiles use the bounded CPU baker.
+var _globe_texture: Texture2D
 var _globe_stage := 0
 var _globe_sample_cursor := 0
 var _last_globe_baked_samples := 0
 var _earth_sphere_mesh: ArrayMesh
 var _earth_mesh_view := Vector2(INF, INF)
-var _moon_image: Image
-var _moon_texture: ImageTexture
-var _moon_crater_image: Image
-var _moon_crater_texture: ImageTexture
+var _moon_texture: Texture2D
 var _moon_sphere_mesh: ArrayMesh
 var _moon_mesh_view := Vector2(INF, INF)
-var _moon_crater_stamps := 0
-var _moon_atlas_build_usec := 0
-var _moon_base_cursor := 0
-var _moon_random_crater_cursor := 0
-var _moon_crater_rng: RandomNumberGenerator
-var _last_moon_base_samples := 0
-var _last_moon_crater_stamps := 0
 
 
 func configure(owner_world: Node3D) -> void:
@@ -136,7 +103,7 @@ func _ready() -> void:
 	set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	mouse_filter = Control.MOUSE_FILTER_STOP
 	focus_mode = Control.FOCUS_ALL
-	texture_filter = CanvasItem.TEXTURE_FILTER_LINEAR
+	texture_filter = CanvasItem.TEXTURE_FILTER_LINEAR_WITH_MIPMAPS_ANISOTROPIC
 	visible = false
 	set_process(false)
 	set_process_input(false)
@@ -194,8 +161,7 @@ func focus_earth() -> void:
 
 
 func focus_moon() -> void:
-	# Build a complete coarse preview before the first destination frame; the
-	# normal frame budget then refines the same cached textures in place.
+	# Resolve the shared imported atlas before the first destination frame.
 	_sync_seed()
 	_ensure_moon_atlas()
 	selected_body = CelestialBody.MOON
@@ -233,15 +199,13 @@ func _process(dt: float) -> void:
 	var globe_amount := globe_blend()
 	_last_baked_samples = 0
 	_last_globe_baked_samples = 0
-	_last_moon_base_samples = 0
-	_last_moon_crater_stamps = 0
 	if selected_body == CelestialBody.EARTH and globe_amount < 0.995:
 		_request_visible_tiles()
 		_bake_local_samples(LOCAL_BAKE_SAMPLES_PER_FRAME)
-	if globe_amount >= 0.45 or selected_body == CelestialBody.MOON:
+	if globe_amount > 0.0 or selected_body == CelestialBody.MOON:
 		_bake_globe_samples(GLOBE_BAKE_SAMPLES_PER_FRAME)
-		if _moon_texture:
-			_bake_moon_details()
+	if selected_body == CelestialBody.MOON or globe_amount > 0.0:
+		_ensure_moon_atlas()
 	_update_hover(dt)
 	queue_redraw()
 
@@ -338,6 +302,33 @@ func globe_blend() -> float:
 	var circumference := planet_circumference_m()
 	return smoothstep(circumference * GLOBE_BLEND_START_FRACTION,
 		circumference * GLOBE_FULL_FRACTION, _view_span_m)
+
+
+## Alpha pair for the planar-to-orbital transition: x is local terrain and y
+## is the globe. Keeping the sum at one prevents a brightness pulse mid-zoom.
+static func transition_opacities(blend: float) -> Vector2:
+	var globe_alpha := smoothstep(0.0, 1.0, clampf(blend, 0.0, 1.0))
+	return Vector2(1.0 - globe_alpha, globe_alpha)
+
+
+static func transition_globe_scale(blend: float) -> float:
+	# The globe first appears larger than the viewport, like a camera lifting off
+	# the surface, then settles into the complete planetary view.
+	return lerpf(2.15, 1.0, smoothstep(0.0, 1.0,
+		clampf(blend, 0.0, 1.0)))
+
+
+static func shared_earth_texture() -> Texture2D:
+	return EARTH_ATLAS
+
+
+static func shared_moon_texture() -> Texture2D:
+	return MOON_ATLAS
+
+
+static func _with_alpha(color: Color, alpha: float) -> Color:
+	color.a *= clampf(alpha, 0.0, 1.0)
+	return color
 
 
 static func planet_circumference_m() -> float:
@@ -740,8 +731,8 @@ func _map_tree_cover(elevation: float, biome: int,
 
 ## Whole-planet pixels do not need centimetre-scale runway grading or literal
 ## tree rolls. One coherent PlanetTerrain sample is enough to classify ocean,
-## lake, climate, ice and mountain bands, making the 192x96 overview both more
-## truthful and substantially cheaper than repeating local decoration queries.
+## lake, climate, ice and mountain bands, keeping diagnostic overview samples
+## cheaper and more truthful than repeating local decoration queries.
 func _planet_overview_sample(point: Vector2) -> Dictionary:
 	if not Gen.has_method("planet_terrain_sample"):
 		return _map_sample(point, planet_circumference_m() /
@@ -796,23 +787,9 @@ func _sync_seed() -> void:
 	_tiles.clear()
 	_bake_queue.clear()
 	_required_keys.clear()
-	_globe_image = null
-	_globe_texture = null
-	_globe_stage = 0
-	_globe_sample_cursor = 0
-	_moon_image = null
-	_moon_texture = null
-	_moon_crater_image = null
-	_moon_crater_texture = null
-	_moon_sphere_mesh = null
-	_moon_mesh_view = Vector2(INF, INF)
-	_moon_crater_stamps = 0
-	_moon_atlas_build_usec = 0
-	_moon_base_cursor = 0
-	_moon_random_crater_cursor = 0
-	_moon_crater_rng = null
-	_last_moon_base_samples = 0
-	_last_moon_crater_stamps = 0
+	# Imported celestial atlases are seed-independent display resources. Keep
+	# their resource IDs and sphere meshes stable while only analytic local tiles
+	# are invalidated for the new deterministic world seed.
 
 
 func _request_visible_tiles() -> void:
@@ -962,53 +939,17 @@ static func _pixel_hash(x: int, y: int) -> float:
 
 
 func _ensure_globe_atlas() -> void:
-	if _globe_image:
+	if _globe_texture:
 		return
-	_globe_image = Image.create(GLOBE_ATLAS_SIZE.x, GLOBE_ATLAS_SIZE.y, false,
-		Image.FORMAT_RGB8)
-	_globe_image.fill(Color("184e72"))
-	_globe_texture = ImageTexture.create_from_image(_globe_image)
-	_globe_stage = 0
+	_globe_texture = EARTH_ATLAS
+	_globe_stage = 1
 	_globe_sample_cursor = 0
 
 
-func _bake_globe_samples(maximum_samples: int) -> void:
+func _bake_globe_samples(_maximum_samples: int) -> void:
 	_ensure_globe_atlas()
-	if _globe_stage >= GLOBE_PREVIEW_GRIDS.size():
-		return
-	var deadline := Time.get_ticks_usec() + BAKE_TIME_BUDGET_USEC
-	var circumference := planet_circumference_m()
-	while _last_globe_baked_samples < maximum_samples \
-			and Time.get_ticks_usec() < deadline \
-			and _globe_stage < GLOBE_PREVIEW_GRIDS.size():
-		var grid: Vector2i = GLOBE_PREVIEW_GRIDS[_globe_stage]
-		var column := _globe_sample_cursor % grid.x
-		var row := floori(float(_globe_sample_cursor) / float(grid.x))
-		var latitude := lerpf(PI * 0.5, -PI * 0.5,
-			(float(row) + 0.5) / float(grid.y))
-		var longitude := lerpf(-PI, PI,
-			(float(column) + 0.5) / float(grid.x))
-		var point := lon_lat_to_world_xz(Vector2(longitude, latitude),
-			circumference)
-		var sample := _planet_overview_sample(point)
-		var color: Color = sample.color
-		if bool(sample.get("water", false)):
-			color = color.lerp(Color("0a315d"), 0.28)
-		else:
-			var elevation := float(sample.get("elevation", 0.0))
-			var shade := clampf(0.86 + cos(latitude) * 0.13 +
-				elevation / 6000.0 * 0.08, 0.66, 1.08)
-			color = Color(color.r * shade, color.g * shade, color.b * shade)
-		var block := Vector2i(GLOBE_ATLAS_SIZE.x / grid.x,
-			GLOBE_ATLAS_SIZE.y / grid.y)
-		_globe_image.fill_rect(Rect2i(column * block.x, row * block.y,
-			block.x, block.y), color)
-		_globe_sample_cursor += 1
-		_last_globe_baked_samples += 1
-		if _globe_sample_cursor >= grid.x * grid.y:
-			_globe_stage += 1
-			_globe_sample_cursor = 0
-	_globe_texture.update(_globe_image)
+	# Direct imported textures are already complete. This intentionally performs
+	# no PlanetTerrain sampling or ImageTexture updates on the render thread.
 
 
 func _update_hover(dt: float) -> void:
@@ -1040,10 +981,14 @@ func _draw() -> void:
 		return
 	_draw_backdrop()
 	var blend := globe_blend()
-	if selected_body == CelestialBody.MOON or blend >= 0.52:
+	if selected_body == CelestialBody.MOON:
 		_draw_globe_view()
 	else:
-		_draw_local_map()
+		var opacities := transition_opacities(blend)
+		if opacities.x > 0.001:
+			_draw_local_map(opacities.x)
+		if opacities.y > 0.001:
+			_draw_globe_view(opacities.y, transition_globe_scale(blend))
 	_draw_chrome(blend)
 
 
@@ -1059,10 +1004,10 @@ func _draw_backdrop() -> void:
 			Color(0.72, 0.85, 1.0, alpha))
 
 
-func _draw_local_map() -> void:
+func _draw_local_map(alpha := 1.0) -> void:
 	_moon_globe_rect = Rect2()
 	var rect := map_rect()
-	draw_rect(rect, Color("0c2632"))
+	draw_rect(rect, _with_alpha(Color("0c2632"), alpha))
 	var mpp := _view_span_m / maxf(rect.size.x, 1.0)
 	var tier := _active_tier
 	var tile_world := float(TILE_METERS_PER_PX[tier]) * TILE_PX
@@ -1075,16 +1020,19 @@ func _draw_local_map() -> void:
 		var top_left := rect.get_center() \
 			+ (Vector2(tile.key) * tile_world - _center) / mpp
 		var tile_rect := Rect2(top_left, Vector2.ONE * tile_world / mpp)
-		draw_texture_rect(tile.texture, tile_rect, false)
-	_draw_lat_lon_grid(rect)
-	_draw_local_markers(rect)
+		draw_texture_rect(tile.texture, tile_rect, false,
+			Color(1.0, 1.0, 1.0, alpha))
+	_draw_lat_lon_grid(rect, alpha)
+	_draw_local_markers(rect, alpha)
 	# Vignette and crisp inner frame make placeholders/refined tiles read as one
 	# atlas while the incremental baker catches up.
-	draw_rect(rect, Color(0.02, 0.08, 0.11, 0.18), false, 3.0)
-	draw_rect(rect.grow(-2.0), Color(0.58, 0.94, 0.76, 0.42), false, 1.0)
+	draw_rect(rect, _with_alpha(Color(0.02, 0.08, 0.11, 0.18), alpha),
+		false, 3.0)
+	draw_rect(rect.grow(-2.0),
+		_with_alpha(Color(0.58, 0.94, 0.76, 0.42), alpha), false, 1.0)
 
 
-func _draw_lat_lon_grid(rect: Rect2) -> void:
+func _draw_lat_lon_grid(rect: Rect2, alpha := 1.0) -> void:
 	var circumference := planet_circumference_m()
 	var center_geo := world_xz_to_lon_lat(_center, circumference)
 	var degrees_across := rad_to_deg(_view_span_m * TAU / circumference)
@@ -1103,22 +1051,23 @@ func _draw_lat_lon_grid(rect: Rect2) -> void:
 	while x <= left_world + rect.size.x * mpp:
 		var sx: float = rect.position.x + (x - left_world) / mpp
 		draw_line(Vector2(sx, rect.position.y), Vector2(sx, rect.end.y),
-			Color(0.72, 0.91, 0.82, 0.12), 1.0)
+			_with_alpha(Color(0.72, 0.91, 0.82, 0.12), alpha), 1.0)
 		x += step_world
 	var z: float = first_z
 	while z <= top_world + rect.size.y * mpp:
 		var sy: float = rect.position.y + (z - top_world) / mpp
 		draw_line(Vector2(rect.position.x, sy), Vector2(rect.end.x, sy),
-			Color(0.72, 0.91, 0.82, 0.12), 1.0)
+			_with_alpha(Color(0.72, 0.91, 0.82, 0.12), alpha), 1.0)
 		z += step_world
 	draw_string(_font, rect.position + Vector2(12, 24),
 		"%.3f° %s   %.3f° %s" % [absf(rad_to_deg(center_geo.y)),
 			"N" if center_geo.y >= 0.0 else "S", absf(rad_to_deg(center_geo.x)),
 			"E" if center_geo.x >= 0.0 else "W"],
-		HORIZONTAL_ALIGNMENT_LEFT, -1, 13, Color(0.88, 0.97, 0.90, 0.86))
+		HORIZONTAL_ALIGNMENT_LEFT, -1, 13,
+		_with_alpha(Color(0.88, 0.97, 0.90, 0.86), alpha))
 
 
-func _draw_local_markers(rect: Rect2) -> void:
+func _draw_local_markers(rect: Rect2, alpha := 1.0) -> void:
 	for marker in markers_for_body(CelestialBody.EARTH):
 		var pos3: Vector3 = marker.position
 		var base := world_to_screen(Vector2(pos3.x, pos3.z))
@@ -1130,79 +1079,87 @@ func _draw_local_markers(rect: Rect2) -> void:
 		var polygon := PackedVector2Array([
 			tip, base - forward * 7.0 + side * 6.0,
 			base - forward * 7.0 - side * 6.0])
-		var color := Color("ffe581") if bool(marker.local) else Color("58c8ff")
+		var color := _with_alpha(
+			Color("ffe581") if bool(marker.local) else Color("58c8ff"), alpha)
 		draw_colored_polygon(polygon, color)
 		draw_polyline(polygon + PackedVector2Array([polygon[0]]),
-			Color(0.015, 0.025, 0.03, 0.92), 2.0)
-		_draw_marker_name(base + Vector2(0, -13), str(marker.name), color)
+			_with_alpha(Color(0.015, 0.025, 0.03, 0.92), alpha), 2.0)
+		_draw_marker_name(base + Vector2(0, -13), str(marker.name), color, alpha)
 
 
-func _draw_marker_name(position: Vector2, marker_name: String, color: Color) -> void:
+func _draw_marker_name(position: Vector2, marker_name: String, color: Color,
+		alpha := 1.0) -> void:
 	var width := maxf(_font.get_string_size(marker_name,
 		HORIZONTAL_ALIGNMENT_LEFT, -1, 12).x + 12.0, 34.0)
 	var panel := Rect2(position - Vector2(width * 0.5, 20.0), Vector2(width, 18.0))
-	draw_style_box(_rounded_box(Color(0.01, 0.03, 0.045, 0.82),
+	draw_style_box(_rounded_box(
+		_with_alpha(Color(0.01, 0.03, 0.045, 0.82), alpha),
 		color.darkened(0.2), 1, 6), panel)
 	draw_string(_font, panel.position + Vector2(6, 13), marker_name,
-		HORIZONTAL_ALIGNMENT_CENTER, width - 12.0, 11, Color.WHITE)
+		HORIZONTAL_ALIGNMENT_CENTER, width - 12.0, 11,
+		_with_alpha(Color.WHITE, alpha))
 
 
-func _draw_globe_view() -> void:
+func _draw_globe_view(alpha := 1.0, globe_scale := 1.0) -> void:
 	var rect := map_rect()
-	draw_rect(rect, Color(0.008, 0.018, 0.045, 0.74))
+	draw_rect(rect, _with_alpha(Color(0.008, 0.018, 0.045, 0.74), alpha))
 	var view_geo := world_xz_to_lon_lat(_center, planet_circumference_m())
-	var radius := minf(rect.size.y * 0.405, rect.size.x * 0.31)
+	var radius := minf(rect.size.y * 0.405, rect.size.x * 0.31) * globe_scale
 	var earth_center := rect.get_center()
 	if selected_body == CelestialBody.EARTH:
 		earth_center.x -= minf(radius * 0.34, rect.size.x * 0.08)
-		_draw_atmosphere(earth_center, radius)
-		_draw_textured_sphere(earth_center, radius, view_geo, false)
-		_draw_globe_markers(earth_center, radius, view_geo)
+		_draw_atmosphere(earth_center, radius, alpha)
+		_draw_textured_sphere(earth_center, radius, view_geo, false, alpha)
+		_draw_globe_markers(earth_center, radius, view_geo, alpha)
 		var moon_radius := maxf(radius * 0.17, 26.0)
 		var moon_center := earth_center + Vector2(radius * 1.35, -radius * 0.48)
-		_draw_moon_sphere(moon_center, moon_radius, view_geo)
+		_draw_moon_sphere(moon_center, moon_radius, view_geo, alpha)
 		_moon_globe_rect = Rect2(moon_center - Vector2.ONE * moon_radius * 1.35,
 			Vector2.ONE * moon_radius * 2.7)
 		draw_string(_font, moon_center + Vector2(-55, moon_radius + 24),
 			"MOON  ·  SELECT", HORIZONTAL_ALIGNMENT_CENTER, 110, 12,
-			Color(0.82, 0.88, 1.0, 0.9))
+			_with_alpha(Color(0.82, 0.88, 1.0, 0.9), alpha))
 	else:
 		_moon_globe_rect = Rect2()
 		var moon_center := rect.get_center()
-		_draw_moon_sphere(moon_center, radius, view_geo)
-		_draw_moon_markers(moon_center, radius, view_geo)
+		_draw_moon_sphere(moon_center, radius, view_geo, alpha)
+		_draw_moon_markers(moon_center, radius, view_geo, alpha)
 		var earth_small_center := rect.position + Vector2(90, rect.size.y - 78)
-		_draw_atmosphere(earth_small_center, 48.0)
-		_draw_textured_sphere(earth_small_center, 48.0, view_geo, false)
+		_draw_atmosphere(earth_small_center, 48.0, alpha)
+		_draw_textured_sphere(earth_small_center, 48.0, view_geo, false, alpha)
 		draw_string(_font, rect.get_center() + Vector2(-180, radius + 36),
 			"LUNAR SURFACE  ·  DESTINATION VIEW", HORIZONTAL_ALIGNMENT_CENTER,
-			360, 15, Color("dbe6ff"))
+			360, 15, _with_alpha(Color("dbe6ff"), alpha))
 		draw_string(_font, rect.get_center() + Vector2(-250, radius + 61),
 			"Local moon cartography unlocks with the lunar mission",
-			HORIZONTAL_ALIGNMENT_CENTER, 500, 12, Color(0.65, 0.72, 0.84, 0.86))
-	draw_rect(rect, Color(0.58, 0.81, 1.0, 0.35), false, 2.0)
+			HORIZONTAL_ALIGNMENT_CENTER, 500, 12,
+			_with_alpha(Color(0.65, 0.72, 0.84, 0.86), alpha))
+	draw_rect(rect, _with_alpha(Color(0.58, 0.81, 1.0, 0.35), alpha),
+		false, 2.0)
 
 
-func _draw_atmosphere(center: Vector2, radius: float) -> void:
+func _draw_atmosphere(center: Vector2, radius: float, alpha := 1.0) -> void:
 	for ring in range(10, 0, -1):
 		var t := float(ring) / 10.0
 		draw_circle(center, radius + ring * 2.4,
-			Color(0.16, 0.57, 1.0, (1.0 - t) * 0.025 + 0.012))
+			_with_alpha(Color(0.16, 0.57, 1.0,
+				(1.0 - t) * 0.025 + 0.012), alpha))
 	draw_arc(center, radius + 2.0, 0.0, TAU, 128,
-		Color(0.35, 0.78, 1.0, 0.82), 2.0, true)
+		_with_alpha(Color(0.35, 0.78, 1.0, 0.82), alpha), 2.0, true)
 
 
 func _draw_textured_sphere(center: Vector2, radius: float,
-		view_lon_lat: Vector2, _moon := false) -> void:
+		view_lon_lat: Vector2, _moon := false, alpha := 1.0) -> void:
+	_ensure_globe_atlas()
 	if not _globe_texture:
-		draw_circle(center, radius, Color("1e6e8f"))
+		draw_circle(center, radius, _with_alpha(Color("1e6e8f"), alpha))
 		return
 	var mesh := _sphere_mesh_for_view(view_lon_lat)
 	var transform := Transform2D(Vector2(radius, 0.0), Vector2(0.0, radius),
 		center)
-	draw_mesh(mesh, _globe_texture, transform)
+	draw_mesh(mesh, _globe_texture, transform, Color(1.0, 1.0, 1.0, alpha))
 	draw_arc(center, radius, 0.0, TAU, 128,
-		Color(0.75, 0.91, 1.0, 0.62), 1.0, true)
+		_with_alpha(Color(0.75, 0.91, 1.0, 0.62), alpha), 1.0, true)
 
 
 ## A globe is one cached canvas mesh draw, not hundreds of per-frame polygon
@@ -1220,8 +1177,8 @@ func _sphere_mesh_for_view(view_lon_lat: Vector2, lunar := false) -> ArrayMesh:
 	var colors := PackedColorArray()
 	var uvs := PackedVector2Array()
 	var indices := PackedInt32Array()
-	var longitude_steps := 32
-	var latitude_steps := 16
+	var longitude_steps := GLOBE_LONGITUDE_STEPS
+	var latitude_steps := GLOBE_LATITUDE_STEPS
 	for lat_index in range(latitude_steps):
 		var v0 := float(lat_index) / latitude_steps
 		var v1 := float(lat_index + 1) / latitude_steps
@@ -1284,199 +1241,35 @@ func _sphere_mesh_for_view(view_lon_lat: Vector2, lunar := false) -> ArrayMesh:
 	return mesh
 
 
-## First inspection creates a complete 80x40 preview expanded into the final
-## 640x320 atlas plus the large recognizable crater rims. Fine regolith pixels
-## and hundreds of small craters then refine those same two cached textures
-## under a strict frame deadline. Once complete, draw frames perform no sampling.
+## The 4K Moon is a direct imported resource shared by every atlas instance.
+## No image allocation, crater stamping, or per-frame refinement occurs here.
 func _ensure_moon_atlas() -> void:
 	if _moon_texture:
 		return
-	var started := Time.get_ticks_usec()
-	_moon_image = Image.create(MOON_ATLAS_SIZE.x, MOON_ATLAS_SIZE.y, false,
-		Image.FORMAT_RGB8)
-	var preview_block := Vector2i(MOON_ATLAS_SIZE.x / MOON_PREVIEW_GRID.x,
-		MOON_ATLAS_SIZE.y / MOON_PREVIEW_GRID.y)
-	for preview_y in range(MOON_PREVIEW_GRID.y):
-		for preview_x in range(MOON_PREVIEW_GRID.x):
-			var sample_x := preview_x * preview_block.x + preview_block.x / 2
-			var sample_y := preview_y * preview_block.y + preview_block.y / 2
-			_moon_image.fill_rect(Rect2i(preview_x * preview_block.x,
-				preview_y * preview_block.y, preview_block.x, preview_block.y),
-				_moon_base_color(sample_x, sample_y))
-	_moon_texture = ImageTexture.create_from_image(_moon_image)
-
-	_moon_crater_image = Image.create(MOON_ATLAS_SIZE.x, MOON_ATLAS_SIZE.y,
-		false, Image.FORMAT_RGBA8)
-	_moon_crater_image.fill(Color.TRANSPARENT)
-	_moon_crater_stamps = 0
-	for hero in MOON_HERO_CRATERS:
-		_stamp_moon_crater(_moon_crater_image, hero)
-	_moon_crater_texture = ImageTexture.create_from_image(_moon_crater_image)
-	_moon_crater_rng = RandomNumberGenerator.new()
-	_moon_crater_rng.seed = int(Gen.world_seed) * 7919 ^ 0x4d4f4f4e
-	_moon_base_cursor = 0
-	_moon_random_crater_cursor = 0
-	_moon_atlas_build_usec = Time.get_ticks_usec() - started
-
-
-func _moon_base_color(x: int, y: int) -> Color:
-	var v := (float(y) + 0.5) / float(MOON_ATLAS_SIZE.y)
-	var latitude := lerpf(PI * 0.5, -PI * 0.5, v)
-	var cos_latitude := cos(latitude)
-	var u := (float(x) + 0.5) / float(MOON_ATLAS_SIZE.x)
-	var longitude := lerpf(-PI, PI, u)
-	var surface := Vector3(cos_latitude * cos(longitude), sin(latitude),
-		cos_latitude * sin(longitude))
-	# Seamless spherical harmonics make broad highlands and fine regolith
-	# relief without allocating noise resources or exposing a UV seam.
-	var broad := sin(surface.x * 8.7 + surface.y * 11.3
-		+ surface.z * 6.1) * 0.48 \
-		+ cos(surface.x * 17.1 - surface.y * 7.3
-			+ surface.z * 13.7) * 0.30 \
-		+ sin(surface.x * 31.0 + surface.y * 23.0
-			- surface.z * 27.0) * 0.16
-	var fine := sin(longitude * 53.0 + latitude * 31.0) \
-		* cos_latitude * 0.55 \
-		+ cos(longitude * 89.0 - latitude * 47.0) \
-			* pow(absf(cos_latitude), 0.35) * 0.45
-	var maria := _moon_maria_mask(longitude, latitude)
-	var highland := smoothstep(0.18, 0.84, absf(broad))
-	var tone := clampf(0.59 + broad * 0.075 + fine * 0.018
-		+ highland * 0.025 - maria * 0.205, 0.25, 0.76)
-	return Color(tone * 1.025, tone, tone * 0.965)
-
-
-func _moon_maria_mask(longitude: float, latitude: float) -> float:
-	var mask := 0.0
-	for mare in MOON_MARIA:
-		var longitude_distance := wrapf(longitude - mare.x, -PI, PI) \
-			* maxf(cos((latitude + mare.y) * 0.5), 0.24)
-		var latitude_distance: float = latitude - float(mare.y)
-		var ellipse := sqrt(pow(longitude_distance / mare.z, 2.0)
-			+ pow(latitude_distance / mare.w, 2.0))
-		mask = maxf(mask, 1.0 - smoothstep(0.67, 1.11, ellipse))
-	return mask
-
-
-func _next_moon_random_crater() -> Vector4:
-	var size_roll := _moon_crater_rng.randf()
-	var radius := 0.008 + pow(_moon_crater_rng.randf(), 2.65) * 0.056
-	if size_roll > 0.955:
-		radius += _moon_crater_rng.randf_range(0.025, 0.055)
-	return Vector4(_moon_crater_rng.randf_range(-PI, PI),
-		asin(_moon_crater_rng.randf_range(-0.985, 0.985)), radius,
-		_moon_crater_rng.randf_range(0.45, 0.94))
-
-
-func _stamp_moon_crater(image: Image, crater: Vector4) -> void:
-	var center_x := (wrapf(crater.x, -PI, PI) + PI) / TAU * image.get_width()
-	var center_y := (PI * 0.5 - crater.y) / PI * image.get_height()
-	var radius_y := maxf(crater.z / PI * image.get_height(), 0.82)
-	var radius_x := minf(radius_y / maxf(cos(crater.y), 0.22),
-		radius_y * 3.4)
-	var extent_x := ceili(radius_x * 1.38)
-	var extent_y := ceili(radius_y * 1.38)
-	for offset_y in range(-extent_y, extent_y + 1):
-		var sample_y := roundi(center_y) + offset_y
-		if sample_y < 0 or sample_y >= image.get_height():
-			continue
-		for offset_x in range(-extent_x, extent_x + 1):
-			var normalized_x := float(offset_x) / radius_x
-			var normalized_y := float(offset_y) / radius_y
-			var distance := sqrt(normalized_x * normalized_x
-				+ normalized_y * normalized_y)
-			if distance > 1.38:
-				continue
-			var sample_x := wrapi(roundi(center_x) + offset_x, 0,
-				image.get_width())
-			var relief := 0.0
-			if distance < 0.72:
-				var bowl := 1.0 - distance / 0.72
-				# Concave floors are darkest at centre; the lower-right inner
-				# wall catches the same upper-left illumination as the globe.
-				relief = -0.078 * crater.w * (0.58 + bowl * 0.42)
-				relief += (normalized_x + normalized_y) * 0.014 \
-					* crater.w * (1.0 - bowl)
-			elif distance < 1.08:
-				var rim := 1.0 - absf(distance - 0.91) / 0.19
-				var rim_light := clampf((-normalized_x - normalized_y) * 0.707,
-					-1.0, 1.0)
-				relief = maxf(rim, 0.0) * crater.w \
-					* (0.052 + rim_light * 0.045)
-			else:
-				var ejecta := 1.0 - smoothstep(1.08, 1.38, distance)
-				relief = ejecta * crater.w * 0.014
-			var layer: Color
-			if relief >= 0.0:
-				layer = Color(0.94, 0.92, 0.86,
-					clampf(relief * 3.0, 0.0, 0.34))
-			else:
-				layer = Color(0.055, 0.06, 0.07,
-					clampf(-relief * 2.8, 0.0, 0.36))
-			var existing := image.get_pixel(sample_x, sample_y)
-			if layer.a > existing.a:
-				image.set_pixel(sample_x, sample_y, layer)
-	_moon_crater_stamps += 1
-
-
-func _bake_moon_details() -> void:
-	if not _moon_texture or not _moon_crater_texture:
-		return
-	var deadline := Time.get_ticks_usec() + MOON_BAKE_TIME_BUDGET_USEC
-	var craters_dirty := false
-	while _moon_random_crater_cursor < MOON_RANDOM_CRATER_COUNT \
-			and _last_moon_crater_stamps < MOON_CRATERS_PER_FRAME \
-			and Time.get_ticks_usec() < deadline:
-		_stamp_moon_crater(_moon_crater_image, _next_moon_random_crater())
-		_moon_random_crater_cursor += 1
-		_last_moon_crater_stamps += 1
-		craters_dirty = true
-	if craters_dirty:
-		_moon_crater_texture.update(_moon_crater_image)
-
-	var pixel_count := MOON_ATLAS_SIZE.x * MOON_ATLAS_SIZE.y
-	var base_dirty := false
-	while _moon_base_cursor < pixel_count \
-			and _last_moon_base_samples < MOON_BASE_SAMPLES_PER_FRAME \
-			and Time.get_ticks_usec() < deadline:
-		var pixel_index := (_moon_base_cursor * MOON_PIXEL_PERMUTATION_STEP) \
-			% pixel_count
-		var pixel_x := pixel_index % MOON_ATLAS_SIZE.x
-		var pixel_y := floori(float(pixel_index) / MOON_ATLAS_SIZE.x)
-		_moon_image.set_pixel(pixel_x, pixel_y,
-			_moon_base_color(pixel_x, pixel_y))
-		_moon_base_cursor += 1
-		_last_moon_base_samples += 1
-		base_dirty = true
-	if base_dirty:
-		_moon_texture.update(_moon_image)
+	_moon_texture = MOON_ATLAS
 
 
 func _draw_moon_sphere(center: Vector2, radius: float,
-		view_lon_lat: Vector2) -> void:
+		view_lon_lat: Vector2, alpha := 1.0) -> void:
 	_ensure_moon_atlas()
 	draw_circle(center, radius + maxf(3.0, radius * 0.018),
-		Color(0.55, 0.64, 0.77, 0.16))
+		_with_alpha(Color(0.55, 0.64, 0.77, 0.16), alpha))
 	var mesh := _sphere_mesh_for_view(view_lon_lat, true)
 	var transform := Transform2D(Vector2(radius, 0.0), Vector2(0.0, radius),
 		center)
-	draw_mesh(mesh, _moon_texture, transform)
-	# Craters refine on a separate transparent atlas so incremental base-regolith
-	# pixels can never paint over completed rims. Both layers reuse the same
-	# cached sphere mesh and remain exactly two draw calls at any zoom.
-	if _moon_crater_texture:
-		draw_mesh(mesh, _moon_crater_texture, transform)
-	# The cool limb and soft inner rim remain crisp at the 26 px overview Moon
-	# while the directional mesh colors give the full-size globe a real phase.
+	draw_mesh(mesh, _moon_texture, transform, Color(1.0, 1.0, 1.0, alpha))
+	# The imported albedo already contains crater and maria detail, so the Moon is
+	# one texture draw plus the inexpensive limb accents.
 	draw_arc(center, radius, 0.0, TAU, 128,
-		Color(0.82, 0.88, 0.98, 0.72), maxf(1.0, radius * 0.004), true)
+		_with_alpha(Color(0.82, 0.88, 0.98, 0.72), alpha),
+		maxf(1.0, radius * 0.004), true)
 	draw_arc(center, radius - maxf(1.0, radius * 0.007), PI * 0.62,
-		PI * 1.62, 72, Color(0.98, 0.98, 0.94, 0.22),
+		PI * 1.62, 72, _with_alpha(Color(0.98, 0.98, 0.94, 0.22), alpha),
 		maxf(1.0, radius * 0.003), true)
 
 
 func _draw_globe_markers(center: Vector2, radius: float,
-		view_lon_lat: Vector2) -> void:
+		view_lon_lat: Vector2, alpha := 1.0) -> void:
 	var circumference := planet_circumference_m()
 	for marker in markers_for_body(CelestialBody.EARTH):
 		var pos3: Vector3 = marker.position
@@ -1494,17 +1287,19 @@ func _draw_globe_markers(center: Vector2, radius: float,
 		var direction: Vector2 = (ahead_position - projected_position).normalized()
 		if direction.length_squared() < 0.1:
 			direction = Vector2.UP
-		var color := Color("ffe581") if bool(marker.local) else Color("58c8ff")
-		draw_circle(projected.position, 5.5, Color(0.01, 0.02, 0.04, 0.9))
+		var color := _with_alpha(
+			Color("ffe581") if bool(marker.local) else Color("58c8ff"), alpha)
+		draw_circle(projected.position, 5.5,
+			_with_alpha(Color(0.01, 0.02, 0.04, 0.9), alpha))
 		draw_circle(projected.position, 3.7, color)
 		draw_line(projected.position, projected.position + direction * 11.0,
 			color, 2.2, true)
 		_draw_marker_name(projected.position + Vector2(0, -8), str(marker.name),
-			color)
+			color, alpha)
 
 
 func _draw_moon_markers(center: Vector2, radius: float,
-		view_lon_lat: Vector2) -> void:
+		view_lon_lat: Vector2, alpha := 1.0) -> void:
 	for marker in markers_for_body(CelestialBody.MOON):
 		var position: Vector3 = marker.position
 		var projected := moon_marker_projection(position, float(marker.yaw),
@@ -1513,13 +1308,15 @@ func _draw_moon_markers(center: Vector2, radius: float,
 			continue
 		var marker_position: Vector2 = projected.position
 		var direction: Vector2 = projected.direction
-		var color := Color("ffe581") if bool(marker.local) else Color("58c8ff")
-		draw_circle(marker_position, 5.5, Color(0.01, 0.02, 0.04, 0.9))
+		var color := _with_alpha(
+			Color("ffe581") if bool(marker.local) else Color("58c8ff"), alpha)
+		draw_circle(marker_position, 5.5,
+			_with_alpha(Color(0.01, 0.02, 0.04, 0.9), alpha))
 		draw_circle(marker_position, 3.7, color)
 		draw_line(marker_position, marker_position + direction * 11.0,
 			color, 2.2, true)
 		_draw_marker_name(marker_position + Vector2(0, -8), str(marker.name),
-			color)
+			color, alpha)
 
 
 func _draw_chrome(blend: float) -> void:
@@ -1627,12 +1424,17 @@ func cache_diagnostics() -> Dictionary:
 		"atlas_stage": _globe_stage,
 		"atlas_cursor": _globe_sample_cursor,
 		"last_atlas_samples": _last_globe_baked_samples,
-		"atlas_pixels": GLOBE_ATLAS_SIZE.x * GLOBE_ATLAS_SIZE.y,
-		"moon_atlas_pixels": MOON_ATLAS_SIZE.x * MOON_ATLAS_SIZE.y \
+		"atlas_pixels": _globe_texture.get_width() * _globe_texture.get_height() \
+			if _globe_texture else 0,
+		"moon_atlas_pixels": _moon_texture.get_width() \
+			* _moon_texture.get_height() if _moon_texture else 0,
+		"earth_texture_id": _globe_texture.get_instance_id() \
+			if _globe_texture else 0,
+		"moon_texture_id": _moon_texture.get_instance_id() \
 			if _moon_texture else 0,
-		"moon_crater_stamps": _moon_crater_stamps,
-		"moon_atlas_build_usec": _moon_atlas_build_usec,
-		"moon_base_cursor": _moon_base_cursor,
-		"last_moon_base_samples": _last_moon_base_samples,
-		"last_moon_crater_stamps": _last_moon_crater_stamps,
+		"moon_crater_stamps": 0,
+		"moon_atlas_build_usec": 0,
+		"moon_base_cursor": 0,
+		"last_moon_base_samples": 0,
+		"last_moon_crater_stamps": 0,
 	}

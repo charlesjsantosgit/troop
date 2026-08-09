@@ -48,7 +48,7 @@ signal moon_cheese_purchase_result(quantity: int, accepted: bool,
 const PORT := 30623
 const MAX_CLIENTS := 24
 const CHANNEL_COUNT := 2
-const PROTOCOL_VERSION := 7
+const PROTOCOL_VERSION := 8
 const MAX_NAME_LENGTH := 20
 const REGISTRATION_TIMEOUT_SECONDS := 5.0
 const MAX_STATE_PACKETS_PER_SECOND := 30
@@ -81,8 +81,8 @@ const MAX_ADMIN_PUBLIC_KEY_BYTES := 4096
 const MAX_ADMIN_PRIVATE_KEY_BYTES := 10000
 const MAX_ADMIN_SIGNATURE_BYTES := 512
 const MAX_ROCKET_CREW := 4
-const ROCKET_OUTBOUND_SECONDS := 180.0
-const ROCKET_RETURN_SECONDS := 120.0
+const ROCKET_OUTBOUND_SECONDS := 60.0
+const ROCKET_RETURN_SECONDS := 45.0
 const ROCKET_RECOVERY_SECONDS := 18.0
 const ROCKET_SYNC_SECONDS := 1.0
 const MOON_CHEESE_PRICE := 3
@@ -1348,7 +1348,7 @@ func _remove_peer_from_rocket(peer_id: int) -> void:
 	# A voyage without passengers is not a valid replicated state and has no
 	# actor left to complete it. Return the craft to the world it departed from
 	# immediately so disconnecting or admin-moving the final crew member cannot
-	# strand the global mission clock for another three minutes.
+	# strand the global mission clock for another full voyage.
 	if crew.is_empty():
 		var phase := int(rocket_state.get("phase",
 			RocketMissionPhase.EARTH_READY))
@@ -1443,8 +1443,11 @@ func _valid_expedition_state(state: Dictionary) -> bool:
 			or not (duration is float or duration is int) or not (serial is int) \
 			or int(serial) < 0 or not is_finite(float(elapsed)) \
 			or not is_finite(float(duration)) or float(elapsed) < 0.0 \
-			or float(duration) < 0.0 or float(elapsed) > ROCKET_OUTBOUND_SECONDS \
-			or float(duration) > ROCKET_OUTBOUND_SECONDS:
+			or float(duration) < 0.0 \
+			or float(elapsed) > maxf(ROCKET_OUTBOUND_SECONDS,
+				ROCKET_RETURN_SECONDS) \
+			or float(duration) > maxf(ROCKET_OUTBOUND_SECONDS,
+				ROCKET_RETURN_SECONDS):
 		return false
 	var phase_value := int(phase)
 	var elapsed_value := float(elapsed)

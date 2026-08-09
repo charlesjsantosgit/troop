@@ -5,7 +5,7 @@ extends Node3D
 ## solved onto the rope and the weapon arm stays aimed; an unarmed pose can
 ## still use both paws. The unused remainder of the vine trails below the grip.
 
-enum Anim { IDLE, RUN, SPRINT, AIR, DIVE, WALLSLIDE, SWING, SLIDE, ROLL, FLIP_F, FLIP_B, SWIM, SKID, RIDE, PILOT }
+enum Anim { IDLE, RUN, SPRINT, AIR, DIVE, WALLSLIDE, SWING, SLIDE, ROLL, FLIP_F, FLIP_B, SWIM, SKID, RIDE, PILOT, CABIN }
 # SPRINT slot = quadruped gallop (entered by landing fast off a vine).
 # FLIP_F/FLIP_B = airborne tucked front/backflips after fast vine releases.
 
@@ -131,6 +131,8 @@ var _wing_r_tip: Node3D
 var _wing_l_coverts: Node3D
 var _wing_r_coverts: Node3D
 var _wing_flap_phase := 0.0
+var _pose_rest_nodes: Array[Node3D] = []
+var _pose_rest_transforms: Array[Transform3D] = []
 
 
 func setup(display_name: String, show_tag: bool) -> void:
@@ -310,6 +312,31 @@ func setup(display_name: String, show_tag: bool) -> void:
 	rope_mi.top_level = true
 	rope_mat = Visuals.vine_material(0.0)
 	add_child(rope_mi)
+	_capture_pose_rest_transforms()
+
+
+## Vehicle control IK solves in world space and therefore changes both the
+## rotation and the local offset of a joint. Keep the authored transforms so a
+## hard lifecycle boundary can reconstruct the entire monkey, rather than only
+## zeroing rotations while elbows and knees remain at their last world points.
+func _capture_pose_rest_transforms() -> void:
+	_pose_rest_nodes.clear()
+	_pose_rest_transforms.clear()
+	var nodes: Array[Node3D] = [
+		yaw_node, hips, torso_p, head_p, weapon_back_mount,
+		sh_l, el_l, paw_l, sh_r, el_r, paw_r,
+		hip_l, kn_l, foot_l, hip_r, kn_r, foot_r,
+	]
+	for tail_joint in tail_segs:
+		if tail_joint is Node3D:
+			nodes.append(tail_joint)
+	for prop in [bandage_roll, bandage_wrist, bandage_strip]:
+		if prop is Node3D:
+			nodes.append(prop)
+	for node in nodes:
+		if is_instance_valid(node):
+			_pose_rest_nodes.append(node)
+			_pose_rest_transforms.append(node.transform)
 
 
 func _build_arm(shoulder: Node3D, fur_m: Material, skin_m: Material,
@@ -586,6 +613,59 @@ func set_ride_lean(lean: float) -> void:
 ## puppets share one final-pass seated pose instead of maintaining two copies.
 func set_vehicle_pose(vehicle) -> void:
 	_vehicle_pose = vehicle if is_instance_valid(vehicle) else null
+
+
+## Hard state-boundary reset used by vehicle exit, defeat and respawn. Vehicle
+## IK writes complete global bases into limbs, so clearing only the rig root can
+## leave paws, knees or tail joints scattered when the driver disappears between
+## physics frames. Restore every animated joint and transient solver together.
+func reset_pose_state(preserve_yaw := false) -> void:
+	var saved_yaw := yaw_node.rotation.y if preserve_yaw and yaw_node else 0.0
+	top_level = false
+	physics_interpolation_mode = Node.PHYSICS_INTERPOLATION_MODE_INHERIT
+	transform = Transform3D.IDENTITY
+	# World-space IK changes joint origins as well as bases. Restoring the exact
+	# local transforms is what fixes detached/random body parts after aircraft
+	# exit, death, and every subsequent respawn in the same session.
+	for index in range(mini(_pose_rest_nodes.size(),
+			_pose_rest_transforms.size())):
+		var node := _pose_rest_nodes[index]
+		if is_instance_valid(node):
+			node.top_level = false
+			node.transform = _pose_rest_transforms[index]
+	_vehicle_pose = null
+	_ride_lean = 0.0
+	_turn_lean = 0.0
+	_air_pitch = 0.0
+	_air_roll = 0.0
+	_air_pitch_velocity = 0.0
+	_air_roll_velocity = 0.0
+	_roll_spin = 0.0
+	_flip_spin = 0.0
+	_anim_prev = -1
+	_anim_ramp = 1.0
+	_last_gait_origin = Vector3.INF
+	_gun_aim_active = false
+	_gun_recoil = 0.0
+	_sniper_rope_pose = false
+	_sniper_rope_blend = 0.0
+	_sniper_support_grip = null
+	_reload_pose = false
+	_reload_support_grip = null
+	_melee_mode = false
+	_melee_attack_active = false
+	_healing_pose = false
+	_rope_active = false
+	_rope_tail_points = PackedVector3Array()
+	_rope_tail_previous = PackedVector3Array()
+	_rope_render_points = PackedVector3Array()
+	if rope_mesh:
+		rope_mesh.clear_surfaces()
+	_reset_gait_plants()
+	if yaw_node:
+		yaw_node.rotation = Vector3(0.0, saved_yaw, 0.0)
+	_update_bandage_props()
+	reset_physics_interpolation()
 
 
 func set_melee_pose(active: bool, attack_active: bool, progress: float,
@@ -1178,6 +1258,28 @@ func update_motion(dt: float, anim: int, vel: Vector3, on_floor: bool, anchor: V
 			p.tail_root_x = 1.18
 			p.tail_root_y = 0.30
 			p.tail_sway = sin(_t * 1.8) * 0.05
+		Anim.CABIN:
+			# Four-point strapped rocket posture. The torso stays centred through
+			# liftoff while each limb remains visibly seated instead of inheriting
+			# the ordinary airborne tuck from CharacterBody state.
+			p.hips_y = -0.075
+			p.hips_x = 0.04
+			p.torso = -0.035
+			p.head = 0.025
+			p.al = Vector3(0.58, 0.10, 0.24)
+			p.ar = Vector3(0.58, -0.10, -0.24)
+			p.el = 1.02
+			p.er = 1.02
+			p.ll = 0.94
+			p.lr = 0.94
+			p.kl = -1.25
+			p.kr = -1.25
+			p.fl = 0.38
+			p.fr = 0.38
+			p.tail_curl = 1.12
+			p.tail_root_x = 1.02
+			p.tail_root_y = 0.48
+			p.tail_sway = sin(_t * 1.4) * 0.025
 
 	if _melee_mode and _melee_attack_active:
 		var strike_twist := _melee_pulse(

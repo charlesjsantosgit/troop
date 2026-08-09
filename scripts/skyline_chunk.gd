@@ -28,6 +28,8 @@ var tree_instance_count := 0
 var _tree_build_cursor := 0
 var _tree_build_complete := false
 var _tree_buffer := PackedFloat32Array()
+var _tree_instance: MultiMeshInstance3D
+var _literal_foliage_visible := true
 
 
 func setup(sector_key: Vector2i, defer_trees := false) -> void:
@@ -116,7 +118,7 @@ func _build_terrain_and_water() -> void:
 		var water_instance := MeshInstance3D.new()
 		water_instance.name = "SkylineWater"
 		water_instance.mesh = water.commit()
-		water_instance.material_override = Visuals.far_water_material()
+		water_instance.material_override = Visuals.skyline_water_material()
 		water_instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 		water_instance.visibility_range_end = Gen.SKYLINE_DISTANCE + SECTOR_SIZE
 		water_instance.extra_cull_margin = 8.0
@@ -127,6 +129,16 @@ func _begin_tree_silhouettes() -> void:
 	_tree_build_cursor = 0
 	_tree_build_complete = false
 	_tree_buffer.clear()
+
+
+func set_literal_foliage_visible(next_visible: bool) -> void:
+	_literal_foliage_visible = next_visible
+	if is_instance_valid(_tree_instance):
+		_tree_instance.visible = next_visible
+
+
+func is_tree_build_complete() -> bool:
+	return _tree_build_complete
 
 
 ## Process a bounded number of source chunks so World can spread the 256-chunk
@@ -169,14 +181,15 @@ func build_tree_step(source_chunk_budget := 16) -> bool:
 	mm.mesh = _tree_mesh
 	mm.instance_count = tree_instance_count
 	mm.buffer = _tree_buffer
-	var trees := MultiMeshInstance3D.new()
-	trees.name = "TreeSilhouettes"
-	trees.multimesh = mm
-	trees.material_override = Visuals.skyline_jungle_material()
-	trees.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-	trees.visibility_range_end = Gen.SKYLINE_DISTANCE + SECTOR_SIZE
-	trees.extra_cull_margin = 60.0
-	add_child(trees)
+	_tree_instance = MultiMeshInstance3D.new()
+	_tree_instance.name = "TreeSilhouettes"
+	_tree_instance.multimesh = mm
+	_tree_instance.material_override = Visuals.skyline_jungle_material()
+	_tree_instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	_tree_instance.visibility_range_end = Gen.SKYLINE_DISTANCE + SECTOR_SIZE
+	_tree_instance.extra_cull_margin = 60.0
+	_tree_instance.visible = _literal_foliage_visible
+	add_child(_tree_instance)
 	_tree_buffer.clear()
 	return true
 

@@ -589,11 +589,16 @@ func _on_crew_pose_requested(peer_id: int, seat_transform: Transform3D) -> void:
 	var actor := _actor_for_peer(peer_id)
 	if not actor:
 		return
+	var correction_distance := actor.global_position.distance_to(
+		seat_transform.origin)
 	_set_remote_crew_control(peer_id, true)
 	actor.global_transform = seat_transform
 	if actor is CharacterBody3D:
 		(actor as CharacterBody3D).velocity = Vector3.ZERO
-	actor.reset_physics_interpolation()
+	# Reset only for a true teleport/late join. Clearing interpolation every
+	# physics frame made otherwise deterministic seated monkeys visibly jitter.
+	if correction_distance > 3.0:
+		actor.reset_physics_interpolation()
 
 
 func _on_crew_suited(peer_id: int, suit: SpaceSuitSystem,
@@ -865,22 +870,73 @@ func _update_voyage_camera(_delta: float, progress_override := -1.0,
 		var duration := LunarRocket.OUTBOUND_DURATION_SECONDS if rocket.outbound \
 			else LunarRocket.RETURN_DURATION_SECONDS
 		progress = clampf(rocket.voyage_elapsed / duration, 0.0, 1.0)
-	var basis := rocket.global_basis
-	var distance := lerpf(18.0, 34.0, sin(progress * PI))
-	var height := lerpf(7.0, 15.0, sin(progress * PI))
-	var orbit := sin(progress * TAU) * 0.36
+	var rocket_transform := rocket.get_global_transform_interpolated()
+	var basis := rocket_transform.basis
+	var rocket_position := rocket_transform.origin
+	var ascent_fraction := LunarRocket.OUTBOUND_PHASE_TIMES[0] \
+		/ LunarRocket.OUTBOUND_DURATION_SECONDS
+	if rocket.outbound and progress <= ascent_fraction:
+		# A high trailing view looks through the flame toward the real runway. The
+		# focus begins below the rocket, so the world visibly shrinks throughout
+		# the complete straight-up launch instead of instantly becoming a proxy.
+		var launch_t := progress / ascent_fraction
+		var launch_forward := rocket.earth_launch_transform.basis.z.normalized()
+		var launch_right := rocket.earth_launch_transform.basis.x.normalized()
+		# Begin inside the pad's authored 14 m foliage-free circle. In the first
+		# quarter-second the rocket is already hundreds of metres above the canopy,
+		# so ease out to the wider cinematic framing only after trees can no longer
+		# put the chase camera inside a crown.
+		var canopy_clear_t := smoothstep(0.0, 0.025, launch_t)
+		var forward_distance := lerpf(10.0,
+			lerpf(19.0, 34.0, launch_t), canopy_clear_t)
+		var right_distance := lerpf(3.0,
+			lerpf(7.0, 2.0, launch_t), canopy_clear_t)
+		var camera_height := lerpf(9.5,
+			lerpf(12.0, 22.0, launch_t), canopy_clear_t)
+		voyage_camera.global_position = rocket_position \
+			+ launch_forward * forward_distance \
+			+ launch_right * right_distance \
+			+ Vector3.UP * camera_height
+		var launchpad := rocket.earth_launch_transform.origin
+		var downward_focus := launchpad.lerp(rocket_position,
+			smoothstep(0.68, 1.0, launch_t) * 0.42)
+		voyage_camera.look_at(downward_focus, Vector3.UP)
+		voyage_camera.fov = lerpf(61.0, 72.0, launch_t)
+		voyage_camera.current = true
+		return
+	var distance := lerpf(20.0, 38.0, sin(progress * PI))
+	var height := lerpf(8.0, 17.0, sin(progress * PI))
+	var orbit := sin(progress * TAU) * 0.28
 	var side := basis.x * distance * orbit
 	var behind := basis.z * distance
-	voyage_camera.global_position = rocket.global_position + behind + side \
-		+ Vector3.UP * height
+	var chase_position := rocket_position + behind + side + basis.y * height
+	var focus_target := voyage_camera_focus_target()
+	var chase_fov := lerpf(66.0, 80.0, sin(progress * PI))
+	# Preserve the exact final launch framing at the ten-second boundary, then
+	# ease into the orbital chase over the first three atmosphere-exit seconds.
+	# Without this bridge the focus jumped from the shrinking runway to the
+	# rocket by more than ten kilometres in one rendered frame.
+	if rocket.outbound and rocket.state == LunarRocket.State.ATMOSPHERE_EXIT:
+		var transition := smoothstep(0.0, 3.0,
+			rocket.voyage_elapsed - float(LunarRocket.OUTBOUND_PHASE_TIMES[0]))
+		var launch_forward := rocket.earth_launch_transform.basis.z.normalized()
+		var launch_right := rocket.earth_launch_transform.basis.x.normalized()
+		var launch_position := rocket_position + launch_forward * 34.0 \
+			+ launch_right * 2.0 + Vector3.UP * 22.0
+		var launch_focus := rocket.earth_launch_transform.origin.lerp(
+			rocket_position, 0.42)
+		chase_position = launch_position.lerp(chase_position, transition)
+		focus_target = launch_focus.lerp(focus_target, transition)
+		chase_fov = lerpf(72.0, chase_fov, transition)
+	voyage_camera.global_position = chase_position
 	# During reentry the camera stays readable but picks up a deterministic,
 	# sub-metre heatshield vibration instead of random frame-dependent shake.
 	if rocket.state == LunarRocket.State.REENTRY:
 		voyage_camera.global_position += basis.x \
 			* sin(rocket.voyage_elapsed * 22.0) * 0.34 \
 			+ Vector3.UP * cos(rocket.voyage_elapsed * 17.0) * 0.16
-	voyage_camera.look_at(voyage_camera_focus_target(), Vector3.UP)
-	voyage_camera.fov = lerpf(68.0, 82.0, sin(progress * PI))
+	voyage_camera.look_at(focus_target, Vector3.UP)
+	voyage_camera.fov = chase_fov
 	voyage_camera.current = true
 
 
@@ -908,6 +964,11 @@ func voyage_camera_focus_target() -> Vector3:
 	var moon_focus := rocket.voyage_visuals.moon_visual.global_position
 	var elapsed := rocket.voyage_elapsed
 	match rocket.state:
+		LunarRocket.State.LAUNCH_ASCENT:
+			var ascent := clampf(rocket.voyage_elapsed \
+				/ float(LunarRocket.OUTBOUND_PHASE_TIMES[0]), 0.0, 1.0)
+			return rocket.earth_launch_transform.origin.lerp(rocket_focus,
+				smoothstep(0.72, 1.0, ascent) * 0.45)
 		LunarRocket.State.ATMOSPHERE_EXIT:
 			var reveal := smoothstep(0.0, 8.0,
 				elapsed - float(LunarRocket.OUTBOUND_PHASE_TIMES[0]))

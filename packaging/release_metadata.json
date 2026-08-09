@@ -1,8 +1,8 @@
 {
   "godot_compatibility": "4.7",
   "minimum_bootstrap": 1,
-  "network_protocol": 7,
-  "release_title": "TROOP 0.4 — ONE SMALL STEP",
-  "notes": "TROOP 0.4 turns the jungle into a finite, circumnavigable planet with continents, islands, huge oceans and lakes, plains, grasslands, desert, ice, and broad mountain systems whose major summits average about 1,200 m and top out at 6,000 m. A deterministic intercontinental road hierarchy reaches far beyond spawn, while the new smooth world atlas zooms from local satellite detail through live player headings to a rotatable atmospheric globe and detailed lunar atlas in space. A four-monkey rocket opens a complete lunar expedition: a real three-minute outbound flight, launch fire and exhaust, atmosphere departure through stars, planets, constellations, nebulae, and a spiral galaxy, lunar gravity, pressure suits, oxygen and backpack survival, a cheese villager market, admin moon travel, and a faster fiery ocean-splashdown return. Planetary realm, expedition, trade, and crew state use the new protocol v7 multiplayer contract, with bounded map caching and streaming designed to preserve high-speed performance.",
+  "network_protocol": 8,
+  "release_title": "TROOP 0.4.1 — FLIGHT READY",
+  "notes": "TROOP 0.4.1 publishes the previously local planet, Moon, road, vehicle, and character-recovery fixes in a fresh Windows build. Protocol v8 keeps the revised one-minute lunar voyage and multiplayer state authoritative. The rocket now climbs vertically before pointing toward the Moon, fitted articulated space suits move with the monkey, and shared 4K Pangaea Earth and lunar textures sharpen orbital views. Organic coast and hillside freeways gain deterministic bridges and warm-lit mountain tunnels. Altitude-aware terrain, canopy, sky, and collision streaming remain bounded at aircraft speed, with seamless LOD handoffs and mountain look-ahead. Motorcycle braking and handling are steadier, while vehicle dismount, defeat, and repeated revive restore every monkey body part without requiring a reconnect. Because the multiplayer protocol and project settings changed, Windows players must run the 0.4.1 installer once.",
   "requires_installer": true
 }

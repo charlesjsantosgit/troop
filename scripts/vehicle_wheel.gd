@@ -124,21 +124,21 @@ func step(body: RigidBody3D, dt: float, ground_distance: float,
 		slip_ratio = (spin * radius - v_long) / maxf(absf(v_long), 1.4)
 		var fx := mu_long * mu_scale * load \
 			* sin(1.65 * atan(pacejka_b_long * slip_ratio))
-		# Torque balance on the wheel: drive - brake - ground reaction.
+		# Torque balance on the wheel: integrate drive and ground reaction first,
+		# then let brake impulse approach zero. Subtracting a large signed brake
+		# torque directly can cross through zero in one substep and visibly spin the
+		# wheel backwards even though a brake cannot supply reverse drive.
 		var reaction := fx * radius
 		var braking := brake_torque
 		if handbrake:
 			braking = maxf(braking, 2600.0)
-		var net := drive_torque - reaction
-		if braking > 0.0:
-			var brake_sign := -signf(spin) if absf(spin) > 0.15 \
-				else -signf(net)
-			var applied := braking
-			# A brake can stop the wheel but never spin it backwards.
-			if absf(spin) < 0.15 and absf(net) < braking:
-				applied = absf(net)
-			net += brake_sign * applied
-		spin += net / inertia * sub
+		var previous_spin := spin
+		var unbraked_spin := spin + (drive_torque - reaction) / inertia * sub
+		spin = move_toward(unbraked_spin, 0.0, braking / inertia * sub) \
+			if braking > 0.0 else unbraked_spin
+		if braking > 0.0 and absf(previous_spin) > 0.0001 \
+				and signf(spin) != signf(previous_spin) and absf(spin) > 0.0001:
+			spin = 0.0
 		force_long += fx / float(SPIN_SUBSTEPS)
 	# Lateral slip angle (small-speed guard keeps parked cars still).
 	slip_angle = atan2(-v_lat, absf(v_long) + 0.6)
@@ -168,14 +168,14 @@ func step(body: RigidBody3D, dt: float, ground_distance: float,
 
 func _integrate_spin_airborne(dt: float) -> void:
 	var inertia := 0.5 * wheel_mass * radius * radius
-	var net := drive_torque
 	var braking := brake_torque + (2600.0 if handbrake else 0.0)
-	if braking > 0.0:
-		if absf(spin) > 0.15:
-			net -= signf(spin) * braking
-		else:
-			spin = 0.0
-	spin += net / inertia * dt
+	var previous_spin := spin
+	var unbraked_spin := spin + drive_torque / inertia * dt
+	spin = move_toward(unbraked_spin, 0.0, braking / inertia * dt) \
+		if braking > 0.0 else unbraked_spin
+	if braking > 0.0 and absf(previous_spin) > 0.0001 \
+			and signf(spin) != signf(previous_spin) and absf(spin) > 0.0001:
+		spin = 0.0
 	spin -= spin * 0.18 * dt   # bearing drag
 	spin_angle = fposmod(spin_angle + spin * dt, TAU)
 

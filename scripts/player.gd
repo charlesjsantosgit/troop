@@ -99,6 +99,7 @@ var supply_notice := ""
 var supply_notice_remaining := 0.0
 var defeated := false
 var defeat_sequence := 0
+var _defeat_presentation_started := false
 
 var state: int = S.AIR
 var jumps_used := 0
@@ -928,11 +929,27 @@ func take_damage(amount: float, source: Node3D, impulse: Vector3,
 
 
 func begin_defeat(hit_zone := "body", impact_impulse := Vector3.ZERO) -> void:
+	if _defeat_presentation_started:
+		return
+	_defeat_presentation_started = true
 	if vehicle:
 		exit_vehicle(true)
+	if rig:
+		rig.reset_pose_state(true)
 	defeated = true
 	defeat_sequence += 1
 	var death_velocity := velocity
+	# Defeat freezes the controller before its ordinary timer decay. Clear every
+	# buffered traversal state now so a later revive cannot resume a stale roll,
+	# gallop, coyote jump, rope wrap or vehicle animation.
+	coyote_t = 0.0
+	buffer_t = 0.0
+	regrab_t = 0.0
+	roll_t = 0.0
+	quad_t = 0.0
+	skid_t = 0.0
+	wrap_t = 0.0
+	wrap_used = 0.0
 	var spawn_parent: Node = world if world else get_parent()
 	if spawn_parent and not death_ragdoll:
 		death_ragdoll = MonkeyRagdoll.new()
@@ -976,6 +993,13 @@ func revive_at(pos: Vector3) -> void:
 	velocity = Vector3.ZERO
 	state = S.AIR
 	jumps_used = 0
+	coyote_t = 0.0
+	buffer_t = 0.0
+	regrab_t = 0.0
+	roll_t = 0.0
+	quad_t = 0.0
+	wrap_t = 0.0
+	wrap_used = 0.0
 	dived = false
 	wallsliding = false
 	galloping = false
@@ -990,6 +1014,7 @@ func revive_at(pos: Vector3) -> void:
 	swing_vine_id = ""
 	health = MAX_HEALTH
 	defeated = false
+	_defeat_presentation_started = false
 	_invulnerable_t = 1.5
 	collision_layer = 1
 	collision_mask = 1
@@ -998,6 +1023,7 @@ func revive_at(pos: Vector3) -> void:
 	if head_hitbox:
 		head_hitbox.set_active(true)
 	if rig:
+		rig.reset_pose_state(false)
 		rig.visible = true
 	if gun:
 		gun.visible = active_weapon == gun
@@ -1579,6 +1605,8 @@ func _release(pop: bool) -> void:
 
 
 func _anim() -> int:
+	if expedition_locked:
+		return MonkeyRig.Anim.CABIN
 	if vehicle:
 		return MonkeyRig.Anim.PILOT if vehicle.kind == Vehicle.Kind.JET \
 			else MonkeyRig.Anim.RIDE
@@ -1727,10 +1755,10 @@ func _process(dt: float) -> void:
 		return
 	if rig.top_level \
 			or rig.physics_interpolation_mode == Node.PHYSICS_INTERPOLATION_MODE_OFF:
-		rig.top_level = false
-		rig.physics_interpolation_mode = Node.PHYSICS_INTERPOLATION_MODE_INHERIT
-		rig.transform = Transform3D.IDENTITY
-		rig.reset_physics_interpolation()
+		# Covers an externally freed/despawned vehicle that bypassed the ordinary
+		# exit path. World-space pilot IK may have moved every joint origin, so a
+		# root-only detach would recreate the scattered-body session bug.
+		rig.reset_pose_state(false)
 	rig.set_vehicle_pose(null)
 	if rig.rotation != Vector3.ZERO:
 		rig.rotation = rig.rotation.lerp(Vector3.ZERO, 1.0 - exp(-10.0 * dt))
@@ -1824,14 +1852,7 @@ func exit_vehicle(bail := false) -> void:
 	collision_mask = 1
 	state = S.AIR
 	if rig:
-		rig.set_ride_lean(0.0)
-		rig.set_vehicle_pose(null)
-		rig.top_level = false
-		rig.physics_interpolation_mode = Node.PHYSICS_INTERPOLATION_MODE_INHERIT
-		rig.transform = Transform3D.IDENTITY
-		rig.reset_physics_interpolation()
-		rig.rotation = Vector3.ZERO
-		rig.position = Vector3.ZERO
+		rig.reset_pose_state(false)
 	if cam:
 		cam.end_vehicle_view()
 	_vehicle_exit_cd = 0.4
@@ -1846,6 +1867,8 @@ func _st_vehicle(dt: float, inp: Dictionary) -> void:
 		_collision_shape.disabled = false
 		collision_layer = 1
 		collision_mask = 1
+		if rig:
+			rig.reset_pose_state(false)
 		if cam:
 			cam.end_vehicle_view()
 		return

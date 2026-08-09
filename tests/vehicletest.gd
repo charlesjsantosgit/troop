@@ -83,6 +83,7 @@ func reset_bike_control_fixture(bike: Motorcycle) -> void:
 	bike._wheelie_cooldown = 0.0
 	bike._wheelie_crash_emitted = false
 	bike._wheelie_overpower = 0.0
+	bike._brake_pressure = 0.0
 	bike.engine.gear = 1
 	bike.engine.rpm = bike.engine.idle_rpm
 	bike.engine._shift_cooldown = 0.0
@@ -1227,6 +1228,15 @@ func run(main) -> void:
 			and bike.wheelie_target_nose_angle(1.0,
 				Motorcycle.WHEELIE_OVERPOWER_FULL + 0.05) > PI * 0.5 \
 			and not bike.anti_loop_active())
+	var airborne_brake_wheel := VehicleWheel.new()
+	airborne_brake_wheel.radius = 0.30
+	airborne_brake_wheel.wheel_mass = 10.0
+	airborne_brake_wheel.spin = 1.0
+	airborne_brake_wheel.brake_torque = 900.0
+	airborne_brake_wheel._integrate_spin_airborne(1.0 / 60.0)
+	check("airborne wheel braking stops at zero without reversing spin",
+		airborne_brake_wheel.spin >= -0.0001,
+		"spin=%.5f" % airborne_brake_wheel.spin)
 	var hill_normal := Vector3(0.0, 0.94, -0.342).normalized()
 	var hill_stand_basis: Basis = bike.kickstand_basis(
 		Vector3.FORWARD, hill_normal)
@@ -1294,6 +1304,85 @@ func run(main) -> void:
 		"speed %.1f→%.1f lean=%.2f heading=%.2f side=%.2f" % [
 			coast_start_speed, bike.forward_speed(), coast_lean, coast_heading,
 			coast_side])
+
+	# A motorcycle has no reverse gear: S progressively squeezes a front-biased
+	# brake, transfers load onto the fork, and then holds the stopped bike at zero.
+	# Exercise the real input and suspension path before the wheelie fixture.
+	neutral(p)
+	reset_bike_control_fixture(bike)
+	await sim(24)
+	for i in range(360):
+		if bike.forward_speed() >= 13.0:
+			break
+		p.ti.dir = Vector2(0, -1)
+		await sim(1)
+	neutral(p)
+	await sim(10)
+	var brake_start_speed: float = bike.forward_speed()
+	var brake_origin: Vector3 = bike.global_position
+	var brake_forward: Vector3 = bike.global_basis.z.normalized()
+	var baseline_front_compression: float = bike_front.compression
+	var baseline_rear_compression: float = bike_rear.compression
+	var peak_nose_down: float = 0.0
+	var peak_front_compression: float = baseline_front_compression
+	var minimum_rear_compression: float = baseline_rear_compression
+	var minimum_brake_speed: float = bike._planar_forward_speed()
+	var minimum_front_spin: float = bike_front.spin
+	var minimum_rear_spin: float = bike_rear.spin
+	var rear_lift_frames: int = 0
+	var furthest_brake_distance: float = 0.0
+	var maximum_brake_backtrack: float = 0.0
+	var first_frame_pressure: float = 0.0
+	p.ti.dir = Vector2(0, 1)
+	for frame in range(150):
+		await sim(1)
+		# SceneTree.physics_frame is emitted immediately before node physics
+		# callbacks. Sample after the matching process frame so Motorcycle's
+		# post-solver static-friction hold has completed, exactly as rendered play
+		# observes it, rather than reading the raw solver rebound one callback early.
+		await get_tree().process_frame
+		if frame == 0:
+			first_frame_pressure = bike._brake_pressure
+		peak_nose_down = maxf(peak_nose_down,
+			bike.global_basis.get_euler(EULER_ORDER_YXZ).x)
+		peak_front_compression = maxf(peak_front_compression,
+			bike_front.compression)
+		minimum_rear_compression = minf(minimum_rear_compression,
+			bike_rear.compression)
+		minimum_brake_speed = minf(minimum_brake_speed,
+			bike._planar_forward_speed())
+		minimum_front_spin = minf(minimum_front_spin, bike_front.spin)
+		minimum_rear_spin = minf(minimum_rear_spin, bike_rear.spin)
+		if not bike_rear.in_contact:
+			rear_lift_frames += 1
+		var brake_distance: float = (bike.global_position - brake_origin).dot(
+			brake_forward)
+		furthest_brake_distance = maxf(furthest_brake_distance, brake_distance)
+		maximum_brake_backtrack = maxf(maximum_brake_backtrack,
+			furthest_brake_distance - brake_distance)
+	check("bike brake pressure builds progressively instead of locking instantly",
+		first_frame_pressure > 0.02 and first_frame_pressure < 0.25 \
+			and bike._brake_pressure > 0.99,
+		"first=%.3f final=%.3f" % [first_frame_pressure, bike._brake_pressure])
+	check("front-biased braking pitches forward and transfers suspension load",
+		brake_start_speed > 9.0 and peak_nose_down > 0.025 \
+			and peak_nose_down < 0.50 \
+			and peak_front_compression > baseline_front_compression + 0.008 \
+			and (minimum_rear_compression \
+				< baseline_rear_compression - 0.004 or rear_lift_frames > 0) \
+			and rear_lift_frames < 45 and bike.driver == p,
+		("speed=%.2f pitch=%.3f front %.3f→%.3f rear %.3f→%.3f " \
+		+ "rear_air=%d") % [brake_start_speed, peak_nose_down,
+			baseline_front_compression, peak_front_compression,
+			baseline_rear_compression, minimum_rear_compression,
+			rear_lift_frames])
+	check("holding the motorcycle brake cannot drive or spin it backward",
+		minimum_brake_speed >= -0.08 and minimum_front_spin >= -0.08 \
+			and minimum_rear_spin >= -0.08 and maximum_brake_backtrack < 0.20 \
+			and bike._planar_forward_speed() >= -0.03,
+		("speed_min=%.3f spin_min=%.3f/%.3f backtrack=%.3f final=%.3f") % [
+			minimum_brake_speed, minimum_front_spin, minimum_rear_spin,
+			maximum_brake_backtrack, bike._planar_forward_speed()])
 	# Reset the long accelerated top-speed run, then approach each manoeuvre at
 	# an ordinary trail-riding speed through the same real W input as gameplay.
 	neutral(p)
@@ -1942,6 +2031,42 @@ func run(main) -> void:
 	check("aircraft aim reticle hides after leaving the jet",
 		not flight_reticle.visible)
 	neutral(p)
+	# Reproduce the reported aircraft-exit/death corruption by leaving the rig in
+	# a remote top-level vehicle transform with extreme IK joint rotations. Both
+	# the first and second defeat/revive cycles must restore one compact monkey.
+	var repeated_pose_reset_ok := true
+	for cycle in range(2):
+		p.rig.top_level = true
+		p.rig.physics_interpolation_mode = \
+			Node.PHYSICS_INTERPOLATION_MODE_OFF
+		p.rig.global_transform = Transform3D(
+			Basis(Vector3(0.3, 0.8, 0.2).normalized(), 2.1),
+			p.global_position + Vector3(140.0, 65.0, -90.0))
+		p.rig.sh_l.rotation = Vector3(2.7, -1.8, 2.2)
+		p.rig.el_r.rotation = Vector3(-2.4, 2.1, -1.7)
+		p.rig.el_r.position = Vector3(22.0, -15.0, 31.0)
+		p.rig.hip_l.rotation = Vector3(2.5, 1.9, -2.0)
+		p.rig.kn_r.rotation = Vector3(-2.2, -1.8, 2.6)
+		p.rig.kn_r.position = Vector3(-18.0, 27.0, -24.0)
+		p.rig.tail_segs[2].position = Vector3(35.0, 19.0, -28.0)
+		p.begin_defeat("body", Vector3.ZERO)
+		await sim(2)
+		var revive_position := Vector3(8.0 + cycle * 2.0,
+			DebugWorldBuilder.GROUND_Y + 0.2, 18.0)
+		p.revive_at(revive_position)
+		await sim(2)
+		var reset_contacts: PackedVector3Array = p.rig.limb_contact_points()
+		var compact: bool = reset_contacts.size() == 4
+		for contact in reset_contacts:
+			compact = compact and contact.distance_to(p.rig.global_position) < 2.0
+		repeated_pose_reset_ok = repeated_pose_reset_ok \
+			and not p.rig.top_level \
+			and p.rig.physics_interpolation_mode \
+				== Node.PHYSICS_INTERPOLATION_MODE_INHERIT \
+			and p.rig.transform.is_equal_approx(Transform3D.IDENTITY) \
+			and compact and p.rig.visible and not p.defeated
+	check("aircraft exit and repeated deaths fully reset every monkey body part",
+		repeated_pose_reset_ok)
 	# Finish with the intentionally destructive motorcycle case so the defeated
 	# local player is not needed by later fixtures. Full throttle after Ctrl asks
 	# for an attitude beyond vertical; only a physically completed backward loop

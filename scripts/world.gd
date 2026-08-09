@@ -17,14 +17,20 @@ const STREAM_DECORATION_BUDGET_USEC := 1400
 const STREAM_SHELL_MAX_OPS := 3
 const STREAM_SAFETY_MAX_OPS := 3
 const STREAM_DECORATION_MAX_OPS := 3
+const STRATOS_TERRAIN_ROW_BUDGET := 2
+const STRATOS_PREFLIGHT_ROW_BUDGET := 6
 const HORIZON_TREE_SOURCE_BUDGET := 4
 const SKYLINE_TREE_SOURCE_BUDGET := 16
 const HORIZON_TREE_SOURCE_BUDGET_FAST := 8
 const SKYLINE_TREE_SOURCE_BUDGET_FAST := 32
 const NEAR_PREDICTION_TIME := 0.85
 const NEAR_PREDICTION_MAX_CHUNKS := 8.0
-const NEAR_CORRIDOR_RADIUS := 2
 const STREAM_FAST_SPEED := 180.0
+const TERRAIN_PROBE_MAX_AGE_USEC := 80000
+const TERRAIN_PROBE_MAX_TRAVEL := Gen.CHUNK * 0.5
+const TERRAIN_PROBE_VELOCITY_DELTA := 18.0
+const TERRAIN_PROBE_SPACING := Gen.CHUNK * 2.0
+const TERRAIN_PROBE_MAX_SAMPLES := 24
 const HORIZON_PREDICTION_TIME := 1.4
 const HORIZON_PREDICTION_MAX_SECTORS := 3
 const GROUND_COLLISION_ALTITUDE_MARGIN := 18.0
@@ -40,6 +46,31 @@ const GROUND_ACTOR_COLLISION_SHELL_TARGET_LIMIT := \
 	(GROUND_ACTOR_COLLISION_SHELL_RADIUS * 2 + 1) \
 	* (GROUND_ACTOR_COLLISION_SHELL_RADIUS * 2 + 1)
 const STRATOS_PREDICTION_TIME := 2.0
+const STRATOS_TARGET_REFRESH_DISTANCE := Gen.CHUNK * 2.0
+const STRATOS_RADIUS_REFRESH_DISTANCE := Gen.CHUNK
+## Literal chunk/horizon foliage is no longer useful once its longest 220 m
+## visibility range sits well below the camera. Hysteresis prevents a hovering
+## aircraft from repeatedly waking and suspending the detail queues, while the
+## descent lookahead below wakes them several seconds before landing.
+const LITERAL_DETAIL_SUSPEND_CLEARANCE := 260.0
+const LITERAL_DETAIL_RESUME_CLEARANCE := 210.0
+## Collapse each outgoing tier before vertical camera distance reaches that
+## tier's hard visibility end, leaving the dithered successor already resident.
+# These vertical thresholds are intentionally below each GeometryInstance's 3D
+# visibility end. That leaves enough diagonal distance for the outgoing tier to
+# reach its complete horizontal fade before the successor takes over.
+const HORIZON_FOLIAGE_SUSPEND_CLEARANCE := 480.0
+const HORIZON_FOLIAGE_RESUME_CLEARANCE := 400.0
+const SKYLINE_FOLIAGE_SUSPEND_CLEARANCE := 1760.0
+const SKYLINE_FOLIAGE_RESUME_CLEARANCE := 1560.0
+## The original linear 300:1 altitude curve reached the complete 15-mile ring
+## at only ~83 m. Preserve the authored 15-mile summit view, but grow toward it
+## over the complete 6 km elevation range instead of on an ordinary hill.
+const VIEW_ALTITUDE_FLOOR := 10.0
+## Once horizon/skyline geometry is vertically out of range, its successor owns
+## the complete under-aircraft view. No 48 m ground patch needs to chase a jet
+## six kilometres overhead merely to fill a horizontal shader fade.
+const FLIGHT_TERRAIN_NEAR_FADE := 0.0
 const STREAMED_WILDERNESS_VEHICLE_LIMIT := 16
 const STREAM_DETAIL_ENQUEUED_META := &"stream_detail_enqueued_usec"
 const DEFEAT_VIEW_TIME := 2.35
@@ -82,13 +113,20 @@ var _stratos_queue: Array = []
 var _stratos_enqueued_at: Dictionary = {}
 var _stratos_targets: Dictionary = {}
 var _stratos_required_targets: Dictionary = {}
+var _active_stratos_sector: StratosChunk
+var _active_stratos_key := Vector2i(0x3fffffff, 0x3fffffff)
+var _active_stratos_started_usec := 0
 var _stratos_center := Vector2i(0x3fffffff, 0x3fffffff)
 var _stratos_prefetch_center := Vector2i(0x3fffffff, 0x3fffffff)
 var _stratos_ring := -1
+var _stratos_target_focus := Vector2(INF, INF)
+var _stratos_prefetch_focus := Vector2(INF, INF)
+var _stratos_target_radius := -1.0
 var current_view_distance := Gen.VIEW_BASE_DISTANCE
 var _altitude_quality_low := false
 var _stream_center := Vector2i(0x3fffffff, 0x3fffffff)
 var _prefetch_center := Vector2i(0x3fffffff, 0x3fffffff)
+var _near_guard_radius_state := -99
 var _horizon_center := Vector2i(0x3fffffff, 0x3fffffff)
 var _horizon_prefetch_center := Vector2i(0x3fffffff, 0x3fffffff)
 var _far_shell_lane := 0
@@ -98,6 +136,18 @@ var _decoration_lane := 0
 var _stream_speed_mps := 0.0
 var _ground_collision_required := true
 var _local_collision_required := true
+var _local_ground_clearance := 0.0
+var _terrain_probe_position := Vector3(INF, INF, INF)
+var _terrain_probe_velocity := Vector3.ZERO
+var _terrain_probe_ground := 0.0
+var _terrain_probe_collision_clearance := -INF
+var _terrain_probe_detail_clearance := -INF
+var _terrain_probe_usec := 0
+var _literal_detail_suppressed := false
+var _horizon_foliage_suppressed := false
+var _skyline_foliage_suppressed := false
+var _horizon_handoff_ready := true
+var _skyline_handoff_ready := true
 var _ground_actor_collision_centers: Array[Vector2i] = []
 var _actor_collision_targets: Dictionary = {}
 var _tracked_ground_vehicle_count := 0
@@ -160,11 +210,84 @@ var _biome_saturation_target := 1.08
 var _earth_streaming_enabled := true
 
 
+## Bounded altitude-to-horizon curve used by runtime streaming. The square root
+## keeps useful aerial vistas at moderate elevation while ensuring only the
+## planet's 6 km summit reaches the complete 15-mile tier.
+static func stream_view_distance_for_altitude(altitude: float) -> float:
+	var altitude_range := maxf(Gen.PLANET_SUMMIT_ELEVATION
+		- VIEW_ALTITUDE_FLOOR, 1.0)
+	var elevation_fraction := clampf((altitude - VIEW_ALTITUDE_FLOOR)
+		/ altitude_range, 0.0, 1.0)
+	return lerpf(Gen.VIEW_BASE_DISTANCE, Gen.VIEW_PEAK_DISTANCE,
+		sqrt(elevation_fraction))
+
+
+static func literal_detail_should_be_suppressed(clearance: float,
+		currently_suppressed: bool) -> bool:
+	return clearance > (LITERAL_DETAIL_RESUME_CLEARANCE
+		if currently_suppressed else LITERAL_DETAIL_SUSPEND_CLEARANCE)
+
+
+## True when a square stratos sector intersects a horizontal view circle. This
+## keeps the camera's complete radial horizon while discarding square-ring
+## corners that can never enter the far plane.
+static func stratos_sector_intersects_circle(sector_key: Vector2i,
+		focus_xz: Vector2, radius: float) -> bool:
+	var sector_size := Gen.CHUNK * Gen.STRATOS_SECTOR_CHUNKS
+	var minimum := Vector2(float(sector_key.x), float(sector_key.y)) * sector_size
+	var maximum := minimum + Vector2.ONE * sector_size
+	var nearest := Vector2(clampf(focus_xz.x, minimum.x, maximum.x),
+		clampf(focus_xz.y, minimum.y, maximum.y))
+	return nearest.distance_squared_to(focus_xz) <= radius * radius
+
+
+static func circular_stratos_targets(focus_xz: Vector2, radius: float) -> Dictionary:
+	var targets := {}
+	var sector_size := Gen.CHUNK * Gen.STRATOS_SECTOR_CHUNKS
+	var center := Vector2i(floori(focus_xz.x / sector_size),
+		floori(focus_xz.y / sector_size))
+	# One extra candidate row is needed when the focus is close to a sector edge.
+	var candidate_ring := ceili(maxf(radius, 0.0) / sector_size) + 1
+	for dx in range(-candidate_ring, candidate_ring + 1):
+		for dz in range(-candidate_ring, candidate_ring + 1):
+			var key := center + Vector2i(dx, dz)
+			if stratos_sector_intersects_circle(key, focus_xz, radius):
+				targets[key] = true
+	return targets
+
+
+## Conservative proof that the currently loaded sector set reaches the shader's
+## live circular edge. Sampling multiple radial directions catches a focus that
+## has moved into a sector not represented by the last target refresh; returning
+## one full sector short makes the benchmark margin explicitly negative.
+static func loaded_stratos_edge_coverage(loaded: Dictionary, focus_xz: Vector2,
+		radius: float, direction_count := 16) -> float:
+	if radius <= 0.0:
+		return 0.0
+	var sector_size := Gen.CHUNK * Gen.STRATOS_SECTOR_CHUNKS
+	var edge_radius := maxf(radius - 1.0, 0.0)
+	for direction_index in range(maxi(direction_count, 4)):
+		var angle := TAU * float(direction_index) \
+			/ float(maxi(direction_count, 4))
+		var edge := focus_xz + Vector2(cos(angle), sin(angle)) * edge_radius
+		var edge_key := Vector2i(floori(edge.x / sector_size),
+			floori(edge.y / sector_size))
+		if not loaded.has(edge_key):
+			return maxf(radius - sector_size, 0.0)
+	return radius
+
+
 func build() -> void:
 	RenderingServer.directional_shadow_atlas_set_size(2048, true)
 	_prepare_combat_fx()
 	BananaBullet.prepare_resources()
 	_apply_season(SeasonalCycle.season_from_system())
+	# Visuals caches shared materials across World instances and test fixtures.
+	# Re-establish ground-level handoffs explicitly so a previous aircraft world
+	# cannot leave a new session's static materials collapsed to the flight shell.
+	Visuals.set_altitude_lod_handoffs(Gen.SKYLINE_NEAR_FADE,
+		Gen.STRATOS_NEAR_FADE)
+	Visuals.set_stratos_view_radius(current_view_distance)
 	time_of_day_hours = Net.authoritative_cycle_hour()
 	water_fx = WaterFX.new()
 	water_fx.name = "WaterFX"
@@ -1170,14 +1293,64 @@ func _track_ground_actor_collision(actor: Node3D, focus: Vector3) -> bool:
 	return true
 
 
+func _refresh_terrain_clearance_probe(player_pos: Vector3,
+		velocity: Vector3) -> void:
+	var now := Time.get_ticks_usec()
+	var moved := player_pos.distance_squared_to(_terrain_probe_position) \
+		>= TERRAIN_PROBE_MAX_TRAVEL * TERRAIN_PROBE_MAX_TRAVEL
+	var velocity_changed := velocity.distance_squared_to(_terrain_probe_velocity) \
+		>= TERRAIN_PROBE_VELOCITY_DELTA * TERRAIN_PROBE_VELOCITY_DELTA
+	if _terrain_probe_usec > 0 and not moved and not velocity_changed \
+			and now - _terrain_probe_usec < TERRAIN_PROBE_MAX_AGE_USEC:
+		return
+	_terrain_probe_position = player_pos
+	_terrain_probe_velocity = velocity
+	_terrain_probe_usec = now
+	_terrain_probe_ground = Gen.height(player_pos.x, player_pos.z)
+	var vertical_end := player_pos.y \
+		+ minf(velocity.y, 0.0) * DESCENT_COLLISION_LOOKAHEAD
+	var local_clearance := player_pos.y - _terrain_probe_ground
+	_terrain_probe_detail_clearance = minf(local_clearance,
+		vertical_end - _terrain_probe_ground)
+	# Above the globally highest possible terrain, one local height sample is
+	# enough to drive visual LOD and collision is mathematically impossible. This
+	# removes the full planet/road height pipeline from ordinary cruise frames.
+	if minf(player_pos.y, vertical_end) \
+			> Gen.PLANET_SUMMIT_ELEVATION + GROUND_COLLISION_ALTITUDE_MARGIN:
+		_terrain_probe_collision_clearance = minf(player_pos.y, vertical_end) \
+			- Gen.PLANET_SUMMIT_ELEVATION
+		return
+	var horizontal_velocity := Vector2(velocity.x, velocity.z)
+	var travel := horizontal_velocity.length() * DESCENT_COLLISION_LOOKAHEAD
+	var sample_count := clampi(ceili(travel / TERRAIN_PROBE_SPACING), 1,
+		TERRAIN_PROBE_MAX_SAMPLES)
+	var minimum_clearance := _terrain_probe_detail_clearance
+	for sample_index in range(1, sample_count + 1):
+		var alpha := float(sample_index) / float(sample_count)
+		var seconds := DESCENT_COLLISION_LOOKAHEAD * alpha
+		var sample_pos := player_pos + velocity * seconds
+		var terrain_y := Gen.height(sample_pos.x, sample_pos.z)
+		minimum_clearance = minf(minimum_clearance, sample_pos.y - terrain_y)
+	_terrain_probe_collision_clearance = minimum_clearance
+	_terrain_probe_detail_clearance = minimum_clearance
+
+
 func _update_collision_requirement(player_pos: Vector3) -> void:
-	var ground := Gen.height(player_pos.x, player_pos.z)
-	var clearance := player_pos.y - ground
-	var vertical_velocity := local_player.velocity.y if local_player else 0.0
-	# A descending aircraft requests its swept collision corridor several seconds
-	# before impact, not only after it is already within 18 m of the terrain.
-	var predicted_clearance := clearance \
-		+ minf(vertical_velocity, 0.0) * DESCENT_COLLISION_LOOKAHEAD
+	var velocity := local_player.velocity if local_player else Vector3.ZERO
+	_refresh_terrain_clearance_probe(player_pos, velocity)
+	var clearance := player_pos.y - _terrain_probe_ground
+	# Sample the complete forward trajectory as well as vertical descent. A level
+	# aircraft approaching a rising mountain therefore wakes terrain/collision
+	# several seconds before contact instead of after reaching the slope.
+	var predicted_clearance := _terrain_probe_collision_clearance
+	_local_ground_clearance = clearance
+	# Wake literal detail from predicted rather than current clearance while
+	# descending. Collision retains its tighter 18 m safety contract below, but
+	# terrain dressing is already resident before the camera reaches tree range.
+	var detail_clearance := minf(clearance, _terrain_probe_detail_clearance)
+	_update_far_foliage_clearance(detail_clearance)
+	_set_literal_detail_suppressed(literal_detail_should_be_suppressed(
+		detail_clearance, _literal_detail_suppressed))
 	_local_collision_required = clearance <= GROUND_COLLISION_ALTITUDE_MARGIN \
 		or predicted_clearance <= GROUND_COLLISION_ALTITUDE_MARGIN
 	_ground_actor_collision_centers.clear()
@@ -1199,6 +1372,73 @@ func _update_collision_requirement(player_pos: Vector3) -> void:
 			_tracked_ground_vehicle_count += 1
 	_ground_collision_required = _local_collision_required \
 		or not _ground_actor_collision_centers.is_empty()
+
+
+func _set_literal_detail_suppressed(suppressed: bool) -> void:
+	if suppressed == _literal_detail_suppressed:
+		return
+	_literal_detail_suppressed = suppressed
+	var literal_visible := not suppressed
+	for chunk_value in chunks.values():
+		var chunk := chunk_value as Chunk
+		if is_instance_valid(chunk):
+			chunk.set_literal_foliage_visible(literal_visible)
+	# Suspended work is not scheduler debt. On descent, restart wait clocks and
+	# enqueue only the current playable shell; predictive terrain remains shell-only.
+	if not suppressed:
+		var now := Time.get_ticks_usec()
+		for queue in [_horizon_detail_queue, _skyline_detail_queue]:
+			for node in queue:
+				if is_instance_valid(node):
+					node.set_meta(STREAM_DETAIL_ENQUEUED_META, now)
+	_reconcile_chunk_detail_queue()
+
+
+func _update_far_foliage_clearance(clearance: float) -> void:
+	var suppress_horizon := clearance > (HORIZON_FOLIAGE_RESUME_CLEARANCE
+		if _horizon_foliage_suppressed else HORIZON_FOLIAGE_SUSPEND_CLEARANCE)
+	var suppress_skyline := clearance > (SKYLINE_FOLIAGE_RESUME_CLEARANCE
+		if _skyline_foliage_suppressed else SKYLINE_FOLIAGE_SUSPEND_CLEARANCE)
+	var now := Time.get_ticks_usec()
+	if suppress_horizon != _horizon_foliage_suppressed:
+		_horizon_foliage_suppressed = suppress_horizon
+		for sector_value in horizon_chunks.values():
+			var sector := sector_value as HorizonChunk
+			if is_instance_valid(sector):
+				sector.set_literal_foliage_visible(not suppress_horizon)
+		if not suppress_horizon:
+			for sector in _horizon_detail_queue:
+				if is_instance_valid(sector):
+					sector.set_meta(STREAM_DETAIL_ENQUEUED_META, now)
+	if suppress_skyline != _skyline_foliage_suppressed:
+		_skyline_foliage_suppressed = suppress_skyline
+		for sector_value in skyline_chunks.values():
+			var sector := sector_value as SkylineChunk
+			if is_instance_valid(sector):
+				sector.set_literal_foliage_visible(not suppress_skyline)
+		if not suppress_skyline:
+			for sector in _skyline_detail_queue:
+				if is_instance_valid(sector):
+					sector.set_meta(STREAM_DETAIL_ENQUEUED_META, now)
+	_update_altitude_lod_handoffs()
+
+
+func _update_altitude_lod_handoffs() -> void:
+	# On ascent, a successor immediately takes full ownership before the outgoing
+	# tier reaches its 3D visibility limit. On descent, keep that full successor
+	# coverage until the complete lower shell is resident again; rebuilding a
+	# freed 7x7/5x5 tier can take several bounded frames.
+	_horizon_handoff_ready = not _horizon_foliage_suppressed \
+		and _missing_square(horizon_chunks, center_horizon_sector(),
+			Gen.HORIZON_VIEW_R) == 0
+	_skyline_handoff_ready = not _skyline_foliage_suppressed \
+		and _missing_square(skyline_chunks, center_skyline_sector(),
+			Gen.SKYLINE_VIEW_R) == 0
+	Visuals.set_altitude_lod_handoffs(
+		Gen.SKYLINE_NEAR_FADE if _horizon_handoff_ready \
+			else FLIGHT_TERRAIN_NEAR_FADE,
+		Gen.STRATOS_NEAR_FADE if _skyline_handoff_ready \
+			else FLIGHT_TERRAIN_NEAR_FADE)
 
 func center_chunk() -> Vector2i:
 	var c := local_player.global_position if local_player else Vector3.ZERO
@@ -1291,11 +1531,23 @@ func _wrap_local_planet_actor() -> void:
 func _reset_planet_stream_focus() -> void:
 	_stream_center = Vector2i(0x3fffffff, 0x3fffffff)
 	_prefetch_center = _stream_center
+	_near_guard_radius_state = -99
+	_terrain_probe_position = Vector3(INF, INF, INF)
+	_terrain_probe_usec = 0
 	_horizon_center = _stream_center
 	_horizon_prefetch_center = _stream_center
 	_skyline_center = _stream_center
 	_stratos_center = _stream_center
 	_stratos_prefetch_center = _stream_center
+	_stratos_ring = -1
+	_stratos_target_focus = Vector2(INF, INF)
+	_stratos_prefetch_focus = Vector2(INF, INF)
+	_stratos_target_radius = -1.0
+	if is_instance_valid(_active_stratos_sector):
+		_active_stratos_sector.queue_free()
+	_active_stratos_sector = null
+	_active_stratos_key = Vector2i(0x3fffffff, 0x3fffffff)
+	_active_stratos_started_usec = 0
 	# A wrap or Moon round-trip invalidates queued coordinate priorities. Rebuild
 	# shell queues against the canonical destination on the next _stream() call
 	# instead of preserving timestamps from the old side of the planet. Detail
@@ -1377,24 +1629,24 @@ func _update_biome_ambience(dt: float) -> void:
 				_biome_fog_target = Color(0.43, 0.61, 0.43)
 				_biome_density_target = 0.00100
 				_biome_saturation_target = 1.08
-	# Altitude buys horizon: fog thins as the far plane stretches so distant
-	# sectors materialize inside haze (seamless), and near-field quality that
-	# is invisible from the air steps down to pay for the extra kilometres.
+	# Altitude buys horizon, but over the planet's complete elevation range. The
+	# old linear Gen helper saturated by ~83 m and forced an 81-sector satellite
+	# square over ordinary hills.
 	var altitude: float = local_player.global_position.y
-	var target_far := Gen.view_distance_for_altitude(altitude)
+	var target_far := stream_view_distance_for_altitude(altitude)
 	current_view_distance = lerpf(current_view_distance, target_far,
 		1.0 - exp(-0.55 * dt))
+	Visuals.set_stratos_view_radius(current_view_distance)
 	if local_player.cam:
 		local_player.cam.set_far_distance(gameplay_camera_far_distance(
 			current_view_distance, Net.active))
-	if altitude > 50.0 and not _altitude_quality_low:
+	if _literal_detail_suppressed and not _altitude_quality_low:
 		_altitude_quality_low = true
 		_sun.directional_shadow_max_distance = 45.0
 		_environment.ssao_enabled = false
-	elif altitude < 40.0 and _altitude_quality_low:
+	elif not _literal_detail_suppressed and _altitude_quality_low:
 		_altitude_quality_low = false
-		_sun.directional_shadow_max_distance = 70.0
-		_environment.ssao_enabled = true
+		_apply_effect_quality()
 	var night_fog := Color(0.055, 0.075, 0.13)
 	var fog_target := night_fog.lerp(_biome_fog_target,
 		0.16 + daylight_amount * 0.84)
@@ -1511,15 +1763,13 @@ func _apply_day_night(update_sky: bool) -> void:
 		twilight * (0.82 - high_sun * 0.54))
 	sky_top = sky_top.lerp(Color(0.22, 0.27, 0.32), storm * 0.68)
 	sky_horizon = sky_horizon.lerp(Color(0.40, 0.45, 0.49), storm * 0.56)
-	var ground_bottom := Color(0.008, 0.025, 0.075).lerp(
-		Color(0.08, 0.18, 0.11), daylight_amount)
-	var ground_horizon := Color(0.025, 0.080, 0.165).lerp(
-		Color(0.30, 0.48, 0.34), daylight_amount)
-	# Just below the horizon line the sky hemisphere must read as distant haze,
-	# not flat green: past the skyline tier (~1.9 km) it is all a viewer sees,
-	# and daytime aerial perspective already fades far terrain toward the sky.
-	ground_horizon = ground_horizon.lerp(sky_horizon, 0.66 * daylight_amount)
-	ground_bottom = ground_bottom.lerp(sky_horizon, 0.22 * daylight_amount)
+	# The sky shader already wraps a complete inward-facing sphere. Feed its lower
+	# hemisphere an altitude-aware atmospheric palette so looking below the
+	# terrain horizon cannot reveal the old dark nadir spot.
+	var nadir_palette := Visuals.full_sphere_nadir_palette(sky_top, sky_horizon,
+		daylight_amount, _local_ground_clearance)
+	var ground_bottom: Color = nadir_palette.bottom
+	var ground_horizon: Color = nadir_palette.horizon
 	var sky_energy := lerpf(0.68, 0.92, daylight_amount) \
 		* lerpf(1.0, weather_light, 0.48)
 	_celestial_sky.update_palette(sky_top, sky_horizon,
@@ -1543,8 +1793,9 @@ func _stream() -> void:
 	# its predictive center remain unchanged. Refresh collision targets first and
 	# rebuild the near shell set whenever that membership changes.
 	var collision_targets_changed := _refresh_collision_targets(cc, predicted)
+	var near_guard_changed := _near_guard_radius_state != _near_guard_radius()
 	if cc != _stream_center or predicted != _prefetch_center \
-			or collision_targets_changed:
+			or collision_targets_changed or near_guard_changed:
 		_refresh_near_targets(cc, predicted)
 	var hc := center_horizon_sector()
 	var horizon_sector_size := Gen.CHUNK * Gen.HORIZON_SECTOR_CHUNKS
@@ -1557,15 +1808,24 @@ func _stream() -> void:
 		-HORIZON_PREDICTION_MAX_SECTORS, HORIZON_PREDICTION_MAX_SECTORS),
 		clampi(horizon_offset.y, -HORIZON_PREDICTION_MAX_SECTORS,
 			HORIZON_PREDICTION_MAX_SECTORS))
-	if hc != _horizon_center or predicted_hc != _horizon_prefetch_center:
+	if _horizon_foliage_suppressed:
+		if not horizon_chunks.is_empty() or not _horizon_targets.is_empty() \
+				or _horizon_center.x != 0x3fffffff:
+			_suspend_horizon_stream()
+	elif hc != _horizon_center or predicted_hc != _horizon_prefetch_center:
 		_refresh_horizon_targets(hc, predicted_hc)
 	var sc := center_skyline_sector()
-	if sc != _skyline_center:
+	if _skyline_foliage_suppressed:
+		if not skyline_chunks.is_empty() or not _skyline_queue.is_empty() \
+				or _skyline_center.x != 0x3fffffff:
+			_suspend_skyline_stream()
+	elif sc != _skyline_center:
 		_refresh_skyline_targets(sc)
 	var stratos_sector_size := Gen.CHUNK * Gen.STRATOS_SECTOR_CHUNKS
-	var stc := Vector2i(floori(player_pos.x / stratos_sector_size),
-		floori(player_pos.z / stratos_sector_size))
-	var stratos_lead := Vector2(player_pos.x, player_pos.z) \
+	var stratos_focus := Vector2(player_pos.x, player_pos.z)
+	var stc := Vector2i(floori(stratos_focus.x / stratos_sector_size),
+		floori(stratos_focus.y / stratos_sector_size))
+	var stratos_lead := stratos_focus \
 		+ horizontal_velocity * STRATOS_PREDICTION_TIME
 	var predicted_stc := Vector2i(floori(stratos_lead.x / stratos_sector_size),
 		floori(stratos_lead.y / stratos_sector_size))
@@ -1573,9 +1833,19 @@ func _stream() -> void:
 	predicted_stc = stc + Vector2i(clampi(stratos_offset.x, -1, 1),
 		clampi(stratos_offset.y, -1, 1))
 	var ring := clampi(ceili(current_view_distance / stratos_sector_size), 1, 4)
+	var stratos_focus_changed := not _stratos_target_focus.is_finite() \
+		or _stratos_target_focus.distance_squared_to(stratos_focus) \
+			>= STRATOS_TARGET_REFRESH_DISTANCE * STRATOS_TARGET_REFRESH_DISTANCE
+	var stratos_prefetch_changed := not _stratos_prefetch_focus.is_finite() \
+		or _stratos_prefetch_focus.distance_squared_to(stratos_lead) \
+			>= STRATOS_TARGET_REFRESH_DISTANCE * STRATOS_TARGET_REFRESH_DISTANCE
+	var stratos_radius_changed := absf(current_view_distance
+		- _stratos_target_radius) >= STRATOS_RADIUS_REFRESH_DISTANCE
 	if stc != _stratos_center or predicted_stc != _stratos_prefetch_center \
-			or ring != _stratos_ring:
-		_refresh_stratos_targets(stc, predicted_stc, ring)
+			or ring != _stratos_ring or stratos_focus_changed \
+			or stratos_prefetch_changed or stratos_radius_changed:
+		_refresh_stratos_targets(stc, predicted_stc, ring, stratos_focus,
+			stratos_lead)
 
 	# Terrain shells, collision-critical completion, and visual decoration each
 	# receive their own elapsed-time budget. A busy safety lane can no longer
@@ -1584,6 +1854,9 @@ func _stream() -> void:
 	_sync_collision_queue()
 	_run_safety_work(cc, predicted)
 	_run_decorative_work()
+	# Shell construction is bounded, so a descent handoff may become ready on any
+	# frame. Retract successor coverage only after the just-built tier is complete.
+	_update_altitude_lod_handoffs()
 
 
 func _run_shell_work(cc: Vector2i, hc: Vector2i, sc: Vector2i,
@@ -1595,9 +1868,8 @@ func _run_shell_work(cc: Vector2i, hc: Vector2i, sc: Vector2i,
 		ops += 1
 	# The predictive guard normally makes this zero. If a 1000 mph diagonal or
 	# abrupt turn still exposes the current fine shell, complete that shell before
-	# discretionary far work. Coarse flight intentionally owns only a 3x3 fine
-	# shell, so use the same adaptive radius as target generation instead of
-	# treating its absent outer ring as a permanent emergency.
+	# discretionary far work. At coarse-flight altitude the active guard is -1,
+	# making this loop intentionally empty while the far tier owns the view.
 	var current_guard_radius := _near_guard_radius()
 	while ops < STREAM_SHELL_MAX_OPS \
 			and _missing_square(chunks, cc, current_guard_radius) > 0:
@@ -1608,6 +1880,7 @@ func _run_shell_work(cc: Vector2i, hc: Vector2i, sc: Vector2i,
 	# this frame's allowance. A one-frame anti-starvation deadline still gives the
 	# far tiers at least 30 opportunities/s at a 60 Hz render rate.
 	var far_waiting := not _horizon_queue.is_empty() or not _stratos_queue.is_empty() \
+		or is_instance_valid(_active_stratos_sector) \
 		or not _skyline_queue.is_empty()
 	var can_build_far := not built_near \
 		or Time.get_ticks_usec() - started < STREAM_SHELL_BUDGET_USEC \
@@ -1624,7 +1897,8 @@ func _run_shell_work(cc: Vector2i, hc: Vector2i, sc: Vector2i,
 	# This is what absorbs the nine-tile corner of a diagonal chunk crossing while
 	# keeping the common frame bounded to one near plus one far-tier operation.
 	if ops < STREAM_SHELL_MAX_OPS and not _queue.is_empty() \
-			and Time.get_ticks_usec() - started < STREAM_SHELL_BUDGET_USEC:
+			and (Time.get_ticks_usec() - started < STREAM_SHELL_BUDGET_USEC \
+			or _literal_detail_suppressed):
 		if _build_one_near_shell(cc):
 			ops += 1
 	_stream_shell_ops_last = ops
@@ -1650,7 +1924,7 @@ func _build_one_far_shell(hc: Vector2i, sc: Vector2i, stc: Vector2i,
 	# A current inner-horizon hole is already player-visible and must not wait
 	# behind a partially prefetched stratos row. The horizon queue is sorted with
 	# this inner window first, so one build restores the most urgent missing tile.
-	if _missing_square(horizon_chunks, hc,
+	if not _horizon_foliage_suppressed and _missing_square(horizon_chunks, hc,
 			maxi(Gen.HORIZON_VIEW_R - 1, 0)) > 0 \
 			and _build_one_horizon_shell(hc):
 		return true
@@ -1667,13 +1941,14 @@ func _build_one_far_shell(hc: Vector2i, sc: Vector2i, stc: Vector2i,
 	for attempt in range(4):
 		var lane := _far_shell_lane % 4
 		_far_shell_lane += 1
-		if lane < 3:
+		if lane < 3 and not _horizon_foliage_suppressed:
 			if _build_one_horizon_shell(hc):
 				return true
 		else:
 			if _build_one_stratos_shell(stc, ring):
 				return true
-			if _build_one_skyline_shell(sc):
+			if not _skyline_foliage_suppressed \
+					and _build_one_skyline_shell(sc):
 				return true
 	return false
 
@@ -1700,17 +1975,56 @@ func _build_one_horizon_shell(_hc: Vector2i) -> bool:
 
 
 func _build_one_stratos_shell(_stc: Vector2i, _ring: int) -> bool:
+	var row_budget := STRATOS_PREFLIGHT_ROW_BUDGET \
+		if _stream_speed_mps < 1.0 else STRATOS_TERRAIN_ROW_BUDGET
+	if is_instance_valid(_active_stratos_sector):
+		if not _stratos_targets.has(_active_stratos_key):
+			_active_stratos_sector.queue_free()
+			_stratos_enqueued_at.erase(_active_stratos_key)
+			_active_stratos_sector = null
+			_active_stratos_key = Vector2i(0x3fffffff, 0x3fffffff)
+			_active_stratos_started_usec = 0
+			_stream_cancelled_jobs += 1
+		else:
+			var finished := _active_stratos_sector.build_terrain_step(
+				row_budget)
+			if finished:
+				stratos_chunks[_active_stratos_key] = _active_stratos_sector
+				_stratos_enqueued_at.erase(_active_stratos_key)
+				_active_stratos_sector = null
+				_active_stratos_key = Vector2i(0x3fffffff, 0x3fffffff)
+				_active_stratos_started_usec = 0
+				_stream_shells_built += 1
+			return true
 	while not _stratos_queue.is_empty():
 		var k: Vector2i = _stratos_queue.pop_front()
-		_stratos_enqueued_at.erase(k)
 		if not _stratos_targets.has(k) or stratos_chunks.has(k):
+			_stratos_enqueued_at.erase(k)
 			_stream_cancelled_jobs += 1
 			continue
-		var sector: Node3D = StratosChunkScript.new()
+		var sector: StratosChunk = StratosChunkScript.new()
 		add_child(sector)
-		sector.setup(k)
-		stratos_chunks[k] = sector
-		_stream_shells_built += 1
+		# The moving edge is tens of kilometres away and needs silhouette/color,
+		# not a near-resolution 33x33 lattice. Half-resolution edge sectors share
+		# the same boundary samples and cut their total generation cost 4x;
+		# the current 3x3 retains the authored 192 m sampling.
+		var delta := (k - _stc).abs()
+		var cells := Gen.STRATOS_CELLS if maxi(delta.x, delta.y) <= 1 \
+			else maxi(int(Gen.STRATOS_CELLS / 2), 8)
+		sector.setup(k, cells, true)
+		_active_stratos_sector = sector
+		_active_stratos_key = k
+		_active_stratos_started_usec = int(_stratos_enqueued_at.get(k,
+			Time.get_ticks_usec()))
+		var initial_finished := sector.build_terrain_step(
+			row_budget)
+		if initial_finished:
+			stratos_chunks[k] = sector
+			_stratos_enqueued_at.erase(k)
+			_active_stratos_sector = null
+			_active_stratos_key = Vector2i(0x3fffffff, 0x3fffffff)
+			_active_stratos_started_usec = 0
+			_stream_shells_built += 1
 		return true
 	return false
 
@@ -1784,16 +2098,63 @@ func _run_safety_work(cc: Vector2i, predicted: Vector2i) -> void:
 	_stream_safety_usec_last = Time.get_ticks_usec() - started
 
 
+func _chunk_literal_detail_required(chunk: Chunk) -> bool:
+	if not is_instance_valid(chunk) or _literal_detail_suppressed:
+		return false
+	return _chunk_in_window(chunk.key, center_chunk(), Gen.VIEW_R)
+
+
+func _reconcile_chunk_detail_queue() -> void:
+	var retained: Array[Chunk] = []
+	for chunk in _chunk_detail_queue:
+		if is_instance_valid(chunk) and chunk.is_deferred_build_pending() \
+				and _chunk_literal_detail_required(chunk) and not retained.has(chunk):
+			retained.append(chunk)
+		else:
+			if is_instance_valid(chunk):
+				chunk.remove_meta(STREAM_DETAIL_ENQUEUED_META)
+	_chunk_detail_queue = retained
+	if _literal_detail_suppressed:
+		return
+	var now := Time.get_ticks_usec()
+	for chunk_value in chunks.values():
+		var chunk := chunk_value as Chunk
+		if not _chunk_literal_detail_required(chunk) \
+				or not chunk.is_deferred_build_pending() \
+				or _chunk_detail_queue.has(chunk):
+			continue
+		chunk.set_meta(STREAM_DETAIL_ENQUEUED_META, now)
+		_chunk_detail_queue.append(chunk)
+
+
 func _run_decorative_work() -> void:
 	var started := Time.get_ticks_usec()
 	var ops := 0
-	# Reserve the first decorative slice for a far-tree lane. It advances even
-	# while near shells/collisions are continuously arriving at aircraft speed.
-	if _build_one_far_tree_step():
+	# Terrain is always published first. Do not spend a frame constructing foliage
+	# over a missing visible shell, and suspend literal vegetation completely when
+	# the camera is above its longest visibility range; stratos canopy tint owns
+	# that aircraft view.
+	var terrain_missing := _missing_visible_near_terrain(center_chunk(), Gen.VIEW_R) > 0 \
+		or (not _horizon_foliage_suppressed \
+		and _missing_square(horizon_chunks, center_horizon_sector(),
+			maxi(Gen.HORIZON_VIEW_R - 1, 0)) > 0) \
+		or (not _skyline_foliage_suppressed \
+		and _missing_square(skyline_chunks, center_skyline_sector(),
+			maxi(Gen.SKYLINE_VIEW_R - 1, 0)) > 0) \
+		or _has_missing_required_stratos()
+	if terrain_missing:
+		_stream_decoration_ops_last = 0
+		_stream_decoration_usec_last = Time.get_ticks_usec() - started
+		return
+	# Finish current playable detail before spending the first slice on distant
+	# silhouettes. Every far-tree node already owns a terrain parent shell.
+	if not _literal_detail_suppressed and _build_one_near_detail_step():
+		ops += 1
+	elif _build_one_far_tree_step():
 		ops += 1
 	while ops < STREAM_DECORATION_MAX_OPS \
 			and Time.get_ticks_usec() - started < STREAM_DECORATION_BUDGET_USEC:
-		var prefer_near := (_decoration_lane % 2) == 0
+		var prefer_near := (_decoration_lane % 3) != 2
 		_decoration_lane += 1
 		var built := _build_one_near_detail_step() if prefer_near \
 			else _build_one_far_tree_step()
@@ -1810,7 +2171,10 @@ func _run_decorative_work() -> void:
 func _build_one_near_detail_step() -> bool:
 	while not _chunk_detail_queue.is_empty():
 		var chunk: Chunk = _chunk_detail_queue.pop_front()
-		if not is_instance_valid(chunk) or not chunk.is_deferred_build_pending():
+		if not is_instance_valid(chunk) or not chunk.is_deferred_build_pending() \
+				or not _chunk_literal_detail_required(chunk):
+			if is_instance_valid(chunk):
+				chunk.remove_meta(STREAM_DETAIL_ENQUEUED_META)
 			continue
 		var finished := chunk.finish_deferred_build_step()
 		if finished:
@@ -1827,6 +2191,8 @@ func _build_one_far_tree_step() -> bool:
 		var lane := _far_tree_lane % 2
 		_far_tree_lane += 1
 		if lane == 0:
+			if _horizon_foliage_suppressed:
+				continue
 			while not _horizon_detail_queue.is_empty():
 				var sector: HorizonChunk = _horizon_detail_queue.front()
 				if not is_instance_valid(sector) or sector.is_queued_for_deletion():
@@ -1840,6 +2206,8 @@ func _build_one_far_tree_step() -> bool:
 					sector.remove_meta(STREAM_DETAIL_ENQUEUED_META)
 				return true
 		else:
+			if _skyline_foliage_suppressed:
+				continue
 			while not _skyline_detail_queue.is_empty():
 				var sector: SkylineChunk = _skyline_detail_queue.front()
 				if not is_instance_valid(sector) or sector.is_queued_for_deletion():
@@ -1886,7 +2254,11 @@ func _chunk_in_window(k: Vector2i, center: Vector2i, radius: int) -> bool:
 
 
 func _near_guard_radius() -> int:
-	return 1 if _stream_speed_mps >= STREAM_FAST_SPEED \
+	# At ground/low flight the 108 m horizon handoff needs a complete 5x5. Once
+	# that tier is vertically invisible and no collision floor is required, its
+	# canopy-aware successor fully owns the view beneath the aircraft. A negative
+	# radius deliberately means there is no local fine-terrain guard to stream.
+	return -1 if _horizon_foliage_suppressed \
 		and not _ground_collision_required else Gen.VIEW_R
 
 
@@ -1952,25 +2324,20 @@ func _refresh_near_targets(cc: Vector2i, predicted: Vector2i) -> void:
 	_prefetch_center = predicted
 	var previous_times := _near_enqueued_at.duplicate()
 	_near_targets.clear()
-	# The swept corridor already carries a full 5-chunk-wide shell ahead of a fast
-	# vehicle. Retaining a second all-direction 7x7 guard duplicated that work and
-	# created seven to thirteen new jobs at every boundary—more than the bounded
-	# shell lane can sustain at 1000 mph. An abrupt turn remains covered by the
-	# resident horizon terrain while the current 5x5 gameplay shell rotates.
-	# At aircraft speed and altitude the resident horizon terrain is the visible
-	# handoff beneath the player. Keep only the directly tested 3x3 fine shell and
-	# its 3-wide predictive corridor until a local or remote ground actor needs
-	# collision; that immediately restores the normal 5x5 gameplay footprint.
 	var current_guard_radius := _near_guard_radius()
-	var coarse_flight := current_guard_radius < Gen.VIEW_R
-	_add_target_window(_near_targets, cc, current_guard_radius)
-	# Ahead of the guard, stream a swept corridor rather than another full square
-	# only at the endpoint. It is five chunks wide near gameplay/collision and three
-	# wide during coarse flight, covering the ~0.85 s / eight-chunk path.
-	var swept := _swept_near_centers(cc, predicted)
-	var corridor_radius := 1 if coarse_flight else NEAR_CORRIDOR_RADIUS
-	for i in range(1, swept.size()):
-		_add_target_window(_near_targets, swept[i], corridor_radius)
+	_near_guard_radius_state = current_guard_radius
+	# Keep the full gameplay shell and predictive corridor whenever near terrain is
+	# visible or collision-critical. At high altitude the -1 sentinel skips this
+	# redundant tier; the skyline/stratos shell already covers the camera nadir.
+	if current_guard_radius >= 0:
+		_add_target_window(_near_targets, cc, current_guard_radius)
+		# Ahead of the guard, stream a swept corridor rather than another full square
+		# only at the endpoint. The immediate next center matches the current shell
+		# width so its corners are ready; the remaining ~0.85 s path is only three wide.
+		var swept := _swept_near_centers(cc, predicted)
+		for i in range(1, swept.size()):
+			var corridor_radius := current_guard_radius if i == 1 else 1
+			_add_target_window(_near_targets, swept[i], corridor_radius)
 	# Collision work cannot build a floor without a near terrain shell. Actor
 	# patches are capped above, so merging them preserves the bounded scheduler and
 	# its existing per-frame operation/time ceilings.
@@ -1997,10 +2364,9 @@ func _refresh_near_targets(cc: Vector2i, predicted: Vector2i) -> void:
 		var collision_b := _collision_targets.has(b)
 		if collision_a != collision_b:
 			return collision_a
-		var enqueued_a := int(_near_enqueued_at.get(a, now))
-		var enqueued_b := int(_near_enqueued_at.get(b, now))
-		if enqueued_a != enqueued_b:
-			return enqueued_a < enqueued_b
+		# For predictive terrain the next current-row corners are more urgent than
+		# an older tile seven chunks down the flight path. Distance precedes age;
+		# retained timestamps still settle ties without starving a fixed location.
 		var distance_a := Vector2(a - cc).length_squared()
 		var distance_b := Vector2(b - cc).length_squared()
 		if not is_equal_approx(distance_a, distance_b):
@@ -2009,6 +2375,10 @@ func _refresh_near_targets(cc: Vector2i, predicted: Vector2i) -> void:
 		var predicted_distance_b := Vector2(b - predicted).length_squared()
 		if not is_equal_approx(predicted_distance_a, predicted_distance_b):
 			return predicted_distance_a < predicted_distance_b
+		var enqueued_a := int(_near_enqueued_at.get(a, now))
+		var enqueued_b := int(_near_enqueued_at.get(b, now))
+		if enqueued_a != enqueued_b:
+			return enqueued_a < enqueued_b
 		return a.x < b.x if a.x != b.x else a.y < b.y)
 
 	var dead: Array = []
@@ -2027,6 +2397,7 @@ func _refresh_near_targets(cc: Vector2i, predicted: Vector2i) -> void:
 		chunk.queue_free()
 		chunks.erase(k)
 	_retire_streamed_wilderness_vehicles()
+	_reconcile_chunk_detail_queue()
 
 
 func _refresh_horizon_targets(hc: Vector2i, predicted_hc: Vector2i) -> void:
@@ -2080,23 +2451,57 @@ func _refresh_horizon_targets(hc: Vector2i, predicted_hc: Vector2i) -> void:
 		horizon_chunks.erase(k)
 
 
+func _suspend_horizon_stream() -> void:
+	for sector_value in horizon_chunks.values():
+		if is_instance_valid(sector_value):
+			sector_value.queue_free()
+	horizon_chunks.clear()
+	_horizon_detail_queue.clear()
+	_horizon_queue.clear()
+	_horizon_pending.clear()
+	_horizon_targets.clear()
+	_horizon_enqueued_at.clear()
+	_horizon_center = Vector2i(0x3fffffff, 0x3fffffff)
+	_horizon_prefetch_center = _horizon_center
+
+
 func _refresh_stratos_targets(stc: Vector2i, predicted_stc: Vector2i,
-		ring: int) -> void:
+		ring: int, focus_xz: Vector2, predicted_focus_xz: Vector2) -> void:
 	_stratos_center = stc
 	_stratos_prefetch_center = predicted_stc
 	_stratos_ring = ring
+	_stratos_target_focus = focus_xz
+	_stratos_prefetch_focus = predicted_focus_xz
+	_stratos_target_radius = current_view_distance
 	var previous_times := _stratos_enqueued_at.duplicate()
-	_stratos_required_targets.clear()
+	_stratos_required_targets = circular_stratos_targets(focus_xz,
+		current_view_distance)
 	_stratos_targets.clear()
-	_add_target_window(_stratos_required_targets, stc, ring)
 	for k in _stratos_required_targets:
 		_stratos_targets[k] = true
-	if predicted_stc != stc:
-		_add_target_window(_stratos_targets, predicted_stc, ring)
+	if predicted_focus_xz.distance_squared_to(focus_xz) \
+			>= STRATOS_TARGET_REFRESH_DISTANCE * STRATOS_TARGET_REFRESH_DISTANCE:
+		var predicted_targets := circular_stratos_targets(predicted_focus_xz,
+			current_view_distance)
+		for k in predicted_targets:
+			_stratos_targets[k] = true
+	if is_instance_valid(_active_stratos_sector) \
+			and not _stratos_targets.has(_active_stratos_key):
+		_active_stratos_sector.queue_free()
+		_active_stratos_sector = null
+		_stratos_enqueued_at.erase(_active_stratos_key)
+		_active_stratos_key = Vector2i(0x3fffffff, 0x3fffffff)
+		_active_stratos_started_usec = 0
+		_stream_cancelled_jobs += 1
 	_stratos_queue.clear()
 	_stratos_enqueued_at.clear()
 	var now := Time.get_ticks_usec()
 	for k in _stratos_targets:
+		if is_instance_valid(_active_stratos_sector) and k == _active_stratos_key:
+			_stratos_enqueued_at[k] = int(previous_times.get(k,
+				_active_stratos_started_usec if _active_stratos_started_usec > 0 \
+				else now))
+			continue
 		if not stratos_chunks.has(k):
 			_stratos_queue.append(k)
 			_stratos_enqueued_at[k] = int(previous_times.get(k, now))
@@ -2164,10 +2569,23 @@ func _refresh_skyline_targets(sc: Vector2i) -> void:
 		skyline_chunks.erase(k)
 
 
+func _suspend_skyline_stream() -> void:
+	for sector_value in skyline_chunks.values():
+		if is_instance_valid(sector_value):
+			sector_value.queue_free()
+	skyline_chunks.clear()
+	_skyline_detail_queue.clear()
+	_skyline_queue.clear()
+	_skyline_pending.clear()
+	_skyline_enqueued_at.clear()
+	_skyline_center = Vector2i(0x3fffffff, 0x3fffffff)
+
+
 func _build_skyline_chunk(k: Vector2i) -> void:
 	var sector: SkylineChunk = SkylineChunkScript.new()
 	add_child(sector)
 	sector.setup(k, true)
+	sector.set_literal_foliage_visible(not _skyline_foliage_suppressed)
 	skyline_chunks[k] = sector
 	sector.set_meta(STREAM_DETAIL_ENQUEUED_META, Time.get_ticks_usec())
 	_skyline_detail_queue.append(sector)
@@ -2181,11 +2599,14 @@ func _build_chunk(k: Vector2i, defer_outer_details := true) -> void:
 	# Detail and collision construction then use bounded per-frame stages; the
 	# player cannot traverse the 48 m center chunk before that ring is completed.
 	var defer_details := defer_outer_details
-	c.setup(k, Net.collected, needs_collision, defer_details)
+	var coarse_terrain := _literal_detail_suppressed and not needs_collision
+	c.setup(k, Net.collected, needs_collision, defer_details, coarse_terrain)
 	chunks[k] = c
+	c.set_literal_foliage_visible(not _literal_detail_suppressed)
 	if defer_details:
-		c.set_meta(STREAM_DETAIL_ENQUEUED_META, Time.get_ticks_usec())
-		_chunk_detail_queue.append(c)
+		if _chunk_literal_detail_required(c):
+			c.set_meta(STREAM_DETAIL_ENQUEUED_META, Time.get_ticks_usec())
+			_chunk_detail_queue.append(c)
 	else:
 		_register_chunk_bananas(c)
 
@@ -2221,6 +2642,7 @@ func _build_horizon_chunk(k: Vector2i, defer_trees := true) -> void:
 	var sector = HorizonChunkScript.new()
 	add_child(sector)
 	sector.setup(k, defer_trees)
+	sector.set_literal_foliage_visible(not _horizon_foliage_suppressed)
 	horizon_chunks[k] = sector
 	if defer_trees:
 		sector.set_meta(STREAM_DETAIL_ENQUEUED_META, Time.get_ticks_usec())
@@ -2265,6 +2687,8 @@ func warm_online_entry(peer_id := 1) -> void:
 
 
 func _missing_square(loaded: Dictionary, center: Vector2i, radius: int) -> int:
+	if radius < 0:
+		return 0
 	var missing := 0
 	for dx in range(-radius, radius + 1):
 		for dz in range(-radius, radius + 1):
@@ -2273,12 +2697,13 @@ func _missing_square(loaded: Dictionary, center: Vector2i, radius: int) -> int:
 	return missing
 
 
-## At aircraft altitude the 12 m horizon lattice is intentionally resident
-## beneath the 3 m gameplay tiles. A detailed tile can therefore hand off for a
-## frame without revealing empty space. Report both facts: this function is the
-## player-visible terrain-coverage gate, while `near_detail_missing` below keeps
-## the fine-shell transition measurable.
+## Report the active near-shell contract rather than assuming every dormant
+## gameplay tile must exist. Ground/low flight calls this for 5x5; high flight
+## passes -1 after the canopy-aware far tier takes complete ownership.
+## `near_detail_missing` separately keeps the dormant full 5x5 measurable.
 func _missing_visible_near_terrain(center: Vector2i, radius: int) -> int:
+	if radius < 0:
+		return 0
 	var missing := 0
 	for dx in range(-radius, radius + 1):
 		for dz in range(-radius, radius + 1):
@@ -2358,14 +2783,12 @@ func streaming_snapshot() -> Dictionary:
 		elif sector_value.get_node_or_null("StratosTerrain") != null:
 			stratos_canopy_not_applicable_sectors += 1
 			stratos_canopy_sectors += 1
-	var stratos_sector_size := Gen.CHUNK * Gen.STRATOS_SECTOR_CHUNKS
-	var focus := local_player.global_position if local_player else Vector3.ZERO
-	var x_min := float(_stratos_center.x - _stratos_ring) * stratos_sector_size
-	var x_max := float(_stratos_center.x + _stratos_ring + 1) * stratos_sector_size
-	var z_min := float(_stratos_center.y - _stratos_ring) * stratos_sector_size
-	var z_max := float(_stratos_center.y + _stratos_ring + 1) * stratos_sector_size
-	var stratos_cardinal_coverage := minf(minf(focus.x - x_min, x_max - focus.x),
-		minf(focus.z - z_min, z_max - focus.z))
+	var stratos_square_capacity := 0
+	if _stratos_ring >= 0:
+		stratos_square_capacity = (2 * _stratos_ring + 1) \
+			* (2 * _stratos_ring + 1)
+	var stratos_culled_corners := maxi(stratos_square_capacity
+		- _stratos_required_targets.size(), 0)
 	var streamed_unprotected_vehicles := 0
 	for vid_value in _streamed_vehicle_sources.keys():
 		var vid := str(vid_value)
@@ -2377,26 +2800,65 @@ func streaming_snapshot() -> Dictionary:
 	for child in get_children():
 		if child is Vehicle:
 			vehicle_node_count += 1
-	var near_detail_age := _oldest_node_queue_ms(_chunk_detail_queue, now)
-	var horizon_tree_age := _oldest_node_queue_ms(_horizon_detail_queue, now)
-	var skyline_tree_age := _oldest_node_queue_ms(_skyline_detail_queue, now)
+	var coarse_near_shells := 0
+	for chunk_value in chunks.values():
+		var chunk := chunk_value as Chunk
+		if is_instance_valid(chunk) and chunk.is_coarse_terrain_shell():
+			coarse_near_shells += 1
+	var near_detail_age := 0.0 if _literal_detail_suppressed else \
+		_oldest_node_queue_ms(_chunk_detail_queue, now)
+	var horizon_tree_age := 0.0 if _horizon_foliage_suppressed else \
+		_oldest_node_queue_ms(_horizon_detail_queue, now)
+	var skyline_tree_age := 0.0 if _skyline_foliage_suppressed else \
+		_oldest_node_queue_ms(_skyline_detail_queue, now)
 	var shell_age := maxf(
 		_oldest_key_queue_ms(_queue, _near_enqueued_at, now),
 		maxf(_oldest_key_queue_ms(_horizon_queue, _horizon_enqueued_at, now),
 		maxf(_oldest_key_queue_ms(_skyline_queue, _skyline_enqueued_at, now),
 			_oldest_key_queue_ms(_stratos_queue, _stratos_enqueued_at, now))))
+	if is_instance_valid(_active_stratos_sector) \
+			and _active_stratos_started_usec > 0:
+		shell_age = maxf(shell_age,
+			float(now - _active_stratos_started_usec) / 1000.0)
+	var active_near_detail := 0 if _literal_detail_suppressed else \
+		_chunk_detail_queue.size()
+	var active_horizon_trees := 0 if _horizon_foliage_suppressed else \
+		_horizon_detail_queue.size()
+	var active_skyline_trees := 0 if _skyline_foliage_suppressed else \
+		_skyline_detail_queue.size()
 	var total_pending := _queue.size() + _horizon_queue.size() \
 		+ _skyline_queue.size() + _stratos_queue.size() \
-		+ _chunk_detail_queue.size() + _horizon_detail_queue.size() \
-		+ _skyline_detail_queue.size() + _collision_queue.size()
+		+ (1 if is_instance_valid(_active_stratos_sector) else 0) \
+		+ active_near_detail + active_horizon_trees \
+		+ active_skyline_trees + _collision_queue.size()
 	var prediction_lead := Vector2(_prefetch_center - _stream_center).length() \
 		* Gen.CHUNK
+	var live_stratos_focus := Vector2.ZERO
+	if local_player:
+		live_stratos_focus = Vector2(local_player.global_position.x,
+			local_player.global_position.z)
+	var stratos_cardinal_coverage := loaded_stratos_edge_coverage(
+		stratos_chunks, live_stratos_focus, current_view_distance, 4)
+	var stratos_radial_coverage := loaded_stratos_edge_coverage(
+		stratos_chunks, live_stratos_focus, current_view_distance, 16)
 	return {
 		"speed_mps": _stream_speed_mps,
+		"ground_clearance_m": _local_ground_clearance,
+		"view_distance_m": current_view_distance,
 		"prediction_lead_m": prediction_lead,
 		"prediction_lead_s": prediction_lead / maxf(_stream_speed_mps, 0.001),
 		"ground_collision_required": _ground_collision_required,
 		"local_collision_required": _local_collision_required,
+		"literal_detail_suppressed": _literal_detail_suppressed,
+		"horizon_foliage_suppressed": _horizon_foliage_suppressed,
+		"skyline_foliage_suppressed": _skyline_foliage_suppressed,
+		"horizon_handoff_ready": _horizon_handoff_ready,
+		"skyline_handoff_ready": _skyline_handoff_ready,
+		"horizon_tier_suppressed": _horizon_foliage_suppressed,
+		"skyline_tier_suppressed": _skyline_foliage_suppressed,
+		"canopy_signal_tier": "stratos_tint" if not _skyline_handoff_ready \
+			else ("skyline_tint" if not _horizon_handoff_ready \
+			else "literal_handoff"),
 		"tracked_ground_vehicles": _tracked_ground_vehicle_count,
 		"actor_collision_targets": _actor_collision_targets.size(),
 		"actor_collision_target_limit": GROUND_ACTOR_COLLISION_SHELL_TARGET_LIMIT,
@@ -2405,26 +2867,40 @@ func streaming_snapshot() -> Dictionary:
 		"near_queue": _queue.size(),
 		"horizon_queue": _horizon_queue.size(),
 		"skyline_queue": _skyline_queue.size(),
-		"stratos_queue": _stratos_queue.size(),
+		"stratos_queue": _stratos_queue.size() \
+			+ (1 if is_instance_valid(_active_stratos_sector) else 0),
 		"collision_queue": _collision_queue.size(),
-		"near_detail_queue": _chunk_detail_queue.size(),
-		"horizon_tree_queue": _horizon_detail_queue.size(),
-		"skyline_tree_queue": _skyline_detail_queue.size(),
+		"near_detail_queue": active_near_detail,
+		"horizon_tree_queue": active_horizon_trees,
+		"skyline_tree_queue": active_skyline_trees,
+		"near_detail_suspended": _chunk_detail_queue.size() - active_near_detail,
+		"horizon_tree_suspended": _horizon_detail_queue.size()
+			- active_horizon_trees,
+		"skyline_tree_suspended": _skyline_detail_queue.size()
+			- active_skyline_trees,
 		"total_pending": total_pending,
 		"shell_oldest_ms": shell_age,
 		"near_detail_oldest_ms": near_detail_age,
 		"far_tree_oldest_ms": maxf(horizon_tree_age, skyline_tree_age),
-		"near_path_missing": _missing_square(chunks, cc, 1),
-		"near_current_missing": _missing_visible_near_terrain(cc, Gen.VIEW_R),
+		"near_path_missing": 0 if _near_guard_radius() < 0 else \
+			_missing_square(chunks, cc, 1),
+		"near_current_missing": _missing_visible_near_terrain(cc,
+			_near_guard_radius()),
 		"near_detail_missing": _missing_square(chunks, cc, Gen.VIEW_R),
-		"horizon_inner_missing": _missing_square(horizon_chunks, hc,
-			maxi(Gen.HORIZON_VIEW_R - 1, 0)),
-		"skyline_inner_missing": _missing_square(skyline_chunks, sc,
-			maxi(Gen.SKYLINE_VIEW_R - 1, 0)),
+		"coarse_near_shells": coarse_near_shells,
+		"horizon_inner_missing": 0 if _horizon_foliage_suppressed else \
+			_missing_square(horizon_chunks, hc,
+				maxi(Gen.HORIZON_VIEW_R - 1, 0)),
+		"skyline_inner_missing": 0 if _skyline_foliage_suppressed else \
+			_missing_square(skyline_chunks, sc,
+				maxi(Gen.SKYLINE_VIEW_R - 1, 0)),
 		"stratos_required": _stratos_required_targets.size(),
 		"stratos_required_loaded": stratos_required_loaded,
 		"stratos_required_missing": stratos_required_missing,
+		"stratos_square_capacity": stratos_square_capacity,
+		"stratos_culled_corner_targets": stratos_culled_corners,
 		"stratos_cardinal_coverage_m": stratos_cardinal_coverage,
+		"stratos_radial_coverage_m": stratos_radial_coverage,
 		"collision_corridor_missing": collision_missing,
 		"stratos_canopy_sectors": stratos_canopy_sectors,
 		"stratos_canopy_geometry_sectors": stratos_canopy_geometry_sectors,

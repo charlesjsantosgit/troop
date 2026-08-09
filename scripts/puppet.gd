@@ -75,6 +75,7 @@ func set_externally_driven(driven: bool) -> void:
 		# root. Drop the cabin's full basis before network interpolation resumes.
 		global_transform = Transform3D(Basis.IDENTITY, current_position)
 	if rig:
+		rig.reset_pose_state(false)
 		if rig.top_level \
 				or rig.physics_interpolation_mode \
 					== Node.PHYSICS_INTERPOLATION_MODE_OFF:
@@ -281,10 +282,10 @@ func _process(dt: float) -> void:
 		return
 	if rig.top_level \
 			or rig.physics_interpolation_mode == Node.PHYSICS_INTERPOLATION_MODE_OFF:
-		rig.top_level = false
-		rig.physics_interpolation_mode = Node.PHYSICS_INTERPOLATION_MODE_INHERIT
-		rig.transform = Transform3D.IDENTITY
-		rig.reset_physics_interpolation()
+		# Vehicle IK writes world-space origins into elbows, knees and tail joints.
+		# Remote dismounts need the same complete lifecycle reset as the local
+		# player or other clients keep a scattered monkey until reconnecting.
+		rig.reset_pose_state(false)
 	rig.set_vehicle_pose(null)
 	if rig.rotation != Vector3.ZERO:
 		rig.rotation = rig.rotation.lerp(Vector3.ZERO, 1.0 - exp(-10.0 * dt))
@@ -335,7 +336,9 @@ func _process(dt: float) -> void:
 		melee_progress, _melee_combo)
 	rig.set_healing_pose(_state_healing_progress > 0.0,
 		_state_healing_progress)
-	rig.update_motion(dt, _anim, _vel, _anim <= MonkeyRig.Anim.SPRINT, pivot)
+	var presentation_anim := MonkeyRig.Anim.CABIN if _externally_driven else _anim
+	rig.update_motion(dt, presentation_anim, _vel,
+		presentation_anim <= MonkeyRig.Anim.SPRINT, pivot)
 	_update_water_effects()
 
 
@@ -441,6 +444,8 @@ func _weapon_back_transform(weapon: Node3D) -> Transform3D:
 
 func begin_defeat(pos: Vector3, yaw: float, death_velocity: Vector3,
 		impulse: Vector3, headshot: bool) -> void:
+	if defeated_visual:
+		return
 	if is_instance_valid(death_ragdoll):
 		death_ragdoll.queue_free()
 	death_ragdoll = MonkeyRagdoll.new()
@@ -451,7 +456,7 @@ func begin_defeat(pos: Vector3, yaw: float, death_velocity: Vector3,
 	_defeat_guard_t = 1.75
 	body_hitbox.set_active(false)
 	head_hitbox.set_active(false)
-	rig.set_rope(false, Vector3.ZERO, Vector3.ZERO)
+	rig.reset_pose_state(true)
 	rig.visible = false
 	gun.visible = false
 	shotgun.visible = false
@@ -466,6 +471,7 @@ func _end_defeat() -> void:
 	death_ragdoll = null
 	body_hitbox.set_active(true)
 	head_hitbox.set_active(true)
+	rig.reset_pose_state(false)
 	rig.visible = true
 	gun.visible = _active_weapon_kind == Net.WEAPON_REVOLVER
 	shotgun.visible = _active_weapon_kind == Net.WEAPON_SHOTGUN

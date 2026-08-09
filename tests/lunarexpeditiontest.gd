@@ -1,6 +1,6 @@
-extends SceneTree
-## Standalone deterministic lunar gameplay verification. Run with:
-##   godot --headless --path . -s tests/lunarexpeditiontest.gd
+extends Node
+## Deterministic lunar gameplay verification loaded after project autoloads:
+##   godot --headless --path . res://scenes/main.tscn -- lunarexpeditiontest
 
 var passed := 0
 var total := 0
@@ -8,6 +8,7 @@ var total := 0
 
 class DummyAdminActor:
 	extends Node3D
+	var display_name := "Test Astronaut"
 	var last_teleport := Vector3.INF
 
 	func admin_teleport(destination: Vector3) -> void:
@@ -15,7 +16,7 @@ class DummyAdminActor:
 		global_position = destination
 
 
-func _initialize() -> void:
+func run() -> void:
 	call_deferred("_run")
 
 
@@ -32,7 +33,7 @@ func _run() -> void:
 	print("LUNAR EXPEDITION TEST")
 	var stage := Node3D.new()
 	stage.name = "LunarTestStage"
-	root.add_child(stage)
+	add_child(stage)
 
 	# --- backpack-gated deterministic inventory ----------------------------
 	var inventory := LunarInventory.new()
@@ -57,7 +58,7 @@ func _run() -> void:
 
 	var inventory_ui := BackpackInventoryUI.new()
 	stage.add_child(inventory_ui)
-	await process_frame
+	await get_tree().process_frame
 	inventory_ui.bind_inventory(inventory)
 	_check(inventory_ui.open_inventory() \
 			and inventory_ui.displayed_slot_count() == LunarInventory.NORMAL_SLOTS,
@@ -68,14 +69,35 @@ func _run() -> void:
 	var suited_actor := DummyAdminActor.new()
 	suited_actor.name = "SuitedMonkey"
 	stage.add_child(suited_actor)
+	var view_arms := FirstPersonArms.new()
+	view_arms.configure(suited_actor)
+	suited_actor.add_child(view_arms)
+	await get_tree().process_frame
+	var bare_sleeve_material: Material = view_arms._left_fore.material_override
+	var bare_glove_material: Material = view_arms._glove_meshes[0].material_override
+	var bandage_material: Material = view_arms._bandage_strip.material_override
 	var suit := SpaceSuitSystem.new()
 	_check(suit.equip_for(suited_actor, inventory),
 		"space suit attaches to an arbitrary monkey integration node")
-	await process_frame
-	_check(suit.equipped and suit.visual_primitive_count() == 8 \
+	await get_tree().process_frame
+	_check(suit.equipped and suit.visual_primitive_count() >= 9 \
 			and inventory.backpack_kind == LunarInventory.Backpack.SPACE \
 			and inventory.slot_count() == LunarInventory.SPACE_SLOTS,
 		"suit supplies visible helmet/tanks and an eighteen-slot space pack")
+	var pressure_viewmodel_ok := view_arms.has_space_suit_presentation() \
+		and view_arms._bandage_strip.material_override == bandage_material
+	for sleeve in view_arms._sleeve_meshes:
+		pressure_viewmodel_ok = pressure_viewmodel_ok \
+			and sleeve.material_override \
+				== SpaceSuitSystem.pressure_sleeve_material() \
+			and sleeve.layers == 1
+	for glove in view_arms._glove_meshes:
+		pressure_viewmodel_ok = pressure_viewmodel_ok \
+			and glove.material_override \
+				== SpaceSuitSystem.pressure_glove_material() \
+			and glove.layers == 1
+	_check(pressure_viewmodel_ok,
+		"first-person arms use matching pressure sleeves and gloves without recolouring bandages")
 	suit.oxygen_seconds = 10.0
 	suit.set_vacuum_exposure(true)
 	suit.advance_life_support(4.0)
@@ -88,12 +110,54 @@ func _run() -> void:
 	_check(is_equal_approx(suit.oxygen_seconds,
 			SpaceSuitSystem.OXYGEN_CAPACITY_SECONDS),
 		"full refill restores the twelve-minute tank capacity")
+	suit.set_vacuum_exposure(false)
+	var unequipped_ok := suit.unequip() \
+		and not view_arms.has_space_suit_presentation()
+	for sleeve in view_arms._sleeve_meshes:
+		unequipped_ok = unequipped_ok \
+			and sleeve.material_override == bare_sleeve_material
+	for glove in view_arms._glove_meshes:
+		unequipped_ok = unequipped_ok \
+			and glove.material_override == bare_glove_material
+	_check(unequipped_ok,
+		"unequipping restores the exact first-person fur and paw materials")
+	_check(suit.equip_for(suited_actor, inventory) \
+			and view_arms.has_space_suit_presentation(),
+		"re-equipping restores the first-person pressure garment")
+
+	# Joint-parented shells are intentionally outside the suit node. Exercise a
+	# complete actor exit/re-entry to ensure those roots rebuild once, stay on the
+	# local-body render layer, and preserve life-support state.
+	var suited_rig := MonkeyRig.new()
+	suited_rig.setup(suited_actor.display_name, false)
+	suited_actor.add_child(suited_rig)
+	suit.oxygen_seconds = 321.0
+	var suit_instance_id := suit.get_instance_id()
+	stage.remove_child(suited_actor)
+	var exit_cleared_visuals := suit.equipped \
+		and suit.visual_primitive_count() == 0
+	stage.add_child(suited_actor)
+	await get_tree().process_frame
+	var helmet_root := suited_rig.head_p.get_node_or_null("SpaceSuitHelmet")
+	var helmet_mesh := helmet_root.get_node_or_null("ClearPressureHelmet") \
+		if helmet_root else null
+	var helmet_root_count := 0
+	for child in suited_rig.head_p.get_children():
+		if child.name == "SpaceSuitHelmet":
+			helmet_root_count += 1
+	_check(exit_cleared_visuals and suit.get_instance_id() == suit_instance_id \
+			and suit.equipped and is_equal_approx(suit.oxygen_seconds, 321.0) \
+			and suit.visual_primitive_count() == 20 \
+			and helmet_root_count == 1 and helmet_root.visible \
+			and helmet_mesh is MeshInstance3D \
+			and helmet_mesh.layers == MonkeyRig.LOCAL_BODY_VISUAL_LAYER,
+		"equipped articulated suit rebuilds once after actor tree re-entry")
 
 	# --- playable moon, physical gravity, and admin route ------------------
 	var moon := MoonWorld.new()
 	moon.moon_seed = 741_969
 	stage.add_child(moon)
-	await process_frame
+	await get_tree().process_frame
 	_check(is_equal_approx(MoonWorld.LUNAR_GRAVITY, 1.62) \
 			and moon.gravity_at(Vector3.ZERO).is_equal_approx(
 				Vector3(0.0, -1.62, 0.0)) \
@@ -153,10 +217,10 @@ func _run() -> void:
 	_check(not bool(rejected_trade.ok) and int(rejected_trade.balance) == 99,
 		"shop preserves currency when the monkey has no backpack")
 
-	# --- four-seat 180-second outbound rocket ------------------------------
+	# --- four-seat one-minute outbound rocket -------------------------------
 	var rocket := LunarRocket.new()
 	stage.add_child(rocket)
-	await process_frame
+	await get_tree().process_frame
 	rocket.set_physics_process(false)
 	var earth_pose := Transform3D(Basis.IDENTITY, Vector3(0.0, 5.0, 0.0))
 	var moon_pose := moon.global_transform * moon.landing_transform()
@@ -169,11 +233,11 @@ func _run() -> void:
 		"rocket is a physical code-native hull with four modeled crew seats")
 	_check(rocket.flame_particle_budget() == 160,
 		"launch and reentry fire use a bounded 160-particle budget")
-	_check(LunarRocket.state_for_elapsed(true, 27.999) \
+	_check(LunarRocket.state_for_elapsed(true, 9.999) \
 			== LunarRocket.State.LAUNCH_ASCENT \
-			and LunarRocket.state_for_elapsed(true, 28.0) \
+			and LunarRocket.state_for_elapsed(true, 10.0) \
 				== LunarRocket.State.ATMOSPHERE_EXIT \
-			and LunarRocket.state_for_elapsed(false, 75.0) \
+			and LunarRocket.state_for_elapsed(false, 28.0) \
 				== LunarRocket.State.REENTRY,
 		"network clocks map to exact shared cinematic state boundaries")
 	var backdrop := rocket.voyage_visuals.backdrop_counts()
@@ -217,32 +281,41 @@ func _run() -> void:
 			and not rocket.voyage_visuals.star_field.visible,
 		"launch ignition starts flame/presentation while atmosphere hides stars")
 	var earth_scale_at_launch := rocket.voyage_visuals.earth_scale()
-	rocket.advance_voyage(27.999)
+	var ascent_a := rocket._flight_transform(0.03)
+	var ascent_b := rocket._flight_transform(0.12)
+	_check(Vector2(ascent_a.origin.x, ascent_a.origin.z).distance_to(
+			Vector2(earth_pose.origin.x, earth_pose.origin.z)) < 0.001 \
+			and Vector2(ascent_b.origin.x, ascent_b.origin.z).distance_to(
+				Vector2(earth_pose.origin.x, earth_pose.origin.z)) < 0.001 \
+			and ascent_b.origin.y > ascent_a.origin.y \
+			and ascent_b.basis.y.dot(Vector3.UP) > 0.98,
+		"initial rocket path rises straight up with its nose on the tangent")
+	rocket.advance_voyage(9.999)
 	_check(rocket.state == LunarRocket.State.LAUNCH_ASCENT,
-		"outbound ascent owns the first 28 seconds")
+		"outbound ascent owns the first ten seconds")
 	rocket.advance_voyage(0.001)
 	_check(rocket.state == LunarRocket.State.ATMOSPHERE_EXIT \
 			and rocket.voyage_visuals.star_field.visible,
-		"atmosphere exit begins at exactly 28 seconds with stars revealed")
-	rocket.advance_voyage(34.0)
+		"atmosphere exit begins at exactly ten seconds with stars revealed")
+	rocket.advance_voyage(10.0)
 	_check(rocket.state == LunarRocket.State.SPACE_CRUISE \
 			and rocket.atmosphere_fraction() == 0.0 \
 			and rocket.voyage_visuals.earth_scale() < earth_scale_at_launch,
 		"space phase reveals stars while the whole Earth visibly recedes")
-	rocket.advance_voyage(92.0)
+	rocket.advance_voyage(28.0)
 	_check(rocket.state == LunarRocket.State.LUNAR_APPROACH,
-		"camera pan and lunar approach begin at 154 seconds")
-	rocket.advance_voyage(25.999)
+		"camera pan and lunar approach begin at 48 seconds")
+	rocket.advance_voyage(11.999)
 	_check(rocket.state != LunarRocket.State.LANDED_MOON \
 			and absf(rocket.remaining_seconds() - 0.001) < 0.0002,
-		"rocket remains in flight until the full three minutes elapse")
+		"rocket remains in flight until the full minute elapses")
 	rocket.advance_voyage(0.001)
 	_check(rocket.state == LunarRocket.State.LANDED_MOON \
 			and is_equal_approx(rocket.voyage_elapsed,
 				LunarRocket.OUTBOUND_DURATION_SECONDS) \
 			and rocket.global_transform.is_equal_approx(moon_pose) \
 			and not rocket.voyage_visuals.visible,
-		"outbound voyage lands at exactly 180.000 seconds")
+		"outbound voyage lands at exactly 60.000 seconds")
 	var all_suited := true
 	for peer_id in range(1, 5):
 		var equipment: Dictionary = rocket.crew_equipment(peer_id)
@@ -265,29 +338,29 @@ func _run() -> void:
 	_check(rocket.begin_return_to_earth() \
 			and LunarRocket.RETURN_DURATION_SECONDS \
 				< LunarRocket.OUTBOUND_DURATION_SECONDS,
-		"return begins from the moon and is one minute faster")
-	rocket.advance_voyage(75.0)
+		"return begins from the moon and remains faster than outbound")
+	rocket.advance_voyage(28.0)
 	_check(rocket.state == LunarRocket.State.REENTRY \
 			and rocket.reentry_flames.emitting,
-		"physical heat-shield reentry starts fiery plasma at 75 seconds")
-	rocket.advance_voyage(33.0)
+		"physical heat-shield reentry starts fiery plasma at 28 seconds")
+	rocket.advance_voyage(12.0)
 	_check(rocket.state == LunarRocket.State.OCEAN_APPROACH,
-		"final twelve seconds transition from flames to ocean approach")
-	rocket.advance_voyage(11.999)
+		"final five seconds transition from flames to ocean approach")
+	rocket.advance_voyage(4.999)
 	_check(rocket.state != LunarRocket.State.SPLASHDOWN,
 		"return does not complete a millisecond early")
 	rocket.advance_voyage(0.001)
 	_check(rocket.state == LunarRocket.State.SPLASHDOWN \
 			and rocket.global_transform.is_equal_approx(ocean_pose) \
 			and rocket.freeze and not rocket.reentry_flames.emitting,
-		"120-second return ends frozen upright at the authored ocean splash point")
+		"45-second return ends frozen upright at the authored ocean splash point")
 	_check(rocket.network_state_snapshot().crew.size() == 4,
 		"network snapshot carries the authoritative voyage clock and four crew ids")
 	_check(rocket.disembark_crew(4) and not rocket.can_board(),
 		"splashdown presentation keeps boarding locked during crew recovery")
 	var replica := LunarRocket.new()
 	stage.add_child(replica)
-	await process_frame
+	await get_tree().process_frame
 	replica.set_physics_process(false)
 	replica.configure_route(earth_pose, moon_pose, ocean_pose)
 	replica.apply_authoritative_clock(LunarRocket.State.LANDED_MOON, true,
@@ -303,8 +376,8 @@ func _run() -> void:
 
 	peer_moon.free()
 	stage.queue_free()
-	await process_frame
-	await process_frame
+	await get_tree().process_frame
+	await get_tree().process_frame
 	print("LUNAREXPEDITIONTEST %d/%d %s" % [passed, total,
 		"PASS" if passed == total else "FAIL"])
-	quit(0 if passed == total else 1)
+	get_tree().quit(0 if passed == total else 1)

@@ -19,6 +19,8 @@ var _tree_build_cursor := 0
 var _tree_build_complete := false
 var _tree_transforms: Array[Transform3D] = []
 var _tree_colors: Array[Color] = []
+var _tree_instance: MultiMeshInstance3D
+var _literal_foliage_visible := true
 
 
 func setup(sector_key: Vector2i, defer_trees := false) -> void:
@@ -124,6 +126,16 @@ func _begin_tree_silhouettes() -> void:
 	_tree_colors.clear()
 
 
+func set_literal_foliage_visible(next_visible: bool) -> void:
+	_literal_foliage_visible = next_visible
+	if is_instance_valid(_tree_instance):
+		_tree_instance.visible = next_visible
+
+
+func is_tree_build_complete() -> bool:
+	return _tree_build_complete
+
+
 ## Process a bounded number of source chunks, allowing World to spread far-tree
 ## generation over several otherwise-idle frames instead of one sector spike.
 func build_tree_step(source_chunk_budget := 4) -> bool:
@@ -166,14 +178,15 @@ func build_tree_step(source_chunk_budget := 4) -> bool:
 		mm.set_instance_transform(i, _tree_transforms[i])
 		mm.set_instance_color(i, _tree_colors[i])
 	tree_instance_count = _tree_transforms.size()
-	var trees := MultiMeshInstance3D.new()
-	trees.name = "TreeSilhouettes"
-	trees.multimesh = mm
-	trees.material_override = Visuals.far_jungle_material()
-	trees.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-	trees.visibility_range_end = Gen.HORIZON_DISTANCE + SECTOR_SIZE
-	trees.extra_cull_margin = 34.0
-	add_child(trees)
+	_tree_instance = MultiMeshInstance3D.new()
+	_tree_instance.name = "TreeSilhouettes"
+	_tree_instance.multimesh = mm
+	_tree_instance.material_override = Visuals.far_jungle_material()
+	_tree_instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	_tree_instance.visibility_range_end = Gen.HORIZON_DISTANCE + SECTOR_SIZE
+	_tree_instance.extra_cull_margin = 34.0
+	_tree_instance.visible = _literal_foliage_visible
+	add_child(_tree_instance)
 	_tree_transforms.clear()
 	_tree_colors.clear()
 	return true

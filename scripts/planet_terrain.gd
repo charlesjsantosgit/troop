@@ -7,7 +7,9 @@ extends RefCounted
 ## joins exactly, and walking through either pole reflects latitude and advances
 ## longitude by 180 degrees instead of creating a torus or a hard map edge.
 
-const CIRCUMFERENCE := 98304.0 # exactly 2,048 of Gen's 48 m chunks
+# Within 0.006% of Earth's equatorial circumference while remaining exactly
+# divisible by every 48/768/3072/6144 m streaming and road lattice.
+const CIRCUMFERENCE := 40_077_312.0
 const HALF_CIRCUMFERENCE := CIRCUMFERENCE * 0.5
 const QUARTER_CIRCUMFERENCE := CIRCUMFERENCE * 0.25
 const RADIUS := CIRCUMFERENCE / TAU
@@ -15,8 +17,6 @@ const SEA_LEVEL := 0.55
 const SUMMIT_ELEVATION := 6000.0
 const HOME_EFFECT_RADIUS := 6200.0
 const SUMMIT_EFFECT_RADIUS := 4200.0
-const HOME_EFFECT_DOT_MIN := cos(HOME_EFFECT_RADIUS / RADIUS)
-const SUMMIT_EFFECT_DOT_MIN := cos(SUMMIT_EFFECT_RADIUS / RADIUS)
 # All macro fields turn over across kilometres. Sampling their shared spherical
 # noise on this topology-aligned lattice and interpolating between nodes keeps
 # the same continuous planet while amortizing six costly noise evaluations
@@ -27,7 +27,6 @@ const MACRO_FIELD_COUNT := 6
 
 var seed := 1337
 var _summit_xz := Vector2.ZERO
-var _summit_direction := Vector3.RIGHT
 var _home_lake_center := Vector2.ZERO
 
 var _continent := FastNoiseLite.new()
@@ -43,30 +42,32 @@ var _macro_lattice_cache: Dictionary = {}
 func setup(seed_value: int) -> void:
 	seed = seed_value
 	_macro_lattice_cache.clear()
-	_configure_noise(_continent, 11, 0.000115, 3, 0.52)
-	_configure_noise(_continent_detail, 23, 0.00029, 2, 0.48)
+	# Spherical frequencies are scaled for an Earth-sized globe. The Pangaea
+	# silhouette below owns the continent; these fields roughen its coast and
+	# create climate regions measured in hundreds to thousands of kilometres.
+	_configure_noise(_continent, 11, 0.00000024, 3, 0.52)
+	_configure_noise(_continent_detail, 23, 0.00000068, 2, 0.48)
 	# Continental uplands turn over across many kilometres. This intentionally
 	# keeps normal travel on long grades instead of stacking noisy short bumps.
-	_configure_noise(_upland, 37, 0.000018, 2, 0.50)
-	_configure_noise(_range_mask, 47, 0.00015, 2, 0.50)
-	_configure_noise(_ridge, 59, 0.00043, 2, 0.46)
+	_configure_noise(_upland, 37, 0.00000018, 2, 0.50)
+	_configure_noise(_range_mask, 47, 0.00000155, 2, 0.50)
+	_configure_noise(_ridge, 59, 0.0000041, 2, 0.46)
 	# Fine relief is under 1.5 m and exists only to break up otherwise broad
 	# slopes. One simplex octave preserves that readable surface variation while
 	# halving the only spherical noise still evaluated at every terrain vertex.
 	_configure_noise(_detail, 83, 0.0048, 1, 0.40)
-	_configure_noise(_lake, 97, 0.00031, 2, 0.48)
+	_configure_noise(_lake, 97, 0.0000105, 2, 0.48)
 
 	# One seed-derived summit is deliberately isolated from the home continent.
 	# The exact centre is pinned to 6,000 m after all natural terrain layers.
 	var summit_hash := _hash_unit(seed_value, 401)
-	var summit_lon := lerpf(-PI, PI, summit_hash.x)
-	var summit_lat := deg_to_rad(lerpf(24.0, 52.0, summit_hash.y))
+	# Keep the sole 6 km summit on the connected supercontinent instead of
+	# manufacturing a mountain island in the global ocean.
+	var summit_lon := lerpf(-0.78, 0.78, summit_hash.x)
+	var summit_lat := deg_to_rad(lerpf(24.0, 46.0, summit_hash.y))
 	if ((seed_value >> 3) & 1) != 0:
 		summit_lat = -summit_lat
 	_summit_xz = Vector2(summit_lon * RADIUS, summit_lat * RADIUS)
-	var summit_latitude_cosine := cos(summit_lat)
-	_summit_direction = Vector3(summit_latitude_cosine * cos(summit_lon),
-		sin(summit_lat), summit_latitude_cosine * sin(summit_lon))
 
 	# A broad home lake makes the existing airboat/dock contract reliable while
 	# still letting the macro lake field make much larger inland water systems.
@@ -228,6 +229,68 @@ func _noise_3d(noise: FastNoiseLite, surface_point: Vector3) -> float:
 	return noise.get_noise_3d(surface_point.x, surface_point.y, surface_point.z)
 
 
+## Stable short-range geodesic distance in the equirectangular gameplay chart.
+## A unit-vector dot loses all useful precision for kilometre-scale offsets on
+## an Earth-radius globe because Godot's Vector3 components are float32. The
+## local tangent metric retains sub-metre continuity, wraps longitude, and is
+## indistinguishable from the full great-circle arc over these <=6.2 km authored
+## influence radii.
+static func _local_tangent_distance(a: Vector2, b: Vector2) -> float:
+	var longitude_delta := wrapf(a.x - b.x, -HALF_CIRCUMFERENCE,
+		HALF_CIRCUMFERENCE)
+	var mean_latitude := (a.y + b.y) * 0.5 / RADIUS
+	var east_west := longitude_delta * cos(mean_latitude)
+	return Vector2(east_west, a.y - b.y).length()
+
+
+static func _pangaea_lobe(longitude: float, latitude: float,
+		center: Vector2, radii: Vector2) -> float:
+	var longitude_delta := wrapf(longitude - center.x, -PI, PI)
+	var normalized := Vector2(longitude_delta / radii.x,
+		(latitude - center.y) / radii.y)
+	return 1.0 - normalized.length()
+
+
+static func _pangaea_lobe_sample(longitude: float, latitude: float,
+		center: Vector2, radii: Vector2, field_bias := 0.0) -> Vector3:
+	var longitude_delta := wrapf(longitude - center.x, -PI, PI)
+	var latitude_delta := latitude - center.y
+	var normalized_x := longitude_delta / radii.x
+	var normalized_y := latitude_delta / radii.y
+	var radial := maxf(Vector2(normalized_x, normalized_y).length(), 0.00001)
+	return Vector3(1.0 - radial + field_bias,
+		-longitude_delta / (radii.x * radii.x * radial),
+		-latitude_delta / (radii.y * radii.y * radial))
+
+
+## One broad connected supercontinent assembled from overlapping continental
+## lobes. The max field avoids fragile polygon seams and stays cheap enough for
+## every terrain LOD; spherical noise only erodes and feathers the coastline.
+static func _pangaea_field(longitude: float, latitude: float) -> float:
+	return _pangaea_sample(longitude, latitude).x
+
+
+static func _pangaea_sample(longitude: float, latitude: float) -> Vector3:
+	var best := _pangaea_lobe_sample(longitude, latitude,
+		Vector2(0.0, -0.02), Vector2(1.13, 0.72))
+	for candidate in [
+		_pangaea_lobe_sample(longitude, latitude,
+			Vector2(-0.38, 0.56), Vector2(0.78, 0.52)),
+		_pangaea_lobe_sample(longitude, latitude,
+			Vector2(0.67, 0.20), Vector2(0.66, 0.49)),
+		_pangaea_lobe_sample(longitude, latitude,
+			Vector2(0.14, -0.61), Vector2(0.64, 0.50)),
+		_pangaea_lobe_sample(longitude, latitude,
+			Vector2(-0.66, -0.35), Vector2(0.57, 0.40)),
+		# Narrow peninsula, biased slightly inward so it remains connected.
+		_pangaea_lobe_sample(longitude, latitude,
+			Vector2(0.94, -0.24), Vector2(0.43, 0.24), -0.05),
+	]:
+		if candidate.x > best.x:
+			best = candidate
+	return best
+
+
 func _macro_lattice_node(node_x: int, node_z: int) -> PackedFloat32Array:
 	var canonical := canonical_planet_xz(Vector2(float(node_x), float(node_z))
 		* MACRO_LATTICE_STEP)
@@ -295,19 +358,12 @@ func sample(world_xz: Vector2) -> Dictionary:
 		sin(latitude_radians), latitude_cosine * sin(longitude))
 	var point := direction * RADIUS
 	var latitude := absf(latitude_radians) / (PI * 0.5)
-	# acos() was a major cost in the far-terrain vertex path. Both authored
-	# influences are exactly zero outside their finite support, so reject distant
-	# points by dot product and evaluate the arc only inside that support.
-	var home_dot := direction.x
-	var home_distance := HOME_EFFECT_RADIUS + 1.0
-	if home_dot > HOME_EFFECT_DOT_MIN:
-		home_distance = acos(clampf(home_dot, -1.0, 1.0)) * RADIUS
-	var summit_dot := direction.dot(_summit_direction)
-	var summit_distance := SUMMIT_EFFECT_RADIUS + 1.0
-	if summit_dot > SUMMIT_EFFECT_DOT_MIN:
-		summit_distance = acos(clampf(summit_dot, -1.0, 1.0)) * RADIUS
-	if canonical.distance_squared_to(_summit_xz) < 0.0001:
-		summit_distance = 0.0
+	# Authored effects occupy only a few kilometres, so a local tangent metric is
+	# both cheaper and far more precise than acos(direction.dot(target)) here.
+	# Clamping outside support keeps the later smoothstep work unchanged.
+	var home_distance := minf(canonical.length(), HOME_EFFECT_RADIUS + 1.0)
+	var summit_distance := minf(_local_tangent_distance(canonical, _summit_xz),
+		SUMMIT_EFFECT_RADIUS + 1.0)
 
 	# Seven shared spherical noise evaluations feed all terrain and climate
 	# channels. Reusing the broad detail/range values is materially cheaper while
@@ -315,16 +371,33 @@ func sample(world_xz: Vector2) -> Dictionary:
 	var macro_fields := _macro_noise_fields(canonical)
 	var continent_value := float(macro_fields[0])
 	var continent_detail_value := float(macro_fields[1])
-	var continent_raw := continent_value * 0.86 \
-		+ continent_detail_value * 0.28
+	var pangaea_sample := _pangaea_sample(longitude, latitude_radians)
+	var pangaea := pangaea_sample.x
+	var continent_raw := pangaea + continent_value * 0.018 \
+		+ continent_detail_value * 0.012
+	# Convert the implicit supercontinent contour into a local signed distance.
+	# Gen uses the tangent to lay one truly coastline-following arterial without
+	# storing a planet-sized spline or reverting to a straight grid.
+	var metric_gradient := Vector2(
+		pangaea_sample.y / (RADIUS * maxf(latitude_cosine, 0.08)),
+		pangaea_sample.z / RADIUS)
+	var metric_gradient_length := maxf(metric_gradient.length(), 0.000000001)
+	var coast_distance := continent_raw / metric_gradient_length
+	var coast_inward_normal := metric_gradient / metric_gradient_length
+	var coast_tangent := Vector2(-coast_inward_normal.y,
+		coast_inward_normal.x)
 	# Keep a broad, playable home continent and a dry massif beneath the summit.
 	continent_raw += (1.0 - smoothstep(1800.0, 6200.0, home_distance)) * 0.72
 	continent_raw += (1.0 - smoothstep(1800.0, 4200.0,
 		summit_distance)) * 0.68
-	# Polar oceans remain possible, but the ice/tundra land caps still get room.
-	continent_raw -= smoothstep(0.90, 1.0, latitude) * 0.16
-	var land := smoothstep(-0.16, 0.09, continent_raw)
-	var ocean := 1.0 - smoothstep(-0.18, 0.02, continent_raw)
+	var land := smoothstep(-0.08, 0.055, continent_raw)
+	var ocean := 1.0 - smoothstep(-0.10, 0.025, continent_raw)
+	# Both geographic poles are permanent ice caps, including across ocean. A
+	# real terrain shelf sits just above sea level so the visible surface cannot
+	# turn back into liquid or bare water at any longitude.
+	var polar_ice := smoothstep(0.82, 0.94, latitude)
+	land = maxf(land, polar_ice)
+	ocean *= 1.0 - polar_ice
 
 	var upland_raw := float(macro_fields[2]) * 0.5 + 0.5
 	var upland := smoothstep(0.40, 0.82, upland_raw) * land
@@ -343,13 +416,17 @@ func sample(world_xz: Vector2) -> Dictionary:
 	var lake_raw := float(macro_fields[5]) * 0.80 \
 		+ continent_detail_value * 0.20
 	var inland := smoothstep(0.63, 0.88, land)
-	var lake_strength := smoothstep(0.16, 0.46, lake_raw) * inland
+	var procedural_lake := smoothstep(0.16, 0.46, lake_raw) * inland
+	# The authored home lake owns the spawn region. Suppress a coincident macro
+	# basin there so fixing the short-range distance precision cannot flood the
+	# entire airfield/motor-pool neighbourhood or erase its road destinations.
+	procedural_lake *= smoothstep(900.0, 1800.0, home_distance)
 	# 190-260 m home-lake radius, with a broad natural-looking shore blend.
 	var home_lake_radius := 220.0 + float((seed & 31)) * 1.35
 	var home_lake_distance := canonical.distance_to(_home_lake_center)
 	var home_lake := 1.0 - smoothstep(home_lake_radius,
 		home_lake_radius + 85.0, home_lake_distance)
-	lake_strength = maxf(lake_strength, home_lake)
+	var lake_strength := maxf(procedural_lake, home_lake)
 	# Protect only the authored combat bowl. The home lake's near shore is then
 	# reachable within a short walk and restores the diagnostic/swimming contract
 	# that expects genuinely deep water inside roughly 150 m of spawn.
@@ -358,11 +435,23 @@ func sample(world_xz: Vector2) -> Dictionary:
 	var rolling := continent_detail_value
 	var fine_detail := _noise_3d(_detail, point)
 	var broad_land_height := 18.0 + upland * 470.0 \
-		+ rolling * lerpf(16.0, 42.0, upland)
+		+ rolling * lerpf(21.0, 49.0, upland)
 	# Major ranges centre close to 1.2 km while remaining comfortably below the
 	# one authored 6 km summit. Local detail is intentionally under two metres.
 	var ridge_shape := smoothstep(0.28, 1.0, ridge_raw)
-	var mountain_height := mountain * (720.0 + ridge_shape * 1180.0)
+	# Crag modulation reuses the already-required direct detail sample, so nearby
+	# mountains gain sharp broken crests without another noise call. Distant LODs
+	# naturally sample it more sparsely and retain the broad range silhouette.
+	var crag := pow(absf(fine_detail), 0.58)
+	# Do not amplify the high-frequency crag signal in plains carrying only a
+	# trace of the broad mountain mask. Besides looking like stray gravel ridges,
+	# that nonlinear amplification could create >15% sub-metre cross-grades just
+	# beyond an otherwise smooth road shoulder. Rocky biomes retain the full
+	# broken crest once mountain influence is meaningful.
+	var crag_strength := smoothstep(0.18, 0.42, mountain)
+	var crag_factor := lerpf(1.0, lerpf(0.86, 1.18, crag), crag_strength)
+	var mountain_height := mountain * (700.0 + ridge_shape * 1140.0) \
+		* crag_factor
 	var natural_land_height := broad_land_height + mountain_height \
 		+ fine_detail * 1.45
 	var ocean_floor := SEA_LEVEL - 65.0 - ocean * 310.0 \
@@ -371,6 +460,9 @@ func sample(world_xz: Vector2) -> Dictionary:
 	var lake_floor := SEA_LEVEL - 8.0 - lake_strength * 30.0 \
 		+ fine_detail * 0.55
 	elevation = lerpf(elevation, lake_floor, lake_strength)
+	var ice_surface := SEA_LEVEL + 2.6 + rolling * 0.55
+	elevation = lerpf(elevation, ice_surface, polar_ice)
+	lake_strength *= 1.0 - polar_ice
 
 	# Pin the sole summit exactly. The smooth quintic-like shoulder reaches zero
 	# well before other generated ranges and cannot overshoot the target.
@@ -400,5 +492,8 @@ func sample(world_xz: Vector2) -> Dictionary:
 		"moisture": moisture,
 		"detail": fine_detail,
 		"latitude_fraction": latitude,
+		"polar_ice": polar_ice,
+		"coast_distance": coast_distance,
+		"coast_tangent": coast_tangent,
 		"summit_weight": summit_weight,
 	}

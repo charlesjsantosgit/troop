@@ -158,17 +158,22 @@ func run(main) -> void:
 		"expired bans clean themselves up")
 
 	# 11 — altitude view distance: pure curve + live stretch + stratos tier
-	_check(absf(Gen.view_distance_for_altitude(0.0)
+	_check(absf(World.stream_view_distance_for_altitude(0.0)
 			- Gen.VIEW_BASE_DISTANCE) < 0.01
-			and absf(Gen.view_distance_for_altitude(200.0)
+			and absf(World.stream_view_distance_for_altitude(
+				Gen.PLANET_SUMMIT_ELEVATION + 120.0)
 			- Gen.VIEW_PEAK_DISTANCE) < 0.01
-			and Gen.view_distance_for_altitude(40.0)
-			> Gen.view_distance_for_altitude(20.0),
+			and World.stream_view_distance_for_altitude(1200.0)
+			> World.stream_view_distance_for_altitude(130.0) \
+			and World.stream_view_distance_for_altitude(130.0)
+			> World.stream_view_distance_for_altitude(20.0),
 		"view distance curve: base at ground, capped at 15 miles, monotonic")
 	admin.run_command("/fly")
 	p.admin_teleport(Vector3(0, 130.0, 0))
 	await _frames(200)
-	_check(world.current_view_distance > 6000.0,
+	_check(world.current_view_distance > Gen.VIEW_BASE_DISTANCE + 1000.0 \
+			and world.current_view_distance \
+			<= World.stream_view_distance_for_altitude(130.0) + 1.0,
 		"flying high stretches the live view distance")
 	_check(world.stratos_chunks.size() >= 1,
 		"stratos sectors stream in at altitude")

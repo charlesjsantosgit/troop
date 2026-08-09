@@ -6,6 +6,8 @@ extends Node3D
 const SupplyHutScript = preload("res://scripts/supply_hut.gd")
 const ArenaPieceScript = preload("res://scripts/arena_piece.gd")
 const AirfieldHangarScript = preload("res://scripts/airfield_hangar.gd")
+const FreewayTunnelScript = preload("res://scripts/freeway_tunnel.gd")
+const RoadBridgeScript = preload("res://scripts/road_bridge.gd")
 
 static var _mat_ground: Material
 static var _mat_trunk: Material
@@ -26,22 +28,32 @@ var key := Vector2i.ZERO
 var layout: Dictionary = {}
 var _vine_mi: MeshInstance3D
 var _terrain_mesh: ArrayMesh
+var _terrain_instance: MeshInstance3D
+var _terrain_coarse := false
+var _terrain_has_water := false
+var _water_instance: MeshInstance3D
 var _collision_bodies: Array[StaticBody3D] = []
 var _collisions_built := false
 var _collisions_active := false
 var _supply_huts: Array[SupplyHut] = []
 var _arena_pieces: Array[ArenaPiece] = []
 var _airfield_hangars: Array[AirfieldHangar] = []
+var _freeway_tunnels: Array[FreewayTunnel] = []
+var _road_bridges: Array[RoadBridge] = []
 var _details_pending := false
 var _detail_build_stage := 0
 var _pending_collected: Dictionary = {}
 var _pending_build_collisions := false
 var _layout_pending := false
 var _vines_registered := false
+var _vine_signal_connected := false
+var _literal_foliage_visible := true
+var _literal_foliage_nodes: Array[GeometryInstance3D] = []
 
 const TREE_HIGH_END := 72.0
 const TREE_LOW_BEGIN := 60.0
 const TREE_LOD_MARGIN := 12.0
+const COARSE_TERRAIN_CELLS := 1
 
 
 static func _init_mats() -> void:
@@ -145,7 +157,7 @@ static func _make_understory_mesh(kind: int) -> ArrayMesh:
 
 
 func setup(k: Vector2i, collected: Dictionary, build_collisions := true,
-		defer_details := false) -> void:
+		defer_details := false, coarse_terrain := false) -> void:
 	key = k
 	_init_mats()
 	_layout_pending = defer_details
@@ -154,18 +166,17 @@ func setup(k: Vector2i, collected: Dictionary, build_collisions := true,
 		# to the already bounded detail lane instead of blocking a 1000 mph shell.
 		layout = {"trees": [], "bananas": [], "rocks": [], "foliage": [],
 			"structures": [], "arena_pieces": [], "arena_id": "",
-			"airfield_hangars": []}
+			"airfield_hangars": [], "freeway_tunnels": [], "road_bridges": []}
 	else:
 		_prepare_layout()
-	_build_terrain()
-	_build_water()
+	_build_terrain(coarse_terrain)
+	_build_water(coarse_terrain)
 	_pending_collected = collected
 	_pending_build_collisions = build_collisions
 	_details_pending = true
 	_detail_build_stage = 0
 	if not defer_details:
 		finish_deferred_build()
-	Gen.vine_visual_changed.connect(_on_vine_changed)
 
 
 ## Streaming can publish the terrain/water shell first, then finish detail and
@@ -185,30 +196,39 @@ func finish_deferred_build_step() -> bool:
 	if _layout_pending:
 		_prepare_layout()
 		return false
+	# Flight shells publish a 12 m lattice at roughly one-twelfth the generation
+	# cost. Upgrade in this same bounded lane before any playable structures,
+	# foliage, or collision can depend on the terrain.
+	if _terrain_coarse:
+		_build_terrain(false)
+		_build_water(false)
+		return false
 	match _detail_build_stage:
 		0:
-			_build_trees()
-		1:
-			_build_rocks()
-		2:
-			_build_grass()
-		3:
-			_build_understory()
-		4:
 			_build_arena_pieces()
-		5:
+		1:
 			_build_airfield_hangars()
-		6:
+		2:
 			_build_supply_huts()
-		7:
-			_build_vine_mesh()
-		8:
-			_build_bananas(_pending_collected)
-		9:
+			_build_freeway_tunnels()
+			_build_road_bridges()
+		3:
 			if _pending_build_collisions:
 				_build_collisions()
-		10:
+		4:
+			_build_rocks()
+		5:
 			_request_vehicle_spawns()
+		6:
+			_build_bananas(_pending_collected)
+		7:
+			_build_trees()
+		8:
+			_build_grass()
+		9:
+			_build_understory()
+		10:
+			_build_vine_mesh()
 	_detail_build_stage += 1
 	if _detail_build_stage > 10:
 		_details_pending = false
@@ -221,6 +241,32 @@ func is_deferred_build_pending() -> bool:
 	return _details_pending
 
 
+## Literal crowns, trunks, grass, understory, and vines are useful only at
+## gameplay distance. World can hide them as one bounded group during flight
+## while retaining terrain, structures, pickups, vehicles, and collision.
+func set_literal_foliage_visible(next_visible: bool) -> void:
+	_literal_foliage_visible = next_visible
+	for node in _literal_foliage_nodes:
+		if is_instance_valid(node):
+			node.visible = next_visible
+
+
+func has_literal_foliage() -> bool:
+	for node in _literal_foliage_nodes:
+		if is_instance_valid(node):
+			return true
+	return false
+
+
+func is_coarse_terrain_shell() -> bool:
+	return _terrain_coarse
+
+
+func _register_literal_foliage(node: GeometryInstance3D) -> void:
+	node.visible = _literal_foliage_visible
+	_literal_foliage_nodes.append(node)
+
+
 func _exit_tree() -> void:
 	if _vines_registered:
 		Gen.unregister_chunk_vines(key)
@@ -230,6 +276,9 @@ func _prepare_layout() -> void:
 	layout = Gen.chunk_layout(key.x, key.y)
 	Gen.register_chunk_vines(key, layout)
 	_vines_registered = true
+	if not _vine_signal_connected:
+		Gen.vine_visual_changed.connect(_on_vine_changed)
+		_vine_signal_connected = true
 	_layout_pending = false
 
 
@@ -238,28 +287,33 @@ func _on_vine_changed(k: Vector2i) -> void:
 		_build_vine_mesh()
 
 
-func _build_terrain() -> void:
+func _build_terrain(coarse := false) -> void:
+	_terrain_coarse = coarse
+	var cells := COARSE_TERRAIN_CELLS if coarse else Gen.CELLS
 	var x0 := key.x * Gen.CHUNK
 	var z0 := key.y * Gen.CHUNK
-	var cell := Gen.CHUNK / float(Gen.CELLS)
+	var cell := Gen.CHUNK / float(cells)
 	var st := SurfaceTool.new()
 	st.begin(Mesh.PRIMITIVE_TRIANGLES)
-	# Share the 17x17 lattice between adjacent triangles. The old unindexed
-	# path sampled height four times per cell and emitted 1,536 duplicate
-	# vertices; this uses 289 height calls/vertices with identical boundaries.
-	for iz in range(Gen.CELLS + 1):
-		for ix in range(Gen.CELLS + 1):
+	_terrain_has_water = false
+	# Both resolutions include their exact chunk boundaries. A coarse 2x2 flight
+	# lattice therefore hands off without cracks and upgrades to the indexed 17x17
+	# gameplay lattice before landing.
+	for iz in range(cells + 1):
+		for ix in range(cells + 1):
 			var x := x0 + float(ix) * cell
 			var z := z0 + float(iz) * cell
 			var visual := Gen.terrain_vertex_sample(x, z)
 			var h := float(visual.elevation)
+			_terrain_has_water = _terrain_has_water \
+				or h < Gen.WATER_Y + 0.05
 			st.set_color(visual.color)
 			st.add_vertex(Vector3(x, h, z))
-	for iz in range(Gen.CELLS):
-		for ix in range(Gen.CELLS):
-			var p00 := iz * (Gen.CELLS + 1) + ix
+	for iz in range(cells):
+		for ix in range(cells):
+			var p00 := iz * (cells + 1) + ix
 			var p10 := p00 + 1
-			var p01 := p00 + (Gen.CELLS + 1)
+			var p01 := p00 + (cells + 1)
 			var p11 := p01 + 1
 			# Godot front faces wind clockwise seen from above (+Y).
 			for index in [p00, p10, p11, p00, p11, p01]:
@@ -267,37 +321,50 @@ func _build_terrain() -> void:
 	st.generate_normals()
 	var mesh := st.commit()
 	_terrain_mesh = mesh
-	var mi := MeshInstance3D.new()
-	mi.mesh = mesh
-	mi.material_override = _mat_ground
-	add_child(mi)
+	if is_instance_valid(_terrain_instance):
+		_terrain_instance.visible = false
+		_terrain_instance.queue_free()
+	_terrain_instance = MeshInstance3D.new()
+	_terrain_instance.name = "TerrainShellCoarse" if coarse else "TerrainShellFine"
+	_terrain_instance.mesh = mesh
+	_terrain_instance.material_override = _mat_ground
+	add_child(_terrain_instance)
 
 
-func _build_water() -> void:
+func _build_water(coarse := false) -> void:
+	if is_instance_valid(_water_instance):
+		return
 	var x0 := key.x * Gen.CHUNK
 	var z0 := key.y * Gen.CHUNK
-	var low := false
-	for i in range(5):
-		for j in range(5):
-			if Gen.height(x0 + i * Gen.CHUNK / 4.0, z0 + j * Gen.CHUNK / 4.0) < Gen.WATER_Y + 0.05:
-				low = true
+	# Coarse flight terrain already sampled every tile corner. Reuse that result
+	# instead of doing 25 otherwise
+	# invisible height calls per streamed tile at 1000 mph.
+	var low := _terrain_has_water if coarse else false
+	if not coarse:
+		for i in range(5):
+			for j in range(5):
+				if Gen.height(x0 + i * Gen.CHUNK / 4.0,
+						z0 + j * Gen.CHUNK / 4.0) < Gen.WATER_Y + 0.05:
+					low = true
+					break
+			if low:
 				break
-		if low:
-			break
 	if not low:
 		return
 	# Match the terrain grid so the layered surface waves and local WaterFX
 	# ripples have enough vertices to deform smoothly at gameplay distance.
 	# Every wet chunk reuses the same immutable subdivided mesh resource.
-	var mi := MeshInstance3D.new()
-	mi.mesh = _water_mesh
-	mi.material_override = _mat_water
-	mi.position = Vector3(x0 + Gen.CHUNK * 0.5, Gen.WATER_Y, z0 + Gen.CHUNK * 0.5)
-	mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-	mi.visibility_range_end = 120.0
-	mi.visibility_range_end_margin = 14.0
-	mi.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_SELF
-	add_child(mi)
+	_water_instance = MeshInstance3D.new()
+	_water_instance.mesh = _water_mesh
+	_water_instance.material_override = _mat_water
+	_water_instance.position = Vector3(x0 + Gen.CHUNK * 0.5,
+		Gen.WATER_Y, z0 + Gen.CHUNK * 0.5)
+	_water_instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	_water_instance.visibility_range_end = 120.0
+	_water_instance.visibility_range_end_margin = 14.0
+	_water_instance.visibility_range_fade_mode = \
+		GeometryInstance3D.VISIBILITY_RANGE_FADE_SELF
+	add_child(_water_instance)
 
 
 func _build_trees() -> void:
@@ -418,6 +485,7 @@ func _add_tree_lod_multimesh(mesh: Mesh, xforms: Array[Transform3D],
 	instance.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_SELF
 	instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON if cast_shadows \
 		else GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	_register_literal_foliage(instance)
 	add_child(instance)
 
 
@@ -445,6 +513,7 @@ func _add_foliage_lod_multimesh(mesh: Mesh, xforms: Array[Transform3D],
 	instance.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_SELF
 	instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON if cast_shadows \
 		else GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	_register_literal_foliage(instance)
 	add_child(instance)
 
 
@@ -509,6 +578,7 @@ func _build_grass() -> void:
 	mmi.visibility_range_end = 58.0
 	mmi.visibility_range_end_margin = 10.0
 	mmi.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_SELF
+	_register_literal_foliage(mmi)
 	add_child(mmi)
 
 
@@ -551,6 +621,7 @@ func _build_understory() -> void:
 		mmi.visibility_range_end_margin = 12.0
 		mmi.visibility_range_fade_mode = \
 			GeometryInstance3D.VISIBILITY_RANGE_FADE_SELF
+		_register_literal_foliage(mmi)
 		add_child(mmi)
 
 
@@ -594,6 +665,22 @@ func _build_airfield_hangars() -> void:
 		_airfield_hangars.append(hangar)
 
 
+func _build_freeway_tunnels() -> void:
+	for tunnel_data in layout.get("freeway_tunnels", []):
+		var tunnel: FreewayTunnel = FreewayTunnelScript.new()
+		tunnel.configure(tunnel_data)
+		add_child(tunnel)
+		_freeway_tunnels.append(tunnel)
+
+
+func _build_road_bridges() -> void:
+	for bridge_data in layout.get("road_bridges", []):
+		var bridge: RoadBridge = RoadBridgeScript.new()
+		bridge.configure(bridge_data)
+		add_child(bridge)
+		_road_bridges.append(bridge)
+
+
 func _inside_structure_clearance(x: float, z: float) -> bool:
 	for structure in layout.get("structures", []):
 		var structure_pos: Vector3 = structure.get("pos", Vector3.ZERO)
@@ -615,6 +702,14 @@ func _inside_structure_clearance(x: float, z: float) -> bool:
 				Vector2(hangar_pos.x, hangar_pos.z)) \
 				< hangar_radius * hangar_radius:
 			return true
+	for feature_key in ["freeway_tunnels", "road_bridges"]:
+		for feature in layout.get(feature_key, []):
+			var feature_pos: Vector3 = feature.get("pos", Vector3.ZERO)
+			var feature_radius := float(feature.get("clearance", 0.0))
+			if Vector2(x, z).distance_squared_to(
+					Vector2(feature_pos.x, feature_pos.z)) \
+					< feature_radius * feature_radius:
+				return true
 	return false
 
 
@@ -622,6 +717,7 @@ func _inside_structure_clearance(x: float, z: float) -> bool:
 ## bright leaf-tuft diamond at the grab-friendly bottom end.
 func _build_vine_mesh() -> void:
 	if _vine_mi:
+		_literal_foliage_nodes.erase(_vine_mi)
 		_vine_mi.queue_free()
 		_vine_mi = null
 	if not Gen._vines_by_chunk.has(key):
@@ -676,6 +772,7 @@ func _build_vine_mesh() -> void:
 	_vine_mi.visibility_range_end = 108.0
 	_vine_mi.visibility_range_end_margin = 14.0
 	_vine_mi.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_SELF
+	_register_literal_foliage(_vine_mi)
 	add_child(_vine_mi)
 
 
@@ -730,6 +827,18 @@ func _build_collisions() -> void:
 		if not is_instance_valid(hangar):
 			continue
 		for body in hangar.build_collisions():
+			_collision_bodies.append(body)
+
+	for tunnel in _freeway_tunnels:
+		if not is_instance_valid(tunnel):
+			continue
+		for body in tunnel.build_collisions():
+			_collision_bodies.append(body)
+
+	for bridge in _road_bridges:
+		if not is_instance_valid(bridge):
+			continue
+		for body in bridge.build_collisions():
 			_collision_bodies.append(body)
 
 

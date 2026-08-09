@@ -230,73 +230,81 @@ func run(main) -> void:
 	await get_tree().process_frame
 	await get_tree().process_frame
 	var globe_diag := atlas.cache_diagnostics()
-	_check(int(globe_diag.last_atlas_samples) <=
-		WorldMap.GLOBE_BAKE_SAMPLES_PER_FRAME,
-		"equirectangular globe atlas bake is frame bounded", str(globe_diag))
-	_check(int(globe_diag.atlas_pixels) == 192 * 96,
-		"global atlas stays deliberately small", str(globe_diag))
+	_check(int(globe_diag.last_atlas_samples) == 0 \
+			and int(globe_diag.atlas_pixels) \
+				== WorldMap.GLOBE_ATLAS_SIZE.x * WorldMap.GLOBE_ATLAS_SIZE.y,
+		"4K Earth atlas performs no runtime terrain bake", str(globe_diag))
+	_check(atlas._globe_texture != null \
+			and atlas._globe_texture.get_width() == 4096 \
+			and atlas._globe_texture.get_height() == 2048 \
+			and atlas._globe_texture == WorldMap.shared_earth_texture() \
+			and atlas._globe_texture == SpaceVoyageVisuals.shared_earth_texture(),
+		"world map and voyage share the imported 4096x2048 Pangaea atlas")
+	var voyage_visuals: SpaceVoyageVisuals = \
+		main.expedition_manager.rocket.voyage_visuals
+	var voyage_earth_mesh := voyage_visuals.earth_visual.mesh as SphereMesh
+	var voyage_moon_mesh := voyage_visuals.moon_visual.mesh as SphereMesh
+	_check(voyage_earth_mesh != null and voyage_moon_mesh != null \
+			and voyage_earth_mesh.radial_segments \
+				== SpaceVoyageVisuals.CELESTIAL_RADIAL_SEGMENTS \
+			and voyage_earth_mesh.rings == SpaceVoyageVisuals.CELESTIAL_RINGS \
+			and voyage_moon_mesh.radial_segments \
+				== SpaceVoyageVisuals.CELESTIAL_RADIAL_SEGMENTS \
+			and voyage_moon_mesh.rings == SpaceVoyageVisuals.CELESTIAL_RINGS,
+		"voyage Earth and Moon use dedicated 96x48 sphere geometry")
+	var earth_mesh := atlas._sphere_mesh_for_view(Vector2.ZERO)
+	_check(WorldMap.GLOBE_LONGITUDE_STEPS == 96 \
+			and WorldMap.GLOBE_LATITUDE_STEPS == 48 \
+			and earth_mesh != null and earth_mesh.get_surface_count() == 1 \
+			and atlas._sphere_mesh_for_view(Vector2.ZERO) == earth_mesh,
+		"Earth globe uses one cached high-detail 96x48 sphere mesh")
+	var transition_mid := WorldMap.transition_opacities(0.5)
+	_check(transition_mid.x > 0.45 and transition_mid.y > 0.45 \
+			and is_equal_approx(transition_mid.x + transition_mid.y, 1.0) \
+			and WorldMap.transition_opacities(0.0).is_equal_approx(Vector2(1, 0)) \
+			and WorldMap.transition_opacities(1.0).is_equal_approx(Vector2(0, 1)) \
+			and WorldMap.transition_globe_scale(0.0) > 2.0 \
+			and is_equal_approx(WorldMap.transition_globe_scale(1.0), 1.0),
+		"ground-to-space zoom crossfades continuously while the globe settles")
 	_check(atlas.globe_blend() >= 0.99,
-		"zooming out switches to whole-Earth globe view")
+		"zooming out reaches the whole-Earth globe view")
+	var cached_earth_texture_id := atlas._globe_texture.get_instance_id()
 	atlas.focus_moon()
 	_check(atlas.selected_body == WorldMap.CelestialBody.MOON,
 		"moon globe is selectable as a destination")
-	var moon_preview_diag := atlas.cache_diagnostics()
-	_check(int(moon_preview_diag.moon_atlas_pixels) \
-			== WorldMap.MOON_ATLAS_SIZE.x * WorldMap.MOON_ATLAS_SIZE.y \
-			and int(moon_preview_diag.moon_crater_stamps) \
-				>= WorldMap.MOON_HERO_CRATERS.size() \
-			and int(moon_preview_diag.moon_crater_stamps) \
-				<= WorldMap.MOON_HERO_CRATERS.size() \
-					+ WorldMap.MOON_CRATERS_PER_FRAME \
-			and int(moon_preview_diag.moon_base_cursor) \
-				<= WorldMap.MOON_BASE_SAMPLES_PER_FRAME,
-		"lunar globe presents a bounded detailed preview on its first frame",
-		str(moon_preview_diag))
-	_check(int(moon_preview_diag.moon_atlas_build_usec) > 0 \
-			and int(moon_preview_diag.moon_atlas_build_usec) <= 250_000,
-		"one-time lunar preview build stays below the hitch guard",
-		str(moon_preview_diag))
-	var cached_moon_texture_id := atlas._moon_texture.get_instance_id()
-	var cached_crater_texture_id := atlas._moon_crater_texture.get_instance_id()
-	var max_moon_base_samples := 0
-	var max_moon_crater_stamps := 0
-	var moon_pixel_count := WorldMap.MOON_ATLAS_SIZE.x \
-		* WorldMap.MOON_ATLAS_SIZE.y
-	for frame_index in range(320):
-		await get_tree().process_frame
-		var frame_diag := atlas.cache_diagnostics()
-		max_moon_base_samples = maxi(max_moon_base_samples,
-			int(frame_diag.last_moon_base_samples))
-		max_moon_crater_stamps = maxi(max_moon_crater_stamps,
-			int(frame_diag.last_moon_crater_stamps))
-		if int(frame_diag.moon_base_cursor) >= moon_pixel_count \
-				and int(frame_diag.moon_crater_stamps) \
-					>= WorldMap.MOON_RANDOM_CRATER_COUNT \
-						+ WorldMap.MOON_HERO_CRATERS.size():
-			break
 	var moon_diag := atlas.cache_diagnostics()
-	print("  MOON_ATLAS_BENCHMARK pixels=%d craters=%d build_us=%d" % [
-		int(moon_diag.moon_atlas_pixels), int(moon_diag.moon_crater_stamps),
-		int(moon_diag.moon_atlas_build_usec)])
-	_check(int(moon_diag.moon_atlas_pixels) == WorldMap.MOON_ATLAS_SIZE.x \
-			* WorldMap.MOON_ATLAS_SIZE.y \
-			and int(moon_diag.moon_crater_stamps) \
-				== WorldMap.MOON_RANDOM_CRATER_COUNT \
-					+ WorldMap.MOON_HERO_CRATERS.size(),
-		"lunar globe uses one bounded dense procedural atlas", str(moon_diag))
-	_check(max_moon_base_samples <= WorldMap.MOON_BASE_SAMPLES_PER_FRAME \
-			and max_moon_crater_stamps <= WorldMap.MOON_CRATERS_PER_FRAME,
-		"dense lunar relief refines under strict per-frame work caps",
-		"base=%d craters=%d" % [max_moon_base_samples,
-			max_moon_crater_stamps])
+	_check(int(moon_diag.moon_atlas_pixels) \
+			== WorldMap.MOON_ATLAS_SIZE.x * WorldMap.MOON_ATLAS_SIZE.y \
+			and int(moon_diag.moon_base_cursor) == 0 \
+			and int(moon_diag.moon_crater_stamps) == 0 \
+			and int(moon_diag.last_moon_base_samples) == 0 \
+			and int(moon_diag.last_moon_crater_stamps) == 0,
+		"4K lunar atlas is complete immediately with zero procedural bake",
+		str(moon_diag))
+	_check(atlas._moon_texture != null \
+			and atlas._moon_texture.get_width() == 4096 \
+			and atlas._moon_texture.get_height() == 2048 \
+			and atlas._moon_texture == WorldMap.shared_moon_texture() \
+			and atlas._moon_texture == SpaceVoyageVisuals.shared_moon_texture(),
+		"world map and voyage share the imported 4096x2048 lunar atlas")
+	var cached_moon_texture_id := atlas._moon_texture.get_instance_id()
 	atlas.focus_moon()
-	var reused_moon_diag := atlas.cache_diagnostics()
 	_check(atlas._moon_texture.get_instance_id() == cached_moon_texture_id \
-			and atlas._moon_crater_texture.get_instance_id() \
-				== cached_crater_texture_id \
-			and int(reused_moon_diag.moon_atlas_build_usec) \
-				== int(moon_preview_diag.moon_atlas_build_usec),
-		"reselecting Moon reuses texture and build work", str(reused_moon_diag))
+			and WorldMap.shared_earth_texture().get_instance_id() \
+				== cached_earth_texture_id,
+		"reselecting celestial bodies reuses both imported texture resources")
+	var outbound_exit := float(LunarRocket.OUTBOUND_PHASE_TIMES[0]) \
+		/ LunarRocket.OUTBOUND_DURATION_SECONDS
+	var return_reentry := float(LunarRocket.RETURN_PHASE_TIMES[1]) \
+		/ LunarRocket.RETURN_DURATION_SECONDS
+	_check(not SpaceVoyageVisuals.stars_visible_for_progress(
+			outbound_exit - 0.0001, true) \
+			and SpaceVoyageVisuals.stars_visible_for_progress(outbound_exit, true) \
+			and SpaceVoyageVisuals.stars_visible_for_progress(
+				return_reentry - 0.0001, false) \
+			and not SpaceVoyageVisuals.stars_visible_for_progress(
+				return_reentry, false),
+		"voyage star visibility follows LunarRocket atmosphere/reentry timings")
 	atlas.focus_earth()
 	_check(atlas.selected_body == WorldMap.CelestialBody.EARTH,
 		"Earth globe can be restored after lunar inspection")

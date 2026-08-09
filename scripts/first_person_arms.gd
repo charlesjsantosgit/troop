@@ -16,6 +16,11 @@ var _right_fore: MeshInstance3D
 var _right_paw: Node3D
 var _bandage_roll: Node3D
 var _bandage_strip: MeshInstance3D
+var _fur_material: Material
+var _skin_material: Material
+var _sleeve_meshes: Array[MeshInstance3D] = []
+var _glove_meshes: Array[MeshInstance3D] = []
+var _space_suit_equipped := false
 var _left_elbow := Vector3.ZERO
 var _left_hand := Vector3.ZERO
 var _right_elbow := Vector3.ZERO
@@ -32,14 +37,21 @@ func _ready() -> void:
 	var display_name: String = actor.display_name if actor else "Monkey"
 	var fur_color: Color = MonkeyRig.FURS[
 		absi(hash(display_name)) % MonkeyRig.FURS.size()]
-	var fur := Visuals.fur_material(fur_color)
-	var skin := Visuals.skin_material()
-	_left_upper = _limb_mesh(0.039 * ARM_VISUAL_SCALE, fur)
-	_left_fore = _forearm_mesh(fur)
-	_left_paw = _paw_mesh(skin, true)
-	_right_upper = _limb_mesh(0.039 * ARM_VISUAL_SCALE, fur)
-	_right_fore = _forearm_mesh(fur)
-	_right_paw = _paw_mesh(skin, false)
+	_fur_material = Visuals.fur_material(fur_color)
+	_skin_material = Visuals.skin_material()
+	_left_upper = _limb_mesh(0.039 * ARM_VISUAL_SCALE, _fur_material)
+	_left_fore = _forearm_mesh(_fur_material)
+	_left_paw = _paw_mesh(_skin_material, true)
+	_right_upper = _limb_mesh(0.039 * ARM_VISUAL_SCALE, _fur_material)
+	_right_fore = _forearm_mesh(_fur_material)
+	_right_paw = _paw_mesh(_skin_material, false)
+	_sleeve_meshes = [_left_upper, _left_fore, _right_upper, _right_fore]
+	# Capture palm/thumb surfaces before bandage props are parented under the
+	# right paw. Pressure gloves must never recolour the healing cloth.
+	for paw in [_left_paw, _right_paw]:
+		for child in paw.get_children():
+			if child is MeshInstance3D:
+				_glove_meshes.append(child as MeshInstance3D)
 	for part in [
 		_left_upper, _left_fore, _left_paw,
 		_right_upper, _right_fore, _right_paw,
@@ -52,7 +64,32 @@ func _ready() -> void:
 	# silhouette from the bottom of the frame to its grip.
 	_left_upper.visible = false
 	_right_upper.visible = false
+	var suit := actor.get_node_or_null("SpaceSuitSystem") \
+		if is_instance_valid(actor) else null
+	set_space_suit_equipped(suit is SpaceSuitSystem and suit.equipped)
 	visible = false
+
+
+## Switches the camera-local viewmodel between bare fur/paws and the same white
+## pressure sleeves plus blue gloves used by the articulated world model.
+func set_space_suit_equipped(active: bool) -> void:
+	_space_suit_equipped = active
+	if not _fur_material or not _skin_material:
+		return
+	var sleeve_material := SpaceSuitSystem.pressure_sleeve_material() \
+		if active else _fur_material
+	var glove_material := SpaceSuitSystem.pressure_glove_material() \
+		if active else _skin_material
+	for sleeve in _sleeve_meshes:
+		if is_instance_valid(sleeve):
+			sleeve.material_override = sleeve_material
+	for glove in _glove_meshes:
+		if is_instance_valid(glove):
+			glove.material_override = glove_material
+
+
+func has_space_suit_presentation() -> bool:
+	return _space_suit_equipped
 
 
 func update_pose(dt: float, weapon: Node3D, aiming: bool, speed: float,
