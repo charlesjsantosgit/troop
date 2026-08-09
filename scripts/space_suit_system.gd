@@ -27,13 +27,25 @@ var equipped := false
 var actor: Node3D
 var _depleted_emitted := false
 var _last_warning_band := 0
+var _visual_roots: Array[Node3D] = []
+var _visual_mesh_count := 0
+var _visual_layer := 1
 
 
 func _ready() -> void:
 	name = "SpaceSuitSystem"
-	if get_child_count() == 0:
-		_build_suit_visuals()
+	_rebuild_suit_visuals()
+	_notify_first_person_presentation()
 	set_physics_process(true)
+
+
+func _exit_tree() -> void:
+	_clear_suit_visuals()
+	# Articulated shells live under the actor's joints rather than this node. They
+	# must be freed while leaving the tree, but Node._ready normally runs only
+	# once. Requesting it again rebuilds the fitted shells after this suit or its
+	# complete actor subtree is later re-added.
+	request_ready()
 
 
 func equip_for(target: Node3D, inventory_override: LunarInventory = null) -> bool:
@@ -51,8 +63,14 @@ func equip_for(target: Node3D, inventory_override: LunarInventory = null) -> boo
 			target.add_child(self)
 	position = Vector3.ZERO
 	rotation = Vector3.ZERO
+	# A newly added suit has already built its visuals in _ready(). Rebuild only
+	# when an off-tree/reparent lifecycle left no attachment roots behind.
+	if is_inside_tree() and _visual_roots.is_empty():
+		_rebuild_suit_visuals()
 	equipped = true
 	visible = true
+	_set_suit_visuals_visible(true)
+	_notify_first_person_presentation()
 	suit_equipped.emit(target)
 	oxygen_changed.emit(oxygen_seconds, OXYGEN_CAPACITY_SECONDS)
 	return true
@@ -63,6 +81,8 @@ func unequip() -> bool:
 		return false
 	equipped = false
 	visible = false
+	_set_suit_visuals_visible(false)
+	_notify_first_person_presentation()
 	return true
 
 
@@ -118,7 +138,19 @@ func has_breathable_oxygen() -> bool:
 
 
 func visual_primitive_count() -> int:
-	return _count_meshes(self)
+	return _visual_mesh_count
+
+
+## Camera-local arms use the exact pressure-garment materials so changing view
+## never changes the astronaut's suit colour or surface response.
+static func pressure_sleeve_material() -> Material:
+	_ensure_materials()
+	return _white_material
+
+
+static func pressure_glove_material() -> Material:
+	_ensure_materials()
+	return _trim_material
 
 
 static func _count_meshes(root: Node) -> int:
@@ -130,51 +162,196 @@ static func _count_meshes(root: Node) -> int:
 	return count
 
 
-func _build_suit_visuals() -> void:
+func _rebuild_suit_visuals() -> void:
+	_clear_suit_visuals()
 	_ensure_materials()
-	# White pressure torso, flexible hip ring, clear helmet, twin oxygen tanks,
-	# and a compact blue life-support pack. The monkey's face remains visible.
-	_add_box("PressureTorso", Vector3(0.62, 0.56, 0.32),
-		Vector3(0.0, 0.80, 0.02), _white_material)
-	_add_box("ControlPanel", Vector3(0.34, 0.18, 0.07),
-		Vector3(0.0, 0.84, -0.19), _trim_material)
-	var helmet := SphereMesh.new()
-	helmet.radius = 0.40
-	helmet.height = 0.80
-	helmet.radial_segments = 20
-	helmet.rings = 12
-	_add_mesh("ClearHelmet", helmet, Vector3(0.0, 1.31, 0.0),
-		_visor_material)
-	_add_box("LifeSupportPack", Vector3(0.52, 0.55, 0.20),
-		Vector3(0.0, 0.79, 0.24), _trim_material)
+	var rig := _find_monkey_rig(actor) if is_instance_valid(actor) else null
+	if rig:
+		_visual_layer = MonkeyRig.LOCAL_BODY_VISUAL_LAYER \
+			if bool(rig.get("_is_local_visual")) else 1
+		_build_articulated_suit(rig)
+	else:
+		_visual_layer = 1
+		_build_fallback_suit()
+	_set_suit_visuals_visible(equipped or actor == null)
+
+
+func _build_articulated_suit(rig: MonkeyRig) -> void:
+	# Every shell is parented to the joint it protects. This keeps the fitted
+	# pressure garment aligned through walking, seated cabin poses and lunar
+	# movement instead of dragging one rigid, box-shaped costume behind the actor.
+	var torso_root := _attachment(rig.torso_p, "SpaceSuitTorso")
+	_add_capsule(torso_root, "FittedPressureTorso", 0.225, 0.61,
+		Vector3(0.0, 0.23, 0.01), _white_material,
+		Vector3(1.06, 1.0, 0.73))
+	_add_torus(torso_root, "FlexibleNeckSeal", 0.155, 0.205,
+		Vector3(0.0, 0.49, 0.0), _trim_material)
+	_add_capsule(torso_root, "RoundedControlPanel", 0.075, 0.27,
+		Vector3(0.0, 0.27, -0.185), _trim_material,
+		Vector3(1.0, 1.0, 0.34), Vector3(0.0, 0.0, PI * 0.5))
+	_add_capsule(torso_root, "ContouredLifeSupportPack", 0.155, 0.48,
+		Vector3(0.0, 0.22, 0.245), _trim_material,
+		Vector3(1.22, 1.0, 0.58))
 	for side in [-1.0, 1.0]:
-		var tank := CylinderMesh.new()
-		tank.top_radius = 0.095
-		tank.bottom_radius = 0.095
-		tank.height = 0.57
-		tank.radial_segments = 12
-		_add_mesh("OxygenTank", tank,
-			Vector3(side * 0.17, 0.80, 0.38), _tank_material)
-		_add_box("Boot", Vector3(0.22, 0.20, 0.32),
-			Vector3(side * 0.20, 0.13, -0.04), _white_material)
+		_add_capsule(torso_root, "OxygenTank", 0.058, 0.39,
+			Vector3(side * 0.115, 0.22, 0.37), _tank_material)
+
+	var head_root := _attachment(rig.head_p, "SpaceSuitHelmet")
+	_add_sphere(head_root, "ClearPressureHelmet", 0.224, Vector3.ZERO,
+		_visor_material, Vector3(1.06, 1.02, 1.0))
+	_add_torus(head_root, "VisorSeal", 0.145, 0.194,
+		Vector3(0.0, -0.006, -0.118), _trim_material,
+		Vector3(1.0, 1.0, 0.72), Vector3(PI * 0.5, 0.0, 0.0))
+
+	for limb in [[rig.sh_l, rig.el_l, rig.paw_l, "Left"],
+			[rig.sh_r, rig.el_r, rig.paw_r, "Right"]]:
+		var upper_root := _attachment(limb[0], "%sSuitUpperArm" % limb[3])
+		_add_capsule(upper_root, "%sPressureSleeve" % limb[3], 0.071,
+			MonkeyRig.ARM_A + 0.015, Vector3(0.0, -MonkeyRig.ARM_A * 0.5, 0.0),
+			_white_material, Vector3(1.0, 1.0, 0.95))
+		var lower_root := _attachment(limb[1], "%sSuitForearm" % limb[3])
+		_add_capsule(lower_root, "%sForearmSleeve" % limb[3], 0.064,
+			MonkeyRig.ARM_B + 0.012, Vector3(0.0, -MonkeyRig.ARM_B * 0.5, 0.0),
+			_white_material)
+		var glove_root := _attachment(limb[2], "%sSuitGlove" % limb[3])
+		_add_sphere(glove_root, "%sPressureGlove" % limb[3], 0.071,
+			Vector3.ZERO, _trim_material, Vector3(1.06, 0.94, 1.04))
+
+	for limb in [[rig.hip_l, rig.kn_l, rig.foot_l, "Left"],
+			[rig.hip_r, rig.kn_r, rig.foot_r, "Right"]]:
+		var thigh_root := _attachment(limb[0], "%sSuitThigh" % limb[3])
+		_add_capsule(thigh_root, "%sPressureTrouser" % limb[3], 0.082,
+			MonkeyRig.LEG_A + 0.018, Vector3(0.0, -MonkeyRig.LEG_A * 0.5, 0.0),
+			_white_material)
+		var shin_root := _attachment(limb[1], "%sSuitShin" % limb[3])
+		_add_capsule(shin_root, "%sLowerPressureTrouser" % limb[3], 0.069,
+			MonkeyRig.LEG_B + 0.018, Vector3(0.0, -MonkeyRig.LEG_B * 0.5, 0.0),
+			_white_material)
+		var boot_root := _attachment(limb[2], "%sSuitBoot" % limb[3])
+		_add_sphere(boot_root, "%sLunarBoot" % limb[3], 0.083,
+			Vector3(0.0, -0.005, -0.014), _trim_material,
+			Vector3(1.02, 0.72, 1.42))
 
 
-func _add_box(part_name: String, size: Vector3, local_position: Vector3,
-		material: Material) -> void:
-	var mesh := BoxMesh.new()
-	mesh.size = size
-	_add_mesh(part_name, mesh, local_position, material)
+func _build_fallback_suit() -> void:
+	# Admin/test integration may equip a plain Node3D with no MonkeyRig. Retain a
+	# compact proportionate fallback while real monkeys receive joint attachments.
+	var root := _attachment(self, "FallbackSpaceSuitVisual")
+	_add_capsule(root, "PressureTorso", 0.225, 0.61,
+		Vector3(0.0, 0.81, 0.01), _white_material,
+		Vector3(1.06, 1.0, 0.73))
+	_add_sphere(root, "ClearPressureHelmet", 0.224,
+		Vector3(0.0, 1.36, 0.0), _visor_material,
+		Vector3(1.06, 1.02, 1.0))
+	_add_capsule(root, "LifeSupportPack", 0.155, 0.48,
+		Vector3(0.0, 0.80, 0.25), _trim_material,
+		Vector3(1.22, 1.0, 0.58))
+	for side in [-1.0, 1.0]:
+		_add_capsule(root, "OxygenTank", 0.058, 0.39,
+			Vector3(side * 0.115, 0.80, 0.37), _tank_material)
+		_add_sphere(root, "Glove", 0.071,
+			Vector3(side * 0.30, 0.80, -0.02), _trim_material)
+		_add_sphere(root, "LunarBoot", 0.083,
+			Vector3(side * 0.12, 0.10, -0.03), _trim_material,
+			Vector3(1.02, 0.72, 1.42))
 
 
-func _add_mesh(part_name: String, mesh: PrimitiveMesh,
-		local_position: Vector3, material: Material) -> void:
+func _attachment(parent: Node, part_name: String) -> Node3D:
+	var attachment := Node3D.new()
+	attachment.name = part_name
+	parent.add_child(attachment)
+	_visual_roots.append(attachment)
+	return attachment
+
+
+func _add_capsule(parent: Node3D, part_name: String, radius: float,
+		height: float, local_position: Vector3, material: Material,
+		scale_value := Vector3.ONE, rotation_value := Vector3.ZERO) -> void:
+	var mesh := CapsuleMesh.new()
+	mesh.radius = radius
+	mesh.height = maxf(height, radius * 2.05)
+	mesh.radial_segments = 24
+	mesh.rings = 12
+	_add_mesh(parent, part_name, mesh, local_position, material,
+		scale_value, rotation_value)
+
+
+func _add_sphere(parent: Node3D, part_name: String, radius: float,
+		local_position: Vector3, material: Material,
+		scale_value := Vector3.ONE, rotation_value := Vector3.ZERO) -> void:
+	var mesh := SphereMesh.new()
+	mesh.radius = radius
+	mesh.height = radius * 2.0
+	mesh.radial_segments = 28
+	mesh.rings = 16
+	_add_mesh(parent, part_name, mesh, local_position, material,
+		scale_value, rotation_value)
+
+
+func _add_torus(parent: Node3D, part_name: String, inner_radius: float,
+		outer_radius: float, local_position: Vector3, material: Material,
+		scale_value := Vector3.ONE, rotation_value := Vector3.ZERO) -> void:
+	var mesh := TorusMesh.new()
+	mesh.inner_radius = inner_radius
+	mesh.outer_radius = outer_radius
+	mesh.rings = 28
+	mesh.ring_segments = 12
+	_add_mesh(parent, part_name, mesh, local_position, material,
+		scale_value, rotation_value)
+
+
+func _add_mesh(parent: Node3D, part_name: String, mesh: PrimitiveMesh,
+		local_position: Vector3, material: Material,
+		scale_value := Vector3.ONE, rotation_value := Vector3.ZERO) -> void:
 	var instance := MeshInstance3D.new()
 	instance.name = part_name
 	instance.mesh = mesh
 	instance.position = local_position
+	instance.rotation = rotation_value
+	instance.scale = scale_value
 	instance.material_override = material
 	instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
-	add_child(instance)
+	instance.layers = _visual_layer
+	parent.add_child(instance)
+	_visual_mesh_count += 1
+
+
+func _clear_suit_visuals() -> void:
+	for visual_root in _visual_roots:
+		if is_instance_valid(visual_root):
+			visual_root.free()
+	_visual_roots.clear()
+	_visual_mesh_count = 0
+
+
+func _set_suit_visuals_visible(value: bool) -> void:
+	for visual_root in _visual_roots:
+		if is_instance_valid(visual_root):
+			visual_root.visible = value
+
+
+func _notify_first_person_presentation() -> void:
+	if is_instance_valid(actor):
+		_notify_suit_state_recursive(actor, equipped)
+
+
+static func _notify_suit_state_recursive(root: Node, active: bool) -> void:
+	if root.has_method("set_space_suit_equipped"):
+		root.call("set_space_suit_equipped", active)
+	for child in root.get_children():
+		_notify_suit_state_recursive(child, active)
+
+
+static func _find_monkey_rig(root: Node) -> MonkeyRig:
+	if not is_instance_valid(root):
+		return null
+	if root is MonkeyRig:
+		return root as MonkeyRig
+	for child in root.get_children():
+		var found := _find_monkey_rig(child)
+		if found:
+			return found
+	return null
 
 
 static func _ensure_materials() -> void:

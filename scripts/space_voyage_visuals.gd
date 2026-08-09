@@ -5,6 +5,13 @@ extends Node3D
 ## The rocket drives normalized progress; no object is streamed during flight.
 
 const STAR_COUNT := 480
+const CELESTIAL_RADIAL_SEGMENTS := 96
+const CELESTIAL_RINGS := 48
+const LUNAR_ROCKET_SCRIPT_PATH := "res://scripts/lunar_rocket.gd"
+const EARTH_ATLAS: Texture2D = preload(
+	"res://assets/textures/pangaea_earth_4k.jpg")
+const MOON_ATLAS: Texture2D = preload(
+	"res://assets/textures/lunar_surface_4k.jpg")
 const PLANET_COLORS := [
 	Color(0.80, 0.47, 0.25), Color(0.78, 0.69, 0.47),
 	Color(0.38, 0.62, 0.82), Color(0.52, 0.40, 0.69),
@@ -20,6 +27,7 @@ static var _sun_material: StandardMaterial3D
 static var _nebula_texture: ImageTexture
 static var _galaxy_texture: ImageTexture
 static var _galaxy_material: StandardMaterial3D
+static var _rocket_timing: Dictionary = {}
 
 var earth_visual: MeshInstance3D
 var moon_visual: MeshInstance3D
@@ -59,8 +67,7 @@ func update_voyage(progress: float, phase: int, outbound: bool) -> void:
 	# Stars emerge while the atmosphere thins, remain present through vacuum,
 	# then disappear behind reentry plasma. Expensive celestial detail is not
 	# drawn while the capsule is still beside the launch tower or under clouds.
-	var show_stars := outbound_progress >= (24.0 / 180.0) \
-		if outbound else outbound_progress < (108.0 / 120.0)
+	var show_stars := stars_visible_for_progress(outbound_progress, outbound)
 	star_field.visible = show_stars
 	constellation_lines.visible = show_stars
 	sun_visual.visible = show_stars
@@ -120,9 +127,56 @@ static func shared_earth_texture() -> Texture2D:
 	return _earth_material.albedo_texture
 
 
+static func shared_moon_texture() -> Texture2D:
+	_ensure_shared_resources()
+	return _moon_material.albedo_texture
+
+
 static func shared_galaxy_texture() -> Texture2D:
 	_ensure_shared_resources()
 	return _galaxy_texture
+
+
+## Rocket timing is read dynamically to avoid a compile-time LunarRocket <->
+## SpaceVoyageVisuals dependency cycle. The cache is populated once, while the
+## canonical phase arrays remain owned by LunarRocket.
+static func stars_visible_for_progress(progress: float, outbound: bool) -> bool:
+	var timing := _lunar_rocket_timing()
+	var clamped_progress := clampf(progress, 0.0, 1.0)
+	if outbound:
+		return clamped_progress >= float(timing.outbound_atmosphere_exit) \
+			/ maxf(float(timing.outbound_duration), 0.001)
+	return clamped_progress < float(timing.return_reentry) \
+		/ maxf(float(timing.return_duration), 0.001)
+
+
+static func _lunar_rocket_timing() -> Dictionary:
+	if not _rocket_timing.is_empty():
+		return _rocket_timing
+	var outbound_duration := 60.0
+	var return_duration := 45.0
+	var outbound_atmosphere_exit := 10.0
+	var return_reentry := 28.0
+	var rocket_script := load(LUNAR_ROCKET_SCRIPT_PATH) as Script
+	if rocket_script:
+		var constants := rocket_script.get_script_constant_map()
+		outbound_duration = float(constants.get("OUTBOUND_DURATION_SECONDS",
+			outbound_duration))
+		return_duration = float(constants.get("RETURN_DURATION_SECONDS",
+			return_duration))
+		var outbound_times = constants.get("OUTBOUND_PHASE_TIMES", [])
+		var return_times = constants.get("RETURN_PHASE_TIMES", [])
+		if outbound_times is Array and outbound_times.size() > 0:
+			outbound_atmosphere_exit = float(outbound_times[0])
+		if return_times is Array and return_times.size() > 1:
+			return_reentry = float(return_times[1])
+	_rocket_timing = {
+		"outbound_duration": outbound_duration,
+		"return_duration": return_duration,
+		"outbound_atmosphere_exit": outbound_atmosphere_exit,
+		"return_reentry": return_reentry,
+	}
+	return _rocket_timing
 
 
 func _build_backdrop() -> void:
@@ -209,8 +263,8 @@ func _build_backdrop() -> void:
 	galaxy_visual.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	add_child(galaxy_visual)
 
-	earth_visual = _add_sphere("RecedingEarth", 1.0, _earth_material)
-	moon_visual = _add_sphere("ApproachingMoon", 1.0, _moon_material)
+	earth_visual = _add_sphere("RecedingEarth", 1.0, _earth_material, true)
+	moon_visual = _add_sphere("ApproachingMoon", 1.0, _moon_material, true)
 	sun_visual = _add_sphere("DistantSun", 3.2, _sun_material)
 	sun_visual.position = Vector3(92.0, 58.0, -155.0)
 	for index in range(PLANET_COLORS.size()):
@@ -256,12 +310,12 @@ func _build_nebulae() -> void:
 
 
 func _add_sphere(part_name: String, radius: float,
-		material: Material) -> MeshInstance3D:
+		material: Material, detailed := false) -> MeshInstance3D:
 	var mesh := SphereMesh.new()
 	mesh.radius = radius
 	mesh.height = radius * 2.0
-	mesh.radial_segments = 20
-	mesh.rings = 12
+	mesh.radial_segments = CELESTIAL_RADIAL_SEGMENTS if detailed else 20
+	mesh.rings = CELESTIAL_RINGS if detailed else 12
 	var instance := MeshInstance3D.new()
 	instance.name = part_name
 	instance.mesh = mesh
@@ -334,21 +388,28 @@ static func _ensure_shared_resources() -> void:
 	_space_material.disable_fog = true
 	_earth_material = StandardMaterial3D.new()
 	_earth_material.albedo_color = Color.WHITE
-	var earth_texture := _procedural_earth_texture()
-	_earth_material.albedo_texture = earth_texture
+	_earth_material.albedo_texture = EARTH_ATLAS
 	_earth_material.metallic = 0.0
 	_earth_material.roughness = 0.76
+	_earth_material.texture_filter = \
+		BaseMaterial3D.TEXTURE_FILTER_LINEAR_WITH_MIPMAPS_ANISOTROPIC
+	_earth_material.texture_repeat = true
 	_earth_material.emission_enabled = true
 	_earth_material.emission = Color.WHITE
-	_earth_material.emission_texture = earth_texture
+	_earth_material.emission_texture = EARTH_ATLAS
 	_earth_material.emission_energy_multiplier = 0.20
 	_earth_material.disable_fog = true
 	_moon_material = StandardMaterial3D.new()
-	_moon_material.albedo_color = Color(0.54, 0.55, 0.57)
+	_moon_material.albedo_color = Color.WHITE
+	_moon_material.albedo_texture = MOON_ATLAS
 	_moon_material.roughness = 0.95
+	_moon_material.texture_filter = \
+		BaseMaterial3D.TEXTURE_FILTER_LINEAR_WITH_MIPMAPS_ANISOTROPIC
+	_moon_material.texture_repeat = true
 	_moon_material.emission_enabled = true
-	_moon_material.emission = Color(0.17, 0.18, 0.20)
-	_moon_material.emission_energy_multiplier = 0.26
+	_moon_material.emission = Color(0.33, 0.34, 0.36)
+	_moon_material.emission_texture = MOON_ATLAS
+	_moon_material.emission_energy_multiplier = 0.18
 	_moon_material.disable_fog = true
 	_sun_material = StandardMaterial3D.new()
 	_sun_material.albedo_color = Color(1.0, 0.72, 0.22)
@@ -367,45 +428,6 @@ static func _ensure_shared_resources() -> void:
 	_galaxy_material.billboard_mode = BaseMaterial3D.BILLBOARD_ENABLED
 	_galaxy_material.disable_receive_shadows = true
 	_galaxy_material.disable_fog = true
-
-
-static func _procedural_earth_texture() -> ImageTexture:
-	# A low-cost deterministic equirectangular Earth: several differently
-	# oriented waves make continent-scale masses, with deserts, vegetation,
-	# polar ice, and thin cloud streaks visible as the planet recedes.
-	const WIDTH := 256
-	const HEIGHT := 128
-	var image := Image.create(WIDTH, HEIGHT, false, Image.FORMAT_RGBA8)
-	for y in range(HEIGHT):
-		var v := (float(y) + 0.5) / float(HEIGHT)
-		var latitude := (0.5 - v) * PI
-		for x in range(WIDTH):
-			var u := (float(x) + 0.5) / float(WIDTH)
-			var longitude := (u - 0.5) * TAU
-			var continental := sin(longitude * 1.4 + sin(latitude * 2.7))
-			continental += sin(longitude * 2.8 - latitude * 1.9) * 0.48
-			continental += cos(longitude * 5.2 + latitude * 3.6) * 0.24
-			continental += sin(longitude * 9.1 - latitude * 6.4) * 0.10
-			continental -= absf(latitude) * 0.20
-			var color: Color
-			if continental > 0.37:
-				var aridity := absf(sin(longitude * 2.1 + latitude * 4.0))
-				color = Color(0.55, 0.43, 0.20).lerp(
-					Color(0.12, 0.42, 0.20), aridity)
-				if continental > 1.0:
-					color = color.lerp(Color(0.38, 0.31, 0.25), 0.55)
-			else:
-				var ocean_depth := clampf((0.37 - continental) * 0.42, 0.0, 0.34)
-				color = Color(0.035, 0.22, 0.51).darkened(ocean_depth)
-			var polar := smoothstep(1.08, 1.47, absf(latitude))
-			color = color.lerp(Color(0.88, 0.94, 0.98), polar)
-			var clouds := sin(longitude * 7.2 + latitude * 3.1) \
-				+ sin(longitude * 13.0 - latitude * 8.0) * 0.42
-			if clouds > 1.05:
-				color = color.lerp(Color(0.92, 0.96, 1.0),
-					clampf((clouds - 1.05) * 0.48, 0.0, 0.32))
-			image.set_pixel(x, y, color)
-	return ImageTexture.create_from_image(image)
 
 
 static func _procedural_nebula_texture() -> ImageTexture:

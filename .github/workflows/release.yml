@@ -120,10 +120,16 @@ jobs:
             --quit-after 30000 -- planetwraptest
           "$GODOT_BIN" --headless --path . res://scenes/main.tscn \
             --quit-after 30000 -- worldmaptest
-          "$GODOT_BIN" --headless --path . --quit-after 30000 \
-            --script res://tests/lunarexpeditiontest.gd
+          "$GODOT_BIN" --headless --path . res://scenes/main.tscn \
+            --quit-after 30000 -- lunarexpeditiontest
           "$GODOT_BIN" --headless --path . --quit-after 30000 \
             --script res://tests/expeditionintegrationtest.gd
+          "$GODOT_BIN" --headless --path . --script \
+            res://tests/roadnetworktest.gd
+          "$GODOT_BIN" --headless --path . --script \
+            res://tests/transportnetworktest.gd
+          "$GODOT_BIN" --headless --path . --script \
+            res://tests/streaminglodtest.gd
 
       - name: Run vehicle physics and world regressions
         shell: bash
@@ -135,6 +141,8 @@ jobs:
             --quit-after 60000 -- suspensiontest
           "$GODOT_BIN" --headless --path . res://scenes/main.tscn \
             --quit-after 60000 -- vehicleworldtest
+          "$GODOT_BIN" --headless --path . --script \
+            res://tests/rig_lifecycle_recovery_test.gd
 
       - name: Build installers and cross-platform content pack
         shell: bash

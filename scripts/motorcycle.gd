@@ -35,6 +35,11 @@ const WHEELIE_LOOP_THROTTLE := 0.86
 const WHEELIE_OVERPOWER_GRACE := 1.45
 const WHEELIE_OVERPOWER_FULL := 2.70
 const MAX_ASSISTED_LEAN := 0.66       # ~38°: quick without a snap lowside
+## A keyboard brake is binary, while a real lever builds hydraulic pressure over
+## a short squeeze. This ramp keeps the first frame from locking both tires while
+## remaining quick enough for an emergency stop.
+const BRAKE_APPLY_SECONDS := 0.14
+const BRAKE_RELEASE_SECONDS := 0.10
 
 var lean_target := 0.0
 var _lean_integral := 0.0
@@ -45,6 +50,7 @@ var _wheelie_elapsed := 0.0
 var _wheelie_cooldown := 0.0
 var _wheelie_crash_emitted := false
 var _wheelie_overpower := 0.0
+var _brake_pressure := 0.0
 var _steer_head: Node3D
 var _front_fork_tubes: Array[MeshInstance3D] = []
 var _front_sliders: Array[MeshInstance3D] = []
@@ -119,7 +125,7 @@ func _init() -> void:
 		"damp_rebound": 1250.0,
 		"steerable": true,
 		"driven": false,
-		"brake_share": 0.65,
+		"brake_share": 0.70,
 		"wheel_mass": 11.0,
 		"mu_long": 1.02,
 		"mu_lat": 0.98,
@@ -138,7 +144,7 @@ func _init() -> void:
 		"damp_rebound": 1650.0,
 		"steerable": false,
 		"driven": true,
-		"brake_share": 0.35,
+		"brake_share": 0.30,
 		"wheel_mass": 13.0,
 		"mu_long": 1.05,
 		"mu_lat": 0.98,
@@ -178,6 +184,9 @@ func begin_drive(player: Node3D) -> void:
 	_kickstand_engaged = false
 	_wheelie_crash_emitted = false
 	super(player)
+	# A parked bike carries full brake pressure. Starting a new ride must not drag
+	# that stale pressure through the first tenth of a second after mounting.
+	_brake_pressure = 0.0
 
 
 func end_drive() -> Vector3:
@@ -338,6 +347,7 @@ func _reset_special_physics_state() -> void:
 	_wheelie_crash_emitted = false
 	lean_target = 0.0
 	_lean_integral = 0.0
+	_brake_pressure = 0.0
 
 
 func _advance_steering(dt: float) -> void:
@@ -359,21 +369,61 @@ func _simulate(dt: float) -> void:
 	_tuck = move_toward(_tuck, 1.0 if input_aux else 0.0, 3.0 * dt)
 	drag_area = lerpf(0.55, 0.40, _tuck)
 	_wheelie_cooldown = maxf(_wheelie_cooldown - dt, 0.0)
+	var requested_brake := input_brake if driver else 1.0
+	var brake_seconds := BRAKE_APPLY_SECONDS \
+		if requested_brake > _brake_pressure else BRAKE_RELEASE_SECONDS
+	_brake_pressure = move_toward(_brake_pressure, requested_brake,
+		dt / maxf(brake_seconds, 0.001))
 	var unscaled_steer := input_steer
+	var raw_brake := input_brake
+	var speed_before_braking := _planar_forward_speed()
 	if wheelie_active():
 		# A raised front contact cannot generate normal steering force. Keep a small
 		# amount of rider body English, but prevent sharp airborne direction changes.
 		input_steer *= WHEELIE_STEER_SCALE
-	# Paddle backward at a stop: no reverse gear on a bike, just monkey feet.
-	if driver and input_brake > 0.4 and speed() < 0.9 \
-			and _wheels_grounded() == 2:
-		apply_central_force(-global_basis.z * 620.0)
+	# S is a brake on the motorcycle, never a hidden reverse input. Feed the
+	# progressive lever pressure into the shared tire simulation, then restore the
+	# raw control value for HUD/input consumers after the physics step.
+	input_brake = _brake_pressure
 	super(dt)
+	input_brake = raw_brake
 	input_steer = unscaled_steer
+	_clamp_braked_direction_change(speed_before_braking)
 	_advance_wheelie(dt)
 	_advance_lean(dt)
 	_check_wheelie_crash()
 	_check_lowside(dt)
+
+
+## Static tire friction stops a no-reverse motorcycle at zero. Discrete tire
+## impulses can otherwise cross zero during the final physics frame of a hard
+## stop, creating a small backwards creep even though no reverse torque exists.
+## Work in the ground plane so fork dive or unrestricted vertical falling never
+## masquerades as reverse motion and never has its gravity velocity clamped.
+func _clamp_braked_direction_change(previous_forward_speed: float) -> void:
+	if driver == null or _brake_pressure <= 0.05 or input_throttle > 0.05 \
+			or _wheels_grounded() == 0:
+		return
+	var current_forward_speed := _planar_forward_speed()
+	# Once the motorcycle reaches walking pace, the held lever supplies the
+	# static-friction lock of a real stopped tire.  Checking only a same-frame
+	# sign crossing misses the following suspension-settle frame, where the
+	# chassis can rebound backwards after it was clamped exactly to zero.
+	var settling_at_stop := previous_forward_speed > -0.45 \
+			and current_forward_speed < 0.0 \
+			and absf(current_forward_speed) < 0.45
+	if previous_forward_speed * current_forward_speed < 0.0 or settling_at_stop:
+		var planar_forward := Vector3(global_basis.z.x, 0.0, global_basis.z.z)
+		if planar_forward.length_squared() > 0.001:
+			linear_velocity -= planar_forward.normalized() * current_forward_speed
+
+
+func _planar_forward_speed() -> float:
+	var planar_forward := Vector3(global_basis.z.x, 0.0, global_basis.z.z)
+	if planar_forward.length_squared() <= 0.001:
+		return 0.0
+	return Vector3(linear_velocity.x, 0.0, linear_velocity.z).dot(
+		planar_forward.normalized())
 
 
 func anti_loop_active() -> bool:

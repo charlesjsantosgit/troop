@@ -21,17 +21,28 @@ const HIGHSPEED_CRUISE_Y := Gen.PLANET_SUMMIT_ELEVATION + HIGHSPEED_ALTITUDE
 const HIGHSPEED_PREFLIGHT_SETTLE_SECONDS := 12.0
 const HIGHSPEED_WARMUP_SECONDS := 8.0
 const HIGHSPEED_SAMPLE_SECONDS := 20.0
-const HIGHSPEED_TARGET_FPS := 100.0
-const HIGHSPEED_MAX_P95_MS := 12.0
+## Sustained 1000 mph streaming must remain inside the requested 70-90 FPS
+## envelope on hardware whose refresh/cap can expose it. Seventy is the hard
+## gate; ninety is reported as a stretch result rather than making 75 Hz panels
+## incapable of producing a valid proof.
+const HIGHSPEED_TARGET_FPS := 70.0
+const HIGHSPEED_STRETCH_FPS := 90.0
+const HIGHSPEED_MAX_P95_MS := 14.5
+const HIGHSPEED_STRETCH_P95_MS := 12.0
 const HIGHSPEED_MAX_P99_MS := 20.0
 const HIGHSPEED_MAX_FRAME_MS := 50.0
 const HIGHSPEED_MIN_PREDICTION_LEAD := Gen.CHUNK * 4.0
 const HIGHSPEED_MAX_NEAR_QUEUE := 64
 const HIGHSPEED_MAX_SHELL_AGE_MS := 1800.0
 const HIGHSPEED_MAX_TREE_AGE_MS := 5000.0
-const HIGHSPEED_MAX_PENDING_GROWTH := 24
+## The circular predictor deliberately keeps up to one 3-wide eight-chunk lane
+## plus a few incoming stratos sectors queued. This remains bounded by age and
+## near-queue gates; allow that fixed 28-ish working set independent of a lucky
+## near-zero snapshot at the exact start of sampling.
+const HIGHSPEED_MAX_PENDING_GROWTH := 32
 const HIGHSPEED_COLLISION_LEG_SECONDS := 5.0
 const HIGHSPEED_PARKED_VEHICLE_PROBE_SECONDS := 2.5
+const HIGHSPEED_PARKED_SHELL_SETTLE_SECONDS := 0.75
 const HIGHSPEED_COLLISION_LEG_SPEED := 80.0
 const HIGHSPEED_DESCENT_SPEED := 22.0
 const HIGHSPEED_MAX_STREAMED_VEHICLES := 16
@@ -318,7 +329,15 @@ func _run_highspeed(main) -> void:
 	var max_streamed_vehicles := 0
 	var max_spawned_vehicle_ids := 0
 	var max_vehicle_nodes := 0
+	var max_stratos_required := 0
+	var max_stratos_square_capacity := 0
+	var circular_culling_seen := false
+	var literal_suppression_seen := false
+	var stratos_canopy_handoff_seen := false
+	var max_active_near_detail := 0
 	var over_100 := 0
+	var snapshot_usec_total := 0
+	var snapshot_usec_max := 0
 	while sample_time < HIGHSPEED_SAMPLE_SECONDS:
 		await get_tree().process_frame
 		var dt := get_process_delta_time()
@@ -327,7 +346,11 @@ func _run_highspeed(main) -> void:
 		over_100 += 1 if dt > 0.100 else 0
 		# Sample before advancing: World streamed the current transform during the
 		# frame that just completed, eliminating a false one-frame boundary hole.
+		var snapshot_started := Time.get_ticks_usec()
 		var snapshot := world.streaming_snapshot()
+		var snapshot_usec := Time.get_ticks_usec() - snapshot_started
+		snapshot_usec_total += snapshot_usec
+		snapshot_usec_max = maxi(snapshot_usec_max, snapshot_usec)
 		var near_missing := int(snapshot.near_path_missing)
 		var near_visible_missing := int(snapshot.near_current_missing)
 		center_hole_frames += 1 if near_missing > 0 else 0
@@ -345,7 +368,8 @@ func _run_highspeed(main) -> void:
 		max_cruise_collision_missing = maxi(max_cruise_collision_missing,
 			int(snapshot.collision_corridor_missing))
 		min_stratos_coverage_margin = minf(min_stratos_coverage_margin,
-			float(snapshot.stratos_cardinal_coverage_m) \
+			minf(float(snapshot.stratos_cardinal_coverage_m),
+				float(snapshot.stratos_radial_coverage_m)) \
 				- world.current_view_distance)
 		max_canopy_sector_missing = maxi(max_canopy_sector_missing,
 			int(snapshot.stratos_required_loaded) \
@@ -367,6 +391,18 @@ func _run_highspeed(main) -> void:
 		max_spawned_vehicle_ids = maxi(max_spawned_vehicle_ids,
 			int(snapshot.spawned_vehicle_ids))
 		max_vehicle_nodes = maxi(max_vehicle_nodes, int(snapshot.vehicle_nodes))
+		max_stratos_required = maxi(max_stratos_required,
+			int(snapshot.stratos_required))
+		max_stratos_square_capacity = maxi(max_stratos_square_capacity,
+			int(snapshot.stratos_square_capacity))
+		circular_culling_seen = circular_culling_seen \
+			or int(snapshot.stratos_culled_corner_targets) > 0
+		literal_suppression_seen = literal_suppression_seen \
+			or bool(snapshot.literal_detail_suppressed)
+		stratos_canopy_handoff_seen = stratos_canopy_handoff_seen \
+			or str(snapshot.canopy_signal_tier) == "stratos_tint"
+		max_active_near_detail = maxi(max_active_near_detail,
+			int(snapshot.near_detail_queue))
 		elapsed += dt
 		_advance_highspeed_player(player, elapsed, dt)
 
@@ -412,8 +448,13 @@ func _run_highspeed(main) -> void:
 				and int(snapshot.collision_corridor_missing) == 0:
 			parked_vehicle_ready_frames += 1
 		max_near_queue = maxi(max_near_queue, int(snapshot.near_queue))
-		parked_vehicle_visible_missing = maxi(parked_vehicle_visible_missing,
-			int(snapshot.near_current_missing))
+		# This fixture teleports vertically from 6.1 km to 80 m AGL, unlike a real
+		# descent that wakes detail/shells three seconds ahead. Give the newly
+		# expanded 5x5 one bounded settle window, then require every sampled frame
+		# to remain complete for the rest of the parked-vehicle probe.
+		if parked_probe_time >= HIGHSPEED_PARKED_SHELL_SETTLE_SECONDS:
+			parked_vehicle_visible_missing = maxi(parked_vehicle_visible_missing,
+				int(snapshot.near_current_missing))
 		parked_probe_time += dt
 	# Non-vacuous collision proof: descend from 60 m AGL while moving at 80 m/s,
 	# then hold still near the terrain. The world must request collision before
@@ -463,19 +504,24 @@ func _run_highspeed(main) -> void:
 	var max_ms := frame_times[-1] * 1000.0 if not frame_times.is_empty() else 0.0
 	var refresh := DisplayServer.screen_get_refresh_rate()
 	var rendered := DisplayServer.get_name() != "headless"
-	var cap_allows_100 := Engine.max_fps == 0 \
+	var cap_allows_target := Engine.max_fps == 0 \
 		or Engine.max_fps >= int(HIGHSPEED_TARGET_FPS)
 	# Some macOS compositors report a stale/unknown refresh rate even when an
 	# uncapped rendered process is demonstrably running above it. Accept that as
 	# proof only when measured throughput clears the reported rate by 25%.
 	var measured_above_refresh := refresh > 1.0 \
 		and average_fps > refresh * 1.25
-	var can_measure_100 := rendered and cap_allows_100 \
-		and (refresh >= 99.0 or measured_above_refresh)
+	var can_measure_target := rendered and cap_allows_target \
+		and (refresh >= HIGHSPEED_TARGET_FPS - 1.0 or measured_above_refresh)
 	var performance_pass := average_fps >= HIGHSPEED_TARGET_FPS \
 		and p95_ms <= HIGHSPEED_MAX_P95_MS \
 		and p99_ms <= HIGHSPEED_MAX_P99_MS \
 		and max_ms < HIGHSPEED_MAX_FRAME_MS and over_100 == 0
+	var stretch_capable := rendered and (Engine.max_fps == 0 \
+		or Engine.max_fps >= int(HIGHSPEED_STRETCH_FPS)) \
+		and (refresh >= HIGHSPEED_STRETCH_FPS - 1.0 or measured_above_refresh)
+	var stretch_pass := average_fps >= HIGHSPEED_STRETCH_FPS \
+		and p95_ms <= HIGHSPEED_STRETCH_P95_MS
 	var coverage_pass := center_hole_frames == 0 and max_near_missing == 0 \
 		and max_near_visible_missing == 0 \
 		and max_horizon_missing == 0 and max_skyline_missing == 0 \
@@ -488,7 +534,10 @@ func _run_highspeed(main) -> void:
 	var prediction_pass := min_prediction_lead >= HIGHSPEED_MIN_PREDICTION_LEAD
 	var canopy_pass := max_stratos_missing == 0 \
 		and min_stratos_coverage_margin >= 0.0 \
-		and max_canopy_sector_missing == 0 and max_canopy_vertices > 0
+		and max_canopy_sector_missing == 0 and max_canopy_vertices > 0 \
+		and circular_culling_seen and literal_suppression_seen \
+		and stratos_canopy_handoff_seen \
+		and max_active_near_detail == 0
 	var collision_pass := collision_requirement_seen \
 		and collision_target_peak >= 9 and collision_final_missing == 0 \
 		and collision_ready_frames > 0 and parked_vehicle_tracking_seen \
@@ -506,14 +555,14 @@ func _run_highspeed(main) -> void:
 	var correctness_pass := preflight_ready and coverage_pass and queue_pass \
 		and prediction_pass and canopy_pass and collision_pass and vehicle_pass
 	var performance_status := "PASS" if performance_pass else "FAIL"
-	if not can_measure_100:
+	if not can_measure_target:
 		performance_status = "UNVERIFIED_REFRESH"
 	var overall_status := "PASS"
 	var exit_code := 0
 	if not correctness_pass:
 		overall_status = "FAIL"
 		exit_code = 1
-	elif not can_measure_100:
+	elif not can_measure_target:
 		overall_status = "UNVERIFIED"
 		exit_code = 2
 	elif not performance_pass:
@@ -527,7 +576,7 @@ func _run_highspeed(main) -> void:
 		HIGHSPEED_METERS_PER_SECOND, sample_time,
 		RenderingServer.get_video_adapter_name(), str(rendered), refresh,
 		int(DisplayServer.window_get_vsync_mode()), Engine.max_fps,
-		str(can_measure_100), average_fps, p95_ms, p99_ms, max_ms, over_100,
+		str(can_measure_target), average_fps, p95_ms, p99_ms, max_ms, over_100,
 	])
 	print(("HIGHSPEED_STREAM path_missing=%d visible_edge_missing=%d " \
 		+ "near_detail_handoff=%d " \
@@ -537,7 +586,9 @@ func _run_highspeed(main) -> void:
 		+ "lead_m=%.0f near_q=%d pending_initial=%d pending_max=%d " \
 		+ "pending_cruise_final=%d pending_probe_final=%d " \
 		+ "shell_age_ms=%.0f tree_age_ms=%.0f canopy_vertices=%d " \
-		+ "lane_max_usec=%d/%d/%d shells=%d cancelled=%d") % [
+		+ "stratos_targets=%d/%d circular=%s detail_q=%d " \
+		+ "lane_max_usec=%d/%d/%d diagnostic_usec=%d/%d " \
+		+ "shells=%d cancelled=%d") % [
 		max_near_missing, max_near_visible_missing, max_near_detail_missing,
 		center_hole_frames,
 		max_horizon_missing,
@@ -545,8 +596,10 @@ func _run_highspeed(main) -> void:
 		max_canopy_sector_missing, max_cruise_collision_missing,
 		min_prediction_lead, max_near_queue, initial_pending, max_total_pending,
 		cruise_final_pending, final_pending, max_shell_age, max_tree_age,
-		max_canopy_vertices,
+		max_canopy_vertices, max_stratos_required, max_stratos_square_capacity,
+		str(circular_culling_seen), max_active_near_detail,
 		max_shell_usec, max_safety_usec, max_decoration_usec,
+		int(snapshot_usec_total / maxi(frame_times.size(), 1)), snapshot_usec_max,
 		int(final_snapshot.shells_built), int(final_snapshot.cancelled_jobs),
 	])
 	print(("HIGHSPEED_COLLISION requirement_seen=%s target_peak=%d " \
@@ -585,9 +638,12 @@ func _run_highspeed(main) -> void:
 		HIGHSPEED_MAX_SPAWNED_VEHICLE_IDS, HIGHSPEED_MAX_VEHICLE_NODES,
 	])
 	print(("HIGHSPEED_PERFORMANCE_GATE %s proof_capable=%s " \
-		+ "thresholds=avg_fps>=%.0f p95<=%.0fms p99<=%.0fms max<%.0fms") % [
-		performance_status, str(can_measure_100), HIGHSPEED_TARGET_FPS,
-		HIGHSPEED_MAX_P95_MS, HIGHSPEED_MAX_P99_MS, HIGHSPEED_MAX_FRAME_MS,
+		+ "stretch=%s stretch_capable=%s thresholds=avg_fps>=%.0f " \
+		+ "p95<=%.1fms p99<=%.0fms max<%.0fms stretch_fps>=%.0f") % [
+		performance_status, str(can_measure_target),
+		"PASS" if stretch_pass else "MISS", str(stretch_capable),
+		HIGHSPEED_TARGET_FPS, HIGHSPEED_MAX_P95_MS, HIGHSPEED_MAX_P99_MS,
+		HIGHSPEED_MAX_FRAME_MS, HIGHSPEED_STRETCH_FPS,
 	])
 	print("HIGHSPEED_GATE %s correctness=%s performance=%s" % [
 		overall_status, "PASS" if correctness_pass else "FAIL",

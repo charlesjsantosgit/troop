@@ -112,12 +112,13 @@ func _run() -> void:
 
 	# --- authority validation envelope ------------------------------------
 	var valid_outbound := {"phase": net.RocketMissionPhase.OUTBOUND,
-		"crew": [1, 2, 3, 4], "elapsed": 179.999,
-		"duration": 180.0, "serial": 1}
+		"crew": [1, 2, 3, 4], "elapsed": 59.999,
+		"duration": net.ROCKET_OUTBOUND_SECONDS, "serial": 1}
 	var bad_outbound_duration := valid_outbound.duplicate(true)
-	bad_outbound_duration.duration = 120.0
+	bad_outbound_duration.duration = net.ROCKET_RETURN_SECONDS
 	var bad_return_elapsed := {"phase": net.RocketMissionPhase.RETURN,
-		"crew": [1], "elapsed": 120.001, "duration": 120.0, "serial": 2}
+		"crew": [1], "elapsed": net.ROCKET_RETURN_SECONDS + 0.001,
+		"duration": net.ROCKET_RETURN_SECONDS, "serial": 2}
 	var valid_recovery := {"phase": net.RocketMissionPhase.SPLASHDOWN_RECOVERY,
 		"crew": [], "elapsed": 17.999, "duration": 18.0, "serial": 2}
 	var valid_recovery_manifest := valid_recovery.duplicate(true)
@@ -133,31 +134,33 @@ func _run() -> void:
 			and not net._valid_expedition_state(bad_return_elapsed) \
 			and not net._valid_expedition_state(bad_recovery_duration) \
 			and not net._valid_expedition_state(bad_ready_clock),
-		"network snapshots enforce exact phase-specific 180/120/18-second clocks")
+		"network snapshots enforce exact phase-specific 60/45/18-second clocks")
 	_check(not net._valid_expedition_state({"phase": 1, "crew": [1, 1],
-			"elapsed": 0.0, "duration": 180.0, "serial": 1}) \
+			"elapsed": 0.0, "duration": net.ROCKET_OUTBOUND_SECONDS,
+			"serial": 1}) \
 			and not net._valid_expedition_state({"phase": 1,
 				"crew": [1, 2, 3, 4, 5], "elapsed": 0.0,
-				"duration": 180.0, "serial": 1}),
+				"duration": net.ROCKET_OUTBOUND_SECONDS, "serial": 1}),
 		"network snapshots reject duplicate and over-capacity manifests")
-	_check(rocket_script.state_for_elapsed(true, 27.999) \
+	_check(rocket_script.state_for_elapsed(true, 9.999) \
 			== rocket_script.State.LAUNCH_ASCENT \
-			and rocket_script.state_for_elapsed(true, 28.0) \
+			and rocket_script.state_for_elapsed(true, 10.0) \
 				== rocket_script.State.ATMOSPHERE_EXIT \
-			and rocket_script.state_for_elapsed(true, 179.999) \
+			and rocket_script.state_for_elapsed(true, 59.999) \
 				== rocket_script.State.LUNAR_APPROACH \
-			and rocket_script.state_for_elapsed(true, 180.0) \
+			and rocket_script.state_for_elapsed(true, 60.0) \
 				== rocket_script.State.LANDED_MOON \
-			and rocket_script.state_for_elapsed(false, 119.999) \
+			and rocket_script.state_for_elapsed(false, 44.999) \
 				== rocket_script.State.OCEAN_APPROACH \
-			and rocket_script.state_for_elapsed(false, 120.0) \
+			and rocket_script.state_for_elapsed(false, 45.0) \
 				== rocket_script.State.SPLASHDOWN,
 		"presentation states share exact authority clock boundaries")
 
 	# A global expedition is visible to everyone, but its cinematic must never
 	# take control from an Earth spectator who is not on the manifest.
 	var spectator_state := {"phase": net.RocketMissionPhase.OUTBOUND,
-		"crew": [2], "elapsed": 12.0, "duration": 180.0, "serial": 1}
+		"crew": [2], "elapsed": 8.0,
+		"duration": net.ROCKET_OUTBOUND_SECONDS, "serial": 1}
 	net.rocket_state = spectator_state.duplicate(true)
 	net.player_realms[1] = net.PlayerRealm.EARTH
 	manager.voyage_camera.current = false
@@ -178,7 +181,8 @@ func _run() -> void:
 	# Admin extraction must never preserve a cinematic cabin coordinate as an
 	# Earth gameplay position, including early ascent below the realm separator.
 	net.rocket_state = {"phase": net.RocketMissionPhase.RETURN,
-		"crew": [1, 2], "elapsed": 8.0, "duration": 120.0, "serial": 1}
+		"crew": [1, 2], "elapsed": 8.0,
+		"duration": net.ROCKET_RETURN_SECONDS, "serial": 1}
 	net._rocket_started_msec = Time.get_ticks_msec() - 8_000
 	net.player_realms[1] = net.PlayerRealm.TRANSIT
 	manager._apply_authoritative_state(net.expedition_state_snapshot())
@@ -243,8 +247,9 @@ func _run() -> void:
 		"the hatch accepts a deliberate later reboard")
 	_check(net._host_start_rocket(1) \
 			and int(net.rocket_state.phase) == net.RocketMissionPhase.OUTBOUND \
-			and is_equal_approx(float(net.rocket_state.duration), 180.0),
-		"seated crew member starts an authority-owned 180-second outbound mission")
+			and is_equal_approx(float(net.rocket_state.duration),
+				net.ROCKET_OUTBOUND_SECONDS),
+		"seated crew member starts an authority-owned 60-second outbound mission")
 	var all_transit := true
 	for peer_id in range(1, 5):
 		all_transit = all_transit \
@@ -271,7 +276,22 @@ func _run() -> void:
 				manager.rocket.seat_global_transform(late_peer_four_seat).origin) < 0.01,
 		"late-created voyage puppet attaches to its authoritative moving cabin seat")
 	manager.rocket.apply_authoritative_clock(
-		rocket_script.State.LUNAR_APPROACH, true, 154.0)
+		rocket_script.State.LAUNCH_ASCENT, true, 9.999)
+	manager._update_voyage_camera(0.0, 9.999 / 60.0,
+		net.expedition_state_snapshot())
+	var ascent_camera_position: Vector3 = manager.voyage_camera.global_position
+	var ascent_camera_forward: Vector3 = -manager.voyage_camera.global_basis.z
+	manager.rocket.apply_authoritative_clock(
+		rocket_script.State.ATMOSPHERE_EXIT, true, 10.0)
+	manager._update_voyage_camera(0.0, 10.0 / 60.0,
+		net.expedition_state_snapshot())
+	var atmosphere_camera_position: Vector3 = manager.voyage_camera.global_position
+	var atmosphere_camera_forward: Vector3 = -manager.voyage_camera.global_basis.z
+	_check(ascent_camera_position.distance_to(atmosphere_camera_position) < 2.0 \
+			and ascent_camera_forward.dot(atmosphere_camera_forward) > 0.999,
+		"vertical launch hands off to the chase camera without a position or focus snap")
+	manager.rocket.apply_authoritative_clock(
+		rocket_script.State.LUNAR_APPROACH, true, 48.0)
 	var cabin_puppet: Variant = world.puppets[2]
 	var cabin_seat: int = int(manager.rocket.seat_for_peer(2))
 	cabin_puppet.apply_state(earth_rocket_position + Vector3(80.0, 0.0, 0.0),
@@ -288,7 +308,7 @@ func _run() -> void:
 	var pan_start: Vector3 = manager.voyage_camera_focus_target()
 	var earth_focus: Vector3 = manager.rocket.voyage_visuals.earth_visual.global_position
 	manager.rocket.apply_authoritative_clock(
-		rocket_script.State.LUNAR_APPROACH, true, 166.0)
+		rocket_script.State.LUNAR_APPROACH, true, 60.0)
 	var pan_finish: Vector3 = manager.voyage_camera_focus_target()
 	var moon_focus: Vector3 = manager.rocket.voyage_visuals.moon_visual.global_position
 	_check(pan_start.distance_to(earth_focus) < 0.01 \
@@ -296,18 +316,18 @@ func _run() -> void:
 			and pan_start.distance_to(pan_finish) > 20.0,
 		"lunar approach performs a real twelve-second Earth-to-Moon camera pan")
 
-	net._rocket_started_msec = Time.get_ticks_msec() - 179_000
+	net._rocket_started_msec = Time.get_ticks_msec() - 59_000
 	net._rocket_sync_remaining = 0.0
 	net._process(0.016)
 	_check(int(net.rocket_state.phase) == net.RocketMissionPhase.OUTBOUND \
-			and float(net.rocket_state.elapsed) >= 179.0 \
+			and float(net.rocket_state.elapsed) >= 59.0 \
 			and manager.rocket.state == rocket_script.State.LUNAR_APPROACH,
-		"authority remains outbound before 180 seconds and peers derive approach")
-	net._rocket_started_msec = Time.get_ticks_msec() - 180_000
+		"authority remains outbound before 60 seconds and peers derive approach")
+	net._rocket_started_msec = Time.get_ticks_msec() - 60_000
 	net._process(0.016)
 	_check(int(net.rocket_state.phase) == net.RocketMissionPhase.MOON_READY \
 			and (net.rocket_state.crew as Array).is_empty(),
-		"authority completes outbound only at the full three-minute boundary")
+		"authority completes outbound only at the full one-minute boundary")
 	var every_peer_on_moon := true
 	for peer_id in range(1, 5):
 		every_peer_on_moon = every_peer_on_moon \
@@ -417,23 +437,24 @@ func _run() -> void:
 			and net._host_set_rocket_board(peer_id, true)
 	_check(return_manifest and net._host_start_rocket(1) \
 			and int(net.rocket_state.phase) == net.RocketMissionPhase.RETURN \
-			and is_equal_approx(float(net.rocket_state.duration), 120.0) \
+			and is_equal_approx(float(net.rocket_state.duration),
+				net.ROCKET_RETURN_SECONDS) \
 			and manager.local_suit.equipped \
 			and bool(remote_suit.get("equipped")),
-		"Moon crew starts the suited, faster authoritative 120-second return")
+		"Moon crew starts the suited, faster authoritative 45-second return")
 	_check(manager.admin_travel(net.PlayerRealm.EARTH, 2) \
 			and net.player_realm(2) == net.PlayerRealm.EARTH \
 			and not (net.rocket_state.crew as Array).has(2) \
 			and manager.rocket.seat_for_peer(2) == -1,
 		"admin realm travel removes a passenger from authority and moving cabin")
 
-	net._rocket_started_msec = Time.get_ticks_msec() - 119_000
+	net._rocket_started_msec = Time.get_ticks_msec() - 44_000
 	net._rocket_sync_remaining = 0.0
 	net._process(0.016)
 	_check(int(net.rocket_state.phase) == net.RocketMissionPhase.RETURN \
 			and manager.rocket.state == rocket_script.State.OCEAN_APPROACH,
-		"authority remains in fiery return before 120 seconds")
-	net._rocket_started_msec = Time.get_ticks_msec() - 120_000
+		"authority remains in fiery return before 45 seconds")
+	net._rocket_started_msec = Time.get_ticks_msec() - 45_000
 	net._process(0.016)
 	_check(int(net.rocket_state.phase) \
 			== net.RocketMissionPhase.SPLASHDOWN_RECOVERY \
@@ -441,7 +462,7 @@ func _run() -> void:
 			and (net.rocket_state.crew as Array) == [1, 3, 4] \
 			and net.player_realm(1) == net.PlayerRealm.EARTH \
 			and manager.rocket.state == rocket_script.State.SPLASHDOWN,
-		"120-second authority completion begins replicated ocean recovery")
+		"45-second authority completion begins replicated ocean recovery")
 	_check(is_equal_approx(player.environment_gravity_mps2,
 			player_script.FREEFALL_ACCELERATION) \
 			and world.earth_streaming_enabled() and not manager.moon_world.visible \
@@ -498,8 +519,8 @@ func _run() -> void:
 			net.RocketMissionPhase.RETURN]:
 		net.rocket_state = {
 			"phase": route_phase, "crew": [2], "elapsed": 15.0,
-			"duration": 180.0 if route_phase \
-				== net.RocketMissionPhase.OUTBOUND else 120.0,
+			"duration": net.ROCKET_OUTBOUND_SECONDS if route_phase \
+				== net.RocketMissionPhase.OUTBOUND else net.ROCKET_RETURN_SECONDS,
 			"serial": 19,
 		}
 		net._rocket_started_msec = Time.get_ticks_msec() - 15_000

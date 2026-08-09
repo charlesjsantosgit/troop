@@ -229,6 +229,11 @@ func _ready() -> void:
 			var world_map_test = load("res://tests/worldmaptest.gd").new()
 			add_child(world_map_test)
 			world_map_test.call_deferred("run", self)
+		"lunarexpeditiontest":
+			mode = "lunarexpeditiontest"
+			var lunar_test = load("res://tests/lunarexpeditiontest.gd").new()
+			add_child(lunar_test)
+			lunar_test.run()
 		"vehicleworldtest":
 			mode = "vehicleworldtest"
 			_start_solo("WorldTester", 1337, 2)
@@ -791,7 +796,7 @@ func _refresh_update_button() -> void:
 func _on_update_button_pressed() -> void:
 	if Updater.status == "installer_ready":
 		if Updater.launch_downloaded_installer():
-			status_label.text = "Installer opened. TROOP will stay playable until you close it."
+			status_label.text = "Installer opened. Close TROOP so Setup can replace its files."
 		else:
 			var retry_err := Updater.download_installer()
 			status_label.text = ("Re-downloading the installer after its launch check failed…"
@@ -1111,7 +1116,10 @@ func _set_update_chip(status: String) -> void:
 			text = "AUTO-UPDATE · CHECKING…"
 		"current":
 			text = "AUTO-UPDATE · UP TO DATE (%s)" % Updater.current_version()
-		"available", "downloading":
+		"available":
+			text = ("UPDATE · INSTALLER REQUIRED"
+				if _update_requires_installer else "AUTO-UPDATE · AVAILABLE")
+		"downloading":
 			text = "AUTO-UPDATE · DOWNLOADING NEW VERSION"
 		"staged":
 			text = "AUTO-UPDATE · READY — RESTARTS FROM THE MENU"
@@ -1844,7 +1852,7 @@ func _do_debug_shot(what: String, out: String) -> void:
 func _do_lunar_shot(what: String, out: String) -> void:
 	# These fixtures drive the same session-owned rocket, MoonWorld, suit, monkey,
 	# and shop used in play. Only the mission clock and camera are pinned so image
-	# diffs remain stable instead of depending on a three-minute real-time voyage.
+	# diffs remain stable instead of depending on a one-minute real-time voyage.
 	await get_tree().process_frame
 	if hud:
 		hud.visible = false
@@ -1897,9 +1905,15 @@ func _do_lunar_shot(what: String, out: String) -> void:
 			rocket.global_position += Vector3.UP * 5.20
 			player.global_transform = rocket.seat_global_transform(0)
 			rocket.voyage_visuals.end_voyage()
-			camera.fov = 52.0
-			camera.global_position = rocket.to_global(Vector3(13.2, 4.8, 19.8))
-			camera.look_at(rocket.to_global(Vector3(0.0, -1.25, 0.0)), Vector3.UP)
+			camera.fov = 61.0
+			# Match the production camera's foliage-safe opening frame inside the
+			# launch-pad clearing; the old 24 m offset could land inside a tree crown.
+			var launch_forward := rocket.earth_launch_transform.basis.z.normalized()
+			var launch_right := rocket.earth_launch_transform.basis.x.normalized()
+			camera.global_position = rocket.global_position \
+				+ launch_forward * 10.0 + launch_right * 3.0 \
+				+ Vector3.UP * 9.5
+			camera.look_at(rocket.earth_launch_transform.origin, Vector3.UP)
 			settle_frames = 64
 		"lunar-voyage":
 			world.set_earth_streaming_enabled(false)
@@ -1907,7 +1921,7 @@ func _do_lunar_shot(what: String, out: String) -> void:
 			rocket.board_crew(Net.local_id(), player,
 				expedition_manager.local_suit, expedition_manager.local_inventory)
 			rocket.apply_authoritative_clock(LunarRocket.State.SPACE_CRUISE,
-				true, 82.0)
+				true, 30.0)
 			rocket.set_physics_process(false)
 			player.set_expedition_locked(true)
 			player.global_transform = rocket.seat_global_transform(0)
@@ -1940,10 +1954,13 @@ func _do_lunar_shot(what: String, out: String) -> void:
 				moon.height_at(scenic_rocket_xz.x, scenic_rocket_xz.y)
 					+ LunarRocket.ORIGIN_ABOVE_LANDING_SURFACE,
 				scenic_rocket_xz.y))
-			var camera_local := Vector3(78.0, 8.0, 2.0)
-			camera.fov = 64.0
+			# Keep the articulated suit large enough to inspect while the shop stays
+			# aligned behind the astronaut and Earth remains readable in the sky.
+			var camera_local := Vector3(72.0, 3.8, -3.5)
+			camera.fov = 58.0
 			camera.global_position = moon.to_global(camera_local)
-			camera.look_at(moon.to_global(Vector3(54.0, 3.0, -28.0)), Vector3.UP)
+			camera.look_at(moon.to_global(Vector3(player_xz.x, 1.05,
+				player_xz.y)), Vector3.UP)
 			# Turn the kiosk frontage toward this regression view so its sign and
 			# cheese-hatted villager prove the actual interactive model is present.
 			if moon.cheese_shop:

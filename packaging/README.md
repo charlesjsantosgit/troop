@@ -114,7 +114,7 @@ exist:
 
 ```bash
 python3 packaging/make_update_manifest.py \
-  --version 0.4.0 \
+  --version 0.4.1 \
   --repository OWNER/REPOSITORY \
   --private-key /Users/charlessantos/.config/troop/update-signing-private.pem
 

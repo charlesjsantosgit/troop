@@ -32,7 +32,7 @@ const STRATOS_CANOPY_RELIEF_MIN := 2.4
 const STRATOS_CANOPY_RELIEF_MAX := 7.2
 const VIEW_BASE_DISTANCE := 2200.0  # ground-level far plane (m)
 const VIEW_PEAK_DISTANCE := 24140.0 # 15 miles from the tallest peaks
-const VIEW_PER_METER := 300.0       # extra view metres per metre of altitude
+const VIEW_ALTITUDE_CURVE := 0.58   # gradual summit-normalized horizon growth
 const PLANET_CIRCUMFERENCE := PlanetTerrainScript.CIRCUMFERENCE
 const PLANET_RADIUS := PlanetTerrainScript.RADIUS
 const PLANET_HALF_CIRCUMFERENCE := PlanetTerrainScript.HALF_CIRCUMFERENCE
@@ -119,6 +119,17 @@ const ROAD_BLEND := PlanetRoadNetworkScript.SHOULDER
 const ROAD_POINT_SPACING := 18.0
 const ROAD_MAX_GRADE := 0.085
 const ROAD_AUDIT_SPACING := 48.0
+const COAST_ROAD_INLAND_OFFSET := 180.0
+const COAST_ROAD_HALF_WIDTH := 6.8
+const FREEWAY_TUNNEL_LENGTH := 58.0
+const FREEWAY_TUNNEL_WIDTH := 13.6
+const FREEWAY_TUNNEL_HEIGHT := 7.2
+const FREEWAY_TUNNEL_APPROACH := 180.0
+const ROAD_BRIDGE_MIN_LENGTH := 72.0
+const ROAD_BRIDGE_MAX_LENGTH := 180.0
+const ROAD_BRIDGE_WIDTH := 14.4
+const ROAD_BRIDGE_APPROACH := 36.0
+const TRANSPORT_FEATURE_QUERY_MARGIN := 640.0
 const BASE_RELIEF_AMPLITUDE := 10.5
 const ROLLING_HILL_AMPLITUDE := 8.0
 
@@ -163,6 +174,8 @@ var _planet_lattice_cache_order := PackedVector2Array()
 var _planet_lattice_cache_cursor := 0
 var _road_context_cache: Dictionary = {}
 var _road_audit_cache: Dictionary = {}
+var _transport_feature_cache: Dictionary = {}
+var _transport_chunk_cache: Dictionary = {}
 var _last_road_sample_xz := Vector2(INF, INF)
 var _last_road_sample: Dictionary = {}
 var _stratos_no_road_sample := {"grade": 0.0, "distance": INF,
@@ -194,6 +207,8 @@ func setup(seed_v: int) -> void:
 	_planet_lattice_cache_cursor = 0
 	_road_context_cache.clear()
 	_road_audit_cache.clear()
+	_transport_feature_cache.clear()
+	_transport_chunk_cache.clear()
 	_last_road_sample_xz = Vector2(INF, INF)
 	_last_road_sample.clear()
 	_n_base.seed = seed_v
@@ -600,6 +615,34 @@ func _road_surface_sample(x: float, z: float,
 				best_distance = distance
 				best_elevation = lerpf(elevations[i], elevations[i + 1], t)
 				best_route = str(route.id)
+	# One continuous Pangaea coast arterial follows the analytic shoreline's
+	# signed-distance contour. It is genuinely curved with the continent rather
+	# than another latitude/longitude row, and remains allocation-free in the
+	# terrain hot path because the macro sample already carries its tangent.
+	var macro_for_roads: Dictionary = planet_sample
+	if macro_for_roads.is_empty():
+		macro_for_roads = planet_terrain_sample(point.x, point.y)
+	var coast_distance := absf(float(macro_for_roads.get("coast_distance", INF))
+		- COAST_ROAD_INLAND_OFFSET)
+	var coast_edge_distance := coast_distance - COAST_ROAD_HALF_WIDTH
+	var best_edge_before_coast := best_distance - best_half_width
+	if coast_edge_distance < best_edge_before_coast \
+			and coast_distance <= COAST_ROAD_HALF_WIDTH + ROAD_BLEND \
+			and float(macro_for_roads.land) > 0.58 \
+			and float(macro_for_roads.ocean) < 0.38 \
+			and float(macro_for_roads.get("polar_ice", 0.0)) < 0.30:
+		var coast_grade := 1.0 - smoothstep(COAST_ROAD_HALF_WIDTH,
+			COAST_ROAD_HALF_WIDTH + ROAD_BLEND, coast_distance)
+		return _remember_road_sample(point, {
+			"grade": coast_grade,
+			"distance": coast_distance,
+			"elevation": maxf(float(macro_for_roads.elevation), WATER_Y + 0.92),
+			"route_id": "coastal:pangaea",
+			"tier": "coastal",
+			"axis": "coast",
+			"tangent": macro_for_roads.get("coast_tangent", Vector2.RIGHT),
+			"eligibility": 1.0,
+		})
 	# Regional and highway lines cover the entire dry, non-alpine landmass. The
 	# geometric query is constant-time; a continuous eligibility fade prevents a
 	# hard road end where a route meets a coast, lake or severe mountain face.
@@ -610,7 +653,7 @@ func _road_surface_sample(x: float, z: float,
 	var best_edge_distance := best_distance - best_half_width
 	var global_candidate := global_edge_distance < best_edge_distance
 	if global_candidate and global_distance <= global_half_width + ROAD_BLEND:
-		var context := _global_road_context(point, planet_sample, global)
+		var context := _global_road_context(point, macro_for_roads, global)
 		var eligibility := float(context.eligibility)
 		if eligibility > 0.015:
 			best_distance = global_distance
@@ -626,6 +669,20 @@ func _road_surface_sample(x: float, z: float,
 				"route_id": best_route,
 				"tier": global.tier,
 				"axis": global.axis,
+				"family": global.get("family", global.axis),
+				"tangent": global.get("tangent", Vector2.RIGHT),
+				"center_point": global.get("center_point", point),
+				"route_coordinate": global.get("route_coordinate", 0.0),
+				"along": global.get("along", 0.0),
+				"curve_offset": global.get("curve_offset", 0.0),
+				"bridge_candidate": global.get("bridge_candidate", false),
+				"bridge_candidate_score": global.get(
+					"bridge_candidate_score", 0.0),
+				"bridge_slot": global.get("bridge_slot", 0),
+				"bridge_id": global.get("bridge_id", ""),
+				"bridge_coordinate": global.get("bridge_coordinate", 0.0),
+				"intersection_score": global.get("intersection_score", 0.0),
+				"intersection_id": global.get("intersection_id", ""),
 				"eligibility": eligibility,
 			})
 	if best_distance > best_half_width + ROAD_BLEND:
@@ -650,9 +707,18 @@ func _remember_road_sample(point: Vector2, sample: Dictionary) -> Dictionary:
 func _global_road_context(point: Vector2, planet_sample: Dictionary,
 		global: Dictionary) -> Dictionary:
 	var center: Vector2 = global.get("center_point", point)
-	var axis_name := str(global.axis)
-	var axis_code := 0.0 if axis_name == "longitude" else 1.0
-	var context_key := Vector3(center.x, center.y, axis_code)
+	var tangent: Vector2 = global.get("tangent", Vector2.RIGHT)
+	if tangent.length_squared() < 0.001:
+		tangent = Vector2.RIGHT
+	tangent = tangent.normalized()
+	var across := Vector2(-tangent.y, tangent.x)
+	var route_id := str(global.get("route_id", "road"))
+	var along := float(global.get("route_coordinate",
+		global.get("along", center.dot(tangent))))
+	# Three metres is the shared terrain lattice. Quantizing only the cache key
+	# keeps repeated shoulder vertices cheap while stable route IDs prevent two
+	# curved roads at a junction from borrowing each other's engineering state.
+	var context_key := "%s@%d" % [route_id, roundi(along / 3.0)]
 	if _road_context_cache.has(context_key):
 		return _road_context_cache[context_key]
 	var macro: Dictionary = planet_sample if center.distance_squared_to(point) \
@@ -666,39 +732,37 @@ func _global_road_context(point: Vector2, planet_sample: Dictionary,
 	eligibility *= smoothstep(86.0, 138.0, center.length())
 	eligibility *= 1.0 - smoothstep(0.08, 0.52,
 		airstrip_grade(center.x, center.y))
-	# The four-neighbour slope audit measures kilometre-scale fields. Share it
-	# over one 48 m chunk along the centreline instead of recomputing four
-	# spherical terrain samples for every 3 m near-mesh vertex. Exact local
-	# elevation and land/water/mountain eligibility above remain unquantized.
-	var audit_center := center
-	if axis_name == "longitude":
-		audit_center.y = snappedf(audit_center.y, ROAD_AUDIT_SPACING)
-	else:
-		audit_center.x = snappedf(audit_center.x, ROAD_AUDIT_SPACING)
-	var audit_key := Vector3(audit_center.x, audit_center.y, axis_code)
+	# Audit along the real curved tangent, never world X/Z. This preserves smooth
+	# grades through bends and gives the perpendicular cut a true cross-slope.
+	var audit_along := snappedf(along, ROAD_AUDIT_SPACING)
+	var audit_center := canonical_planet_xz(center
+		+ tangent * (audit_along - along))
+	var audit_key := "%s@%d" % [route_id,
+		roundi(audit_along / ROAD_AUDIT_SPACING)]
 	var audit: Dictionary = _road_audit_cache.get(audit_key, {})
 	if audit.is_empty():
 		var audit_macro := planet_terrain_sample(audit_center.x,
 			audit_center.y)
 		var audit_here := float(audit_macro.elevation)
-		var along := Vector2(0.0, 96.0) if axis_name == "longitude" \
-			else Vector2(96.0, 0.0)
-		var before := planet_terrain_sample(audit_center.x - along.x,
-			audit_center.y - along.y)
-		var after := planet_terrain_sample(audit_center.x + along.x,
-			audit_center.y + along.y)
+		var along_probe := tangent * 96.0
+		var before := planet_terrain_sample(audit_center.x - along_probe.x,
+			audit_center.y - along_probe.y)
+		var after := planet_terrain_sample(audit_center.x + along_probe.x,
+			audit_center.y + along_probe.y)
 		var natural_longitudinal_grade := maxf(
 			absf(audit_here - float(before.elevation)),
-			absf(float(after.elevation) - audit_here)) / along.length()
-		var across := Vector2(24.0, 0.0) if axis_name == "longitude" \
-			else Vector2(0.0, 24.0)
-		var across_before := planet_terrain_sample(audit_center.x - across.x,
-			audit_center.y - across.y)
-		var across_after := planet_terrain_sample(audit_center.x + across.x,
-			audit_center.y + across.y)
+			absf(float(after.elevation) - audit_here)) / along_probe.length()
+		var across_probe := across * 24.0
+		var across_before := planet_terrain_sample(
+			audit_center.x - across_probe.x,
+			audit_center.y - across_probe.y)
+		var across_after := planet_terrain_sample(
+			audit_center.x + across_probe.x,
+			audit_center.y + across_probe.y)
 		var natural_cross_grade := maxf(
 			absf(audit_here - float(across_before.elevation)),
-			absf(float(across_after.elevation) - audit_here)) / across.length()
+			absf(float(across_after.elevation) - audit_here)) \
+			/ across_probe.length()
 		audit = {
 			"slope_factor": (1.0 - smoothstep(ROAD_MAX_GRADE * 0.76,
 				ROAD_MAX_GRADE * 1.06, natural_longitudinal_grade)) \
@@ -711,13 +775,43 @@ func _global_road_context(point: Vector2, planet_sample: Dictionary,
 		_road_audit_cache[audit_key] = audit
 	var broad_here := float(macro.elevation)
 	eligibility *= float(audit.slope_factor)
+	var engineered_elevation := maxf(broad_here, WATER_Y + 0.92)
+	var feature := _transport_feature_for_road(global)
+	if not feature.is_empty():
+		var feature_delta := along - float(feature.coordinate)
+		if str(feature.kind) == "tunnel":
+			var tunnel_half := float(feature.length) * 0.5
+			var tunnel_extent := tunnel_half + FREEWAY_TUNNEL_APPROACH
+			var tunnel_strength := 1.0 - smoothstep(
+				tunnel_extent - ROAD_BLEND, tunnel_extent,
+				absf(feature_delta))
+			if tunnel_strength > 0.0:
+				var tunnel_t := clampf((feature_delta + tunnel_extent)
+					/ (tunnel_extent * 2.0), 0.0, 1.0)
+				var tunnel_floor := lerpf(float(feature.portal_a_elevation),
+					float(feature.portal_b_elevation), tunnel_t)
+				eligibility = maxf(eligibility, tunnel_strength)
+				engineered_elevation = lerpf(engineered_elevation,
+					tunnel_floor, tunnel_strength)
+		elif str(feature.kind) == "bridge":
+			var bridge_half := float(feature.length) * 0.5
+			var absolute_delta := absf(feature_delta)
+			if absolute_delta < bridge_half:
+				# The physical bridge owns this span. Leaving the heightfield low
+				# preserves real water/air beneath its deck and collision.
+				eligibility = 0.0
+			elif absolute_delta < bridge_half + ROAD_BRIDGE_APPROACH:
+				var ramp := 1.0 - smoothstep(bridge_half,
+					bridge_half + ROAD_BRIDGE_APPROACH, absolute_delta)
+				eligibility = maxf(eligibility, ramp)
+				engineered_elevation = lerpf(engineered_elevation,
+					float(feature.deck_elevation), ramp)
 	var context := {
 		"eligibility": eligibility,
-		# Exact terrain-following elevation: the grade audit determines whether a
-		# road exists here, while the road itself adds no artificial vertical step.
-		"elevation": maxf(broad_here, WATER_Y + 0.92),
+		"elevation": engineered_elevation,
 		"natural_longitudinal_grade": audit.natural_longitudinal_grade,
 		"natural_cross_grade": audit.natural_cross_grade,
+		"transport_feature": feature,
 	}
 	# The same centreline point is queried by every terrain vertex across a road
 	# shoulder and often by two adjacent LODs. Keep that deterministic audit
@@ -728,6 +822,199 @@ func _global_road_context(point: Vector2, planet_sample: Dictionary,
 	return context
 
 
+## Resolve the single deterministic engineering slot carried by a curved route
+## into either a narrow-water bridge, a dry mountain tunnel, or no structure.
+## The result is keyed by stable route + coordinate, so terrain, chunks, map
+## previews and every multiplayer peer make the same bounded decision.
+func _transport_feature_for_road(global: Dictionary) -> Dictionary:
+	if not bool(global.get("bridge_candidate", false)):
+		return {}
+	var candidate_id := str(global.get("bridge_id", ""))
+	if candidate_id.is_empty() or not global.has("bridge_coordinate"):
+		return {}
+	if _transport_feature_cache.has(candidate_id):
+		return _transport_feature_cache[candidate_id]
+	var coordinate := float(global.bridge_coordinate)
+	var along := float(global.get("route_coordinate",
+		global.get("along", coordinate)))
+	var tangent: Vector2 = global.get("tangent", Vector2.RIGHT)
+	if tangent.length_squared() < 0.001:
+		tangent = Vector2.RIGHT
+	tangent = tangent.normalized()
+	var center: Vector2 = global.get("center_point", Vector2.ZERO) \
+		+ tangent * (coordinate - along)
+	# Two cheap projections remove chord/tangent error for a candidate hundreds
+	# of metres from the caller while keeping the exact route coordinate.
+	var centered: Dictionary = global
+	for _projection in range(2):
+		var next_centered := _planet_roads.surface_sample(center)
+		# A feature can sit close to a junction where the nearest-road selector
+		# changes families. Retain the last projection on this stable route instead
+		# of deleting a valid tunnel/bridge merely because the crossing route wins
+		# the next infinitesimal closest-distance tie.
+		if str(next_centered.get("bridge_id", "")) != candidate_id:
+			break
+		centered = next_centered
+		tangent = centered.get("tangent", tangent)
+		if tangent.length_squared() < 0.001:
+			tangent = Vector2.RIGHT
+		tangent = tangent.normalized()
+		center = centered.get("center_point", center) + tangent \
+			* (coordinate - float(centered.get("route_coordinate", coordinate)))
+	center = canonical_planet_xz(center)
+	var macro := planet_terrain_sample(center.x, center.y)
+	var feature: Dictionary = {}
+	var polar := float(macro.get("polar_ice", 0.0))
+	var center_wet := float(macro.ocean) > 0.44 \
+		or float(macro.lake) > 0.44 \
+		or float(macro.elevation) < WATER_Y + 0.18
+	if polar < 0.36:
+		for length_value in [72.0, 96.0, 120.0, 144.0, 180.0]:
+			var bridge_length: float = float(length_value)
+			if bridge_length < ROAD_BRIDGE_MIN_LENGTH \
+					or bridge_length > ROAD_BRIDGE_MAX_LENGTH:
+				continue
+			var half_length := bridge_length * 0.5
+			var a_point := center - tangent * half_length
+			var b_point := center + tangent * half_length
+			var a_macro := planet_terrain_sample(a_point.x, a_point.y)
+			var b_macro := planet_terrain_sample(b_point.x, b_point.y)
+			var a_dry := float(a_macro.land) > 0.58 \
+				and float(a_macro.ocean) < 0.34 \
+				and float(a_macro.lake) < 0.34 \
+				and float(a_macro.elevation) > WATER_Y + 0.28
+			var b_dry := float(b_macro.land) > 0.58 \
+				and float(b_macro.ocean) < 0.34 \
+				and float(b_macro.lake) < 0.34 \
+				and float(b_macro.elevation) > WATER_Y + 0.28
+			if not a_dry or not b_dry:
+				continue
+			# Bridges serve both narrow water and genuine ravines. The latter is
+			# what lets an organic arterial keep its line across broken foothills
+			# instead of becoming a grid or vanishing at every depression.
+			var ravine_depth := minf(float(a_macro.elevation),
+				float(b_macro.elevation)) - float(macro.elevation)
+			if not center_wet and ravine_depth < 5.0:
+				continue
+			var deck_elevation := maxf(WATER_Y + 1.20,
+				maxf(float(a_macro.elevation), float(b_macro.elevation)) + 0.08)
+			var obstacle_floor := WATER_Y if center_wet \
+				else float(macro.elevation)
+			feature = {
+				"kind": "bridge", "id": candidate_id,
+				"coordinate": coordinate, "length": bridge_length,
+				"width": ROAD_BRIDGE_WIDTH,
+				"pos": Vector3(center.x, deck_elevation, center.y),
+				"yaw": atan2(tangent.x, tangent.y),
+				"tangent": tangent, "deck_elevation": deck_elevation,
+				"clearance_height": maxf(deck_elevation - obstacle_floor, 1.8),
+				"clearance": half_length + ROAD_BRIDGE_APPROACH,
+			}
+			break
+	if feature.is_empty() and str(global.get("tier", "")) == "highway" \
+			and polar < 0.36:
+		var tunnel_extent := FREEWAY_TUNNEL_LENGTH * 0.5 \
+			+ FREEWAY_TUNNEL_APPROACH
+		var a_point := center - tangent * tunnel_extent
+		var b_point := center + tangent * tunnel_extent
+		var a_macro := planet_terrain_sample(a_point.x, a_point.y)
+		var b_macro := planet_terrain_sample(b_point.x, b_point.y)
+		var dry_mountain := float(macro.land) > 0.62 \
+			and float(macro.ocean) < 0.26 and float(macro.lake) < 0.28 \
+			and float(macro.mountain) > 0.42 \
+			and float(macro.elevation) > WATER_Y + 120.0
+		var portal_a := maxf(float(a_macro.elevation), WATER_Y + 0.92)
+		var portal_b := maxf(float(b_macro.elevation), WATER_Y + 0.92)
+		var natural_grade := absf(portal_b - portal_a) \
+			/ (tunnel_extent * 2.0)
+		if dry_mountain \
+				and float(a_macro.land) > 0.54 and float(b_macro.land) > 0.54 \
+				and natural_grade <= ROAD_MAX_GRADE * 1.25:
+			feature = {
+				"kind": "tunnel",
+				"id": candidate_id.replace(":bridge:", ":tunnel:"),
+				"coordinate": coordinate, "length": FREEWAY_TUNNEL_LENGTH,
+				"width": FREEWAY_TUNNEL_WIDTH,
+				"height": FREEWAY_TUNNEL_HEIGHT,
+				"pos": Vector3(center.x, (portal_a + portal_b) * 0.5,
+					center.y),
+				"yaw": atan2(tangent.x, tangent.y), "tangent": tangent,
+				"portal_a_elevation": portal_a,
+				"portal_b_elevation": portal_b,
+				"clearance": tunnel_extent + FREEWAY_TUNNEL_WIDTH * 0.5,
+			}
+	if _transport_feature_cache.size() >= 4096:
+		_transport_feature_cache.clear()
+	_transport_feature_cache[candidate_id] = feature
+	return feature
+
+
+## Materialize only transport structures owned by one gameplay chunk. The
+## curved road query is bounded to 64 short chords and feature IDs de-duplicate
+## overlapping query margins, so high-speed streaming never scans a world graph.
+func transport_feature_chunk_layout(cx: int, cz: int) -> Dictionary:
+	if debug_world:
+		return {"freeway_tunnels": [], "road_bridges": []}
+	var cache_key := Vector2i(cx, cz)
+	if _transport_chunk_cache.has(cache_key):
+		return (_transport_chunk_cache[cache_key] as Dictionary).duplicate(true)
+	var x0 := float(cx) * CHUNK
+	var z0 := float(cz) * CHUNK
+	var rect := Rect2(Vector2(x0, z0), Vector2(CHUNK, CHUNK))
+	var query_rect := rect.grow(TRANSPORT_FEATURE_QUERY_MARGIN)
+	var segments := _planet_roads.segments_in_rect(query_rect, 64)
+	var freeway_tunnels: Array = []
+	var road_bridges: Array = []
+	var seen: Dictionary = {}
+	for segment_value in segments:
+		var segment: Dictionary = segment_value
+		if not bool(segment.get("bridge_candidate", false)) \
+				or not segment.has("bridge_coordinate"):
+			continue
+		var segment_id := str(segment.get("bridge_id", ""))
+		if segment_id.is_empty() or seen.has(segment_id):
+			continue
+		var a: Vector2 = segment.get("a", rect.get_center())
+		var b: Vector2 = segment.get("b", rect.get_center())
+		var tangent: Vector2 = segment.get("tangent", (b - a).normalized())
+		if tangent.length_squared() < 0.001:
+			continue
+		tangent = tangent.normalized()
+		var midpoint := (a + b) * 0.5
+		var coordinate := float(segment.bridge_coordinate)
+		var projected := midpoint + tangent * (coordinate
+			- float(segment.get("route_coordinate", coordinate)))
+		var global := _planet_roads.surface_sample(projected)
+		if str(global.get("bridge_id", "")) != segment_id:
+			continue
+		var feature := _transport_feature_for_road(global)
+		if feature.is_empty():
+			seen[segment_id] = true
+			continue
+		var canonical_pos: Vector3 = feature.pos
+		var image_xz := nearest_world_image(
+			Vector2(canonical_pos.x, canonical_pos.z), rect.get_center())
+		var owner := Vector2i(floori(image_xz.x / CHUNK),
+			floori(image_xz.y / CHUNK))
+		if owner != cache_key:
+			continue
+		var instance_data: Dictionary = feature.duplicate(true)
+		instance_data.pos = Vector3(image_xz.x, canonical_pos.y, image_xz.y)
+		if str(instance_data.kind) == "tunnel":
+			freeway_tunnels.append(instance_data)
+		elif str(instance_data.kind) == "bridge":
+			road_bridges.append(instance_data)
+		seen[segment_id] = true
+	var result := {
+		"freeway_tunnels": freeway_tunnels,
+		"road_bridges": road_bridges,
+	}
+	if _transport_chunk_cache.size() >= 1024:
+		_transport_chunk_cache.clear()
+	_transport_chunk_cache[cache_key] = result
+	return result.duplicate(true)
+
+
 ## Bounded streaming/map query. The analytic network never needs to allocate a
 ## planet-sized graph: only lines crossing this local rectangle are returned.
 func road_segments_in_rect(rect: Rect2, max_segments := 128) -> Array:
@@ -736,12 +1023,15 @@ func road_segments_in_rect(rect: Rect2, max_segments := 128) -> Array:
 
 func road_network_summary() -> Dictionary:
 	return {
-		"kind": "analytic_planet_grid",
+		"kind": "curved_planet_arterials",
 		"highway_spacing": PlanetRoadNetworkScript.HIGHWAY_SPACING,
 		"regional_spacing": PlanetRoadNetworkScript.REGIONAL_SPACING,
 		"maximum_query_segments": PlanetRoadNetworkScript.MAX_SEGMENTS_PER_QUERY,
 		"circumference": PLANET_CIRCUMFERENCE,
 		"max_grade": ROAD_MAX_GRADE,
+		"coast_following": true,
+		"bridges": true,
+		"lit_mountain_tunnels": true,
 	}
 
 
@@ -902,9 +1192,10 @@ func point_on_airstrip(x: float, z: float) -> bool:
 ## far plane smoothly from 2.2 km up to a 15-mile view. Pure math so tests and
 ## the streaming/fog/camera systems all agree on one curve.
 func view_distance_for_altitude(altitude: float) -> float:
-	return clampf(VIEW_BASE_DISTANCE
-		+ maxf(altitude - 10.0, 0.0) * VIEW_PER_METER,
-		VIEW_BASE_DISTANCE, VIEW_PEAK_DISTANCE)
+	var normalized_height := clampf((altitude - 10.0) \
+		/ (PLANET_SUMMIT_ELEVATION - 10.0), 0.0, 1.0)
+	return lerpf(VIEW_BASE_DISTANCE, VIEW_PEAK_DISTANCE,
+		pow(normalized_height, VIEW_ALTITUDE_CURVE))
 
 
 func height(x: float, z: float) -> float:
@@ -1004,6 +1295,9 @@ func planet_terrain_sample(x: float, z: float) -> Dictionary:
 			"ocean": 0.0, "lake": 0.0, "upland": 0.0,
 			"mountain": 0.0, "temperature": 0.72, "moisture": 0.68,
 			"detail": 0.0, "latitude_fraction": 0.0,
+			"polar_ice": 0.0,
+			"coast_distance": 1000000.0,
+			"coast_tangent": Vector2.RIGHT,
 			"summit_weight": 0.0}
 	var canonical := canonical_planet_xz(Vector2(x, z))
 	if canonical == _last_planet_sample_xz and not _last_planet_sample.is_empty():
@@ -1068,10 +1362,6 @@ func biome_at_height(x: float, z: float, elevation: float) -> int:
 
 func _biome_from_planet_sample(x: float, z: float, elevation: float,
 		macro: Dictionary) -> int:
-	# The graded origin is an authored rainforest arena even if the macro lake
-	# field happens to pass beneath it for a particular match seed.
-	if Vector2(x, z).length() <= 35.0:
-		return Biome.RAINFOREST
 	var ocean := float(macro.ocean)
 	var lake := float(macro.lake)
 	var mountain := float(macro.mountain)
@@ -1079,12 +1369,18 @@ func _biome_from_planet_sample(x: float, z: float, elevation: float,
 	var temperature := float(macro.temperature)
 	var moisture := float(macro.moisture)
 	var latitude := float(macro.latitude_fraction)
+	var polar_ice := float(macro.get("polar_ice", 0.0))
+	if polar_ice > 0.64 or temperature < 0.095 or latitude > 0.94:
+		return Biome.ICE
+	# The outer polar shelf is windswept tundra before it becomes permanent
+	# pack ice. Keep this transition ahead of ocean classification so both caps
+	# retain a readable Earth-like tundra ring even where they cover sea.
+	if polar_ice > 0.055:
+		return Biome.TUNDRA
 	if ocean > 0.34 and elevation < WATER_Y + 0.8:
 		return Biome.OCEAN
 	if lake > 0.34 and elevation < WATER_Y + 0.8:
 		return Biome.LAKE
-	if temperature < 0.115 or latitude > 0.90:
-		return Biome.ICE
 	if temperature < 0.275 or latitude > 0.72:
 		return Biome.TUNDRA
 	if mountain > 0.34 or elevation > 920.0:
@@ -1162,6 +1458,14 @@ func _ground_color_from_sample(h: float, x: float, z: float,
 			low = Color(0.20, 0.25, 0.19)
 			high = low
 	var c := low.lerp(high, t)
+	# The old forced rainforest tint plus perfectly graded duel bowl looked like
+	# a stray bright-green plane at spawn. Keep the playable grading, but blend a
+	# natural compacted-earth clearing into the surrounding biome instead.
+	var arena_surface := 1.0 - smoothstep(34.0, 47.0,
+		Vector2(x, z).length())
+	if arena_surface > 0.0:
+		c = c.lerp(Color(0.30 + jit * 0.025, 0.245, 0.145),
+			arena_surface * 0.88)
 	# Above the canopy line the soil turns to bare rock, then permanent snow.
 	# Shaders add sparkle/roughness on top; the vertex tint carries the bands so
 	# every LOD tier (near lattice, horizon, skyline) agrees for free.
@@ -1578,7 +1882,8 @@ func chunk_layout(cx: int, cz: int, include_decorations := true) -> Dictionary:
 	if debug_world:
 		return {"trees": [], "bananas": [], "rocks": [], "foliage": [],
 			"structures": [], "arena_pieces": [], "arena_id": "",
-			"airfield_hangars": [], "biome": Biome.RAINFOREST}
+			"airfield_hangars": [], "freeway_tunnels": [],
+			"road_bridges": [], "biome": Biome.RAINFOREST}
 	var trees: Array = []
 	var bananas: Array = []
 	var rocks: Array = []
@@ -1587,6 +1892,9 @@ func chunk_layout(cx: int, cz: int, include_decorations := true) -> Dictionary:
 	var arena_chunk := arena_chunk_layout(cx, cz)
 	var arena_pieces: Array = arena_chunk.get("pieces", [])
 	var airfield_hangars: Array = airstrip_hangar_chunk_layout(cx, cz)
+	var transport_features := transport_feature_chunk_layout(cx, cz)
+	var freeway_tunnels: Array = transport_features.get("freeway_tunnels", [])
+	var road_bridges: Array = transport_features.get("road_bridges", [])
 	var tree_points: Array[Vector2] = []
 	var x0 := cx * CHUNK
 	var z0 := cz * CHUNK
@@ -1602,6 +1910,8 @@ func chunk_layout(cx: int, cz: int, include_decorations := true) -> Dictionary:
 	var occupied_clearances := structures.duplicate()
 	occupied_clearances.append_array(arena_pieces)
 	occupied_clearances.append_array(airfield_hangars)
+	occupied_clearances.append_array(freeway_tunnels)
+	occupied_clearances.append_array(road_bridges)
 
 	# hero grove trees that land inside this chunk
 	if cx >= -1 and cx <= 0 and cz >= -1 and cz <= 0:
@@ -1658,7 +1968,9 @@ func chunk_layout(cx: int, cz: int, include_decorations := true) -> Dictionary:
 		return {"trees": trees, "bananas": [], "rocks": [], "foliage": [],
 			"structures": structures, "arena_pieces": arena_pieces,
 			"arena_id": str(arena_chunk.get("id", "")),
-			"airfield_hangars": airfield_hangars, "biome": center_biome}
+			"airfield_hangars": airfield_hangars,
+			"freeway_tunnels": freeway_tunnels,
+			"road_bridges": road_bridges, "biome": center_biome}
 
 	# bananas: canopy-top rewards plus arcs floating between trees to guide swings
 	var nb := rng.randi_range(2, 4)
@@ -1711,11 +2023,11 @@ func chunk_layout(cx: int, cz: int, include_decorations := true) -> Dictionary:
 		Biome.GRASSLAND:
 			foliage_goal = 68
 		Biome.ROCKY_MOUNTAINS:
-			foliage_goal = 18
+			foliage_goal = 0
 		Biome.DESERT:
-			foliage_goal = 10
+			foliage_goal = 3
 		Biome.TUNDRA:
-			foliage_goal = 22
+			foliage_goal = 4
 		Biome.ICE, Biome.OCEAN, Biome.LAKE:
 			foliage_goal = 0
 	for i in range(foliage_goal):
@@ -1762,6 +2074,8 @@ func chunk_layout(cx: int, cz: int, include_decorations := true) -> Dictionary:
 		"foliage": foliage, "structures": structures,
 		"arena_pieces": arena_pieces,
 		"airfield_hangars": airfield_hangars,
+		"freeway_tunnels": freeway_tunnels,
+		"road_bridges": road_bridges,
 		"arena_id": str(arena_chunk.get("id", "")), "biome": center_biome}
 
 
@@ -1881,11 +2195,11 @@ func _tree_density(biome: int) -> float:
 		Biome.GRASSLAND:
 			return 0.32
 		Biome.ROCKY_MOUNTAINS:
-			return 0.10
+			return 0.0
 		Biome.DESERT:
 			return 0.025
 		Biome.TUNDRA:
-			return 0.08
+			return 0.025
 		Biome.ICE, Biome.OCEAN, Biome.LAKE:
 			return 0.0
 	return 0.8

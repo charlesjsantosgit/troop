@@ -7,6 +7,9 @@ static var _shared: Dictionary = {}
 static var _foliage: Dictionary = {}
 static var _fur: Dictionary = {}
 static var _far_focus := Vector2(INF, INF)
+static var _skyline_near_fade := Gen.SKYLINE_NEAR_FADE
+static var _stratos_near_fade := Gen.STRATOS_NEAR_FADE
+static var _stratos_far_fade := Gen.VIEW_BASE_DISTANCE
 static var _spring_amount := 0.0
 static var _autumn_amount := 0.0
 static var _snow_amount := 0.0
@@ -217,6 +220,8 @@ render_mode diffuse_burley, specular_schlick_ggx;
 uniform vec2 focus_xz = vec2(0.0);
 uniform float near_fade = 108.0;
 uniform float fade_band = 18.0;
+uniform float far_fade = 600.0;
+uniform float far_fade_band = 96.0;
 uniform float snow_amount : hint_range(0.0, 1.0) = 0.0;
 varying vec3 world_pos;
 varying vec4 vertex_tint;
@@ -234,9 +239,13 @@ void vertex() {
 
 void fragment() {
 	float distance_to_focus = distance(world_pos.xz, focus_xz);
-	float coverage = smoothstep(near_fade - fade_band, near_fade + fade_band,
-		distance_to_focus);
-	if (hash21(floor(world_pos.xz * 0.36)) > coverage) { discard; }
+	float coverage = near_fade <= 0.0 ? 1.0 : smoothstep(
+		near_fade - fade_band, near_fade + fade_band, distance_to_focus);
+	float cell_hash = hash21(floor(world_pos.xz * 0.36));
+	if (cell_hash > coverage) { discard; }
+	float outgoing = smoothstep(far_fade - far_fade_band,
+		far_fade + far_fade_band, distance_to_focus);
+	if (cell_hash <= outgoing) { discard; }
 	vec3 ground = vertex_tint.rgb * 0.84;
 	float snow_noise = hash21(floor(world_pos.xz * 0.12));
 	float alt_snow = smoothstep(3000.0, 4300.0, world_pos.y);
@@ -257,6 +266,8 @@ render_mode diffuse_burley, specular_schlick_ggx;
 uniform vec2 focus_xz = vec2(0.0);
 uniform float near_fade = 1700.0;
 uniform float fade_band = 220.0;
+uniform float far_fade = 24140.0;
+uniform float far_fade_band = 420.0;
 uniform float snow_amount : hint_range(0.0, 1.0) = 0.0;
 varying vec3 world_pos;
 varying vec4 vertex_tint;
@@ -274,9 +285,16 @@ void vertex() {
 
 void fragment() {
 	float distance_to_focus = distance(world_pos.xz, focus_xz);
-	float coverage = smoothstep(near_fade - fade_band, near_fade + fade_band,
-		distance_to_focus);
-	if (hash21(floor(world_pos.xz * 0.018)) > coverage) { discard; }
+	float coverage = near_fade <= 0.0 ? 1.0 : smoothstep(
+		near_fade - fade_band, near_fade + fade_band, distance_to_focus);
+	float cell_hash = hash21(floor(world_pos.xz * 0.36));
+	if (cell_hash > coverage) { discard; }
+	// Stratos has no successor outside the requested view circle. Finish its
+	// atmospheric fade at that exact radius so circular target selection never
+	// needs hidden padding sectors beyond the camera's horizon.
+	float outgoing = smoothstep(far_fade - far_fade_band,
+		far_fade, distance_to_focus);
+	if (cell_hash <= outgoing) { discard; }
 
 	// COLOR.a carries deterministic canopy coverage. Broad 64/190 m patches
 	// survive at aircraft distance, unlike literal crowns that become sub-pixel.
@@ -306,6 +324,8 @@ render_mode diffuse_burley, specular_schlick_ggx;
 uniform vec2 focus_xz = vec2(0.0);
 uniform float near_fade = 108.0;
 uniform float fade_band = 18.0;
+uniform float far_fade = 600.0;
+uniform float far_fade_band = 96.0;
 uniform float spring_amount : hint_range(0.0, 1.0) = 0.0;
 uniform float autumn_amount : hint_range(0.0, 1.0) = 0.0;
 uniform float snow_amount : hint_range(0.0, 1.0) = 0.0;
@@ -325,9 +345,13 @@ void vertex() {
 
 void fragment() {
 	float distance_to_focus = distance(world_pos.xz, focus_xz);
-	float coverage = smoothstep(near_fade - fade_band, near_fade + fade_band,
-		distance_to_focus);
-	if (hash21(floor(world_pos.xz * 0.42)) > coverage) { discard; }
+	float coverage = near_fade <= 0.0 ? 1.0 : smoothstep(
+		near_fade - fade_band, near_fade + fade_band, distance_to_focus);
+	float cell_hash = hash21(floor(world_pos.xz * 0.42));
+	if (cell_hash > coverage) { discard; }
+	float outgoing = smoothstep(far_fade - far_fade_band,
+		far_fade + far_fade_band, distance_to_focus);
+	if (cell_hash <= outgoing) { discard; }
 	vec3 bark = vec3(0.27, 0.18, 0.095);
 	float variation = hash21(floor(world_pos.xz * 0.11));
 	vec3 leaves = mix(instance_tint.rgb,
@@ -350,10 +374,15 @@ render_mode diffuse_burley, cull_disabled;
 
 uniform vec2 focus_xz = vec2(0.0);
 uniform float near_fade = 108.0;
+uniform float fade_band = 16.0;
+uniform float far_fade = 600.0;
+uniform float far_fade_band = 96.0;
 varying vec3 world_pos;
 
 float hash21(vec2 p) {
-	return fract(sin(dot(p, vec2(41.17, 289.31))) * 43758.5453);
+	p = fract(p * vec2(123.34, 456.21));
+	p += dot(p, p + 45.32);
+	return fract(p.x * p.y);
 }
 
 void vertex() {
@@ -365,9 +394,15 @@ void vertex() {
 
 void fragment() {
 	float distance_to_focus = distance(world_pos.xz, focus_xz);
-	float coverage = smoothstep(near_fade - 16.0, near_fade + 16.0,
-		distance_to_focus);
-	if (hash21(floor(world_pos.xz * 0.25)) > coverage) { discard; }
+	float coverage = near_fade <= 0.0 ? 1.0 : smoothstep(
+		near_fade - fade_band, near_fade + fade_band, distance_to_focus);
+	// Match the terrain/stratos hash lattice so water cells have exact ownership
+	// during the skyline-to-stratos handoff as well as horizon-to-skyline.
+	float cell_hash = hash21(floor(world_pos.xz * 0.36));
+	if (cell_hash > coverage) { discard; }
+	float outgoing = smoothstep(far_fade - far_fade_band,
+		far_fade + far_fade_band, distance_to_focus);
+	if (cell_hash <= outgoing) { discard; }
 	float ripple = sin(world_pos.x * 0.08 + world_pos.z * 0.05 + TIME) * 0.5 + 0.5;
 	ALBEDO = mix(vec3(0.035, 0.24, 0.24), vec3(0.065, 0.42, 0.36), ripple * 0.18);
 	ROUGHNESS = 0.48;
@@ -775,6 +810,9 @@ static func far_ground_material() -> ShaderMaterial:
 	if not _shared.has("far_ground"):
 		_shared.far_ground = _material(FAR_GROUND_SHADER,
 			{"near_fade": Gen.HORIZON_NEAR_FADE,
+				"fade_band": 18.0,
+				"far_fade": _skyline_near_fade,
+				"far_fade_band": 96.0,
 				"snow_amount": _snow_amount})
 	return _shared.far_ground
 
@@ -784,8 +822,10 @@ static func far_ground_material() -> ShaderMaterial:
 static func stratos_ground_material() -> ShaderMaterial:
 	if not _shared.has("stratos_ground"):
 		_shared.stratos_ground = _material(STRATOS_GROUND_SHADER,
-			{"near_fade": Gen.STRATOS_NEAR_FADE,
+			{"near_fade": _stratos_near_fade,
 				"fade_band": 220.0,
+				"far_fade": _stratos_far_fade,
+				"far_fade_band": 420.0,
 				"snow_amount": _snow_amount})
 	return _shared.stratos_ground
 
@@ -796,8 +836,10 @@ static func stratos_ground_material() -> ShaderMaterial:
 static func skyline_ground_material() -> ShaderMaterial:
 	if not _shared.has("skyline_ground"):
 		_shared.skyline_ground = _material(FAR_GROUND_SHADER,
-			{"near_fade": Gen.SKYLINE_NEAR_FADE,
+			{"near_fade": _skyline_near_fade,
 				"fade_band": 96.0,
+				"far_fade": _stratos_near_fade,
+				"far_fade_band": 220.0,
 				"snow_amount": _snow_amount})
 	return _shared.skyline_ground
 
@@ -806,6 +848,9 @@ static func far_jungle_material() -> ShaderMaterial:
 	if not _shared.has("far_jungle"):
 		_shared.far_jungle = _material(FAR_JUNGLE_SHADER,
 			{"near_fade": Gen.HORIZON_NEAR_FADE,
+				"fade_band": 18.0,
+				"far_fade": _skyline_near_fade,
+				"far_fade_band": 96.0,
 				"spring_amount": _spring_amount,
 				"autumn_amount": _autumn_amount,
 				"snow_amount": _snow_amount})
@@ -818,8 +863,10 @@ static func far_jungle_material() -> ShaderMaterial:
 static func skyline_jungle_material() -> ShaderMaterial:
 	if not _shared.has("skyline_jungle"):
 		_shared.skyline_jungle = _material(FAR_JUNGLE_SHADER,
-			{"near_fade": Gen.HORIZON_DISTANCE - 12.0,
-				"fade_band": 44.0,
+			{"near_fade": _skyline_near_fade,
+				"fade_band": 96.0,
+				"far_fade": _stratos_near_fade,
+				"far_fade_band": 220.0,
 				"spring_amount": _spring_amount,
 				"autumn_amount": _autumn_amount,
 				"snow_amount": _snow_amount})
@@ -829,8 +876,91 @@ static func skyline_jungle_material() -> ShaderMaterial:
 static func far_water_material() -> ShaderMaterial:
 	if not _shared.has("far_water"):
 		_shared.far_water = _material(FAR_WATER_SHADER,
-			{"near_fade": Gen.HORIZON_NEAR_FADE})
+			{"near_fade": Gen.HORIZON_NEAR_FADE,
+				"fade_band": 16.0,
+				"far_fade": _skyline_near_fade,
+				"far_fade_band": 96.0})
 	return _shared.far_water
+
+
+static func skyline_water_material() -> ShaderMaterial:
+	if not _shared.has("skyline_water"):
+		_shared.skyline_water = _material(FAR_WATER_SHADER,
+			{"near_fade": _skyline_near_fade,
+				"fade_band": 96.0,
+				"far_fade": _stratos_near_fade,
+				"far_fade_band": 220.0})
+	return _shared.skyline_water
+
+
+## Keep adjacent terrain/water/canopy tiers mathematically complementary. At
+## each boundary the incoming layer retains hash <= transition while the
+## outgoing layer retains hash > transition, so there is neither a hole nor a
+## double-rendered band. High-altitude callers can pass zero so the successor
+## fully covers the under-aircraft view after a lower tier becomes invisible.
+static func set_altitude_lod_handoffs(skyline_near: float,
+		stratos_near: float) -> void:
+	var next_skyline_near := maxf(skyline_near, 0.0)
+	var next_stratos_near := maxf(stratos_near, 0.0)
+	if is_equal_approx(next_skyline_near, _skyline_near_fade) \
+			and is_equal_approx(next_stratos_near, _stratos_near_fade):
+		return
+	_skyline_near_fade = next_skyline_near
+	_stratos_near_fade = next_stratos_near
+	var skyline_band := 18.0 if _skyline_near_fade \
+		<= Gen.HORIZON_NEAR_FADE + 0.5 else 96.0
+	var stratos_band := 24.0 if _stratos_near_fade \
+		<= Gen.HORIZON_NEAR_FADE + 0.5 else 220.0
+	for material in [far_ground_material(), far_jungle_material(),
+			far_water_material()]:
+		material.set_shader_parameter("far_fade", _skyline_near_fade)
+		material.set_shader_parameter("far_fade_band", skyline_band)
+	for material in [skyline_ground_material(), skyline_jungle_material(),
+			skyline_water_material()]:
+		material.set_shader_parameter("near_fade", _skyline_near_fade)
+		material.set_shader_parameter("fade_band", skyline_band)
+		material.set_shader_parameter("far_fade", _stratos_near_fade)
+		material.set_shader_parameter("far_fade_band", stratos_band)
+	stratos_ground_material().set_shader_parameter("near_fade",
+		_stratos_near_fade)
+	stratos_ground_material().set_shader_parameter("fade_band", stratos_band)
+
+
+## Circular stratos target selection is padded by whole 6.144 km sectors. Fade
+## the final cells against the atmosphere at the exact requested radius so the
+## padded sectors never reveal a square outer edge.
+static func set_stratos_view_radius(radius: float) -> void:
+	var next_radius := maxf(radius, Gen.VIEW_BASE_DISTANCE)
+	if is_equal_approx(next_radius, _stratos_far_fade):
+		return
+	_stratos_far_fade = next_radius
+	stratos_ground_material().set_shader_parameter("far_fade", next_radius)
+	stratos_ground_material().set_shader_parameter("far_fade_band",
+		clampf(next_radius * 0.025, 180.0, 520.0))
+
+
+## CelestialSky already renders both hemispheres of its inward-facing sky. This
+## palette keeps that lower hemisphere atmospheric when aircraft can see below
+## the terrain horizon: the old near-black nadir became a conspicuous dark spot
+## at altitude. Ground-level color remains earthy and the transition is smooth.
+static func full_sphere_nadir_palette(sky_top: Color, sky_horizon: Color,
+		daylight_amount: float, ground_clearance: float) -> Dictionary:
+	var altitude_blend := smoothstep(180.0, 1800.0,
+		maxf(ground_clearance, 0.0))
+	var ground_bottom := Color(0.018, 0.050, 0.125).lerp(
+		Color(0.10, 0.22, 0.16), daylight_amount)
+	var ground_horizon := Color(0.038, 0.105, 0.205).lerp(
+		Color(0.30, 0.48, 0.34), daylight_amount)
+	# Looking through the deep atmosphere toward the planet is slightly darker
+	# than the horizontal limb, but never black or green at aircraft altitude.
+	var atmospheric_nadir := sky_top.lerp(sky_horizon, 0.62).darkened(
+		lerpf(0.08, 0.16, daylight_amount))
+	ground_bottom = ground_bottom.lerp(atmospheric_nadir,
+		0.18 + altitude_blend * 0.78)
+	ground_horizon = ground_horizon.lerp(sky_horizon,
+		0.66 + altitude_blend * 0.31)
+	return {"bottom": ground_bottom, "horizon": ground_horizon,
+		"altitude_blend": altitude_blend}
 
 
 static func set_far_focus(position: Vector3) -> void:
@@ -842,7 +972,7 @@ static func set_far_focus(position: Vector3) -> void:
 		return
 	_far_focus = focus
 	for material in [far_ground_material(), far_jungle_material(),
-			far_water_material(), skyline_ground_material(),
+			far_water_material(), skyline_ground_material(), skyline_water_material(),
 			skyline_jungle_material(), stratos_ground_material()]:
 		material.set_shader_parameter("focus_xz", focus)
 
