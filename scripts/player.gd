@@ -140,6 +140,7 @@ var weapon_slot := 1
 var melee_mode := false
 var fly_mode := false
 var vehicle: Vehicle = null
+var expedition_locked := false
 var _vehicle_exit_cd := 0.0
 var _collision_shape: CollisionShape3D
 var melee_attack_remaining := 0.0
@@ -162,6 +163,10 @@ var _send_t := 0.0
 var _now := 0.0
 var _wheel_reel_delta := 0.0
 var _invulnerable_t := 0.0
+## Earth-normal unless a realm controller places this actor on the Moon. This
+## is per monkey so Earth and lunar players can coexist in one multiplayer
+## process without changing ProjectSettings' global gravity.
+var environment_gravity_mps2 := FREEFALL_ACCELERATION
 var _shot_spread_sequence := 0
 var _next_melee_combo := 0
 var _melee_hit_done := false
@@ -270,6 +275,11 @@ func _physics_process(dt: float) -> void:
 	_invulnerable_t = maxf(_invulnerable_t - dt, 0.0)
 	if defeated:
 		return
+	if expedition_locked:
+		velocity = Vector3.ZERO
+		state = S.AIR
+		_replicate_expedition_pose(dt)
+		return
 	_update_melee(dt)
 	_now += dt
 	regrab_t = maxf(regrab_t - dt, 0.0)
@@ -280,6 +290,11 @@ func _physics_process(dt: float) -> void:
 	if vehicle:
 		_st_vehicle(dt, inp)
 		return
+	if inp.interact_just and state != S.SWING and is_local and world \
+			and world.has_method("try_expedition_interact") \
+			and world.try_expedition_interact(self):
+		inp.interact_just = false
+		inp.grab = false
 	if inp.interact_just and state != S.SWING and is_local and world \
 			and world.has_method("try_open_villager_trade") \
 			and world.try_open_villager_trade(self):
@@ -715,7 +730,7 @@ func is_all_fours() -> bool:
 
 func is_weapon_stowed() -> bool:
 	return melee_mode or is_healing() or is_all_fours() or state == S.SWIM \
-		or vehicle != null
+		or vehicle != null or expedition_locked
 
 
 ## First-person sprinting keeps the viewmodel in frame even though the weapon is
@@ -724,7 +739,7 @@ func is_weapon_stowed() -> bool:
 func is_weapon_visually_stowed() -> bool:
 	if _first_person_weapons_requested:
 		return melee_mode or is_healing() or state == S.SWIM \
-			or vehicle != null
+			or vehicle != null or expedition_locked
 	return is_weapon_stowed()
 
 
@@ -1008,6 +1023,83 @@ func _update_nameplate() -> void:
 		rig.tag.text = "%s  %d" % [display_name, ceili(health)]
 
 
+func set_environment_gravity(acceleration_mps2: float) -> void:
+	environment_gravity_mps2 = clampf(acceleration_mps2, 0.1,
+		FREEFALL_ACCELERATION)
+
+
+func reset_environment_gravity() -> void:
+	environment_gravity_mps2 = FREEFALL_ACCELERATION
+
+
+## Move this actor to the equivalent local chart image after crossing the
+## longitude seam or a pole. Pole reflections rotate planar momentum and the
+## view by 180°, so holding forward continues along one great-circle path.
+func apply_planet_wrap(canonical_xz: Vector2, yaw_delta: float) -> void:
+	if state == S.SWING:
+		# A vine belongs to the old streamed chart image. Releasing avoids drawing a
+		# planet-wide rope while preserving the monkey's incoming momentum.
+		_release(false)
+	var next_position := global_position
+	next_position.x = canonical_xz.x
+	next_position.z = canonical_xz.y
+	if absf(yaw_delta) > 0.000001:
+		var turn := Basis(Vector3.UP, yaw_delta)
+		velocity = turn * velocity
+		if rig:
+			rig.set_yaw(wrapf(rig.yaw_angle() + yaw_delta, -PI, PI))
+	global_position = next_position
+	reset_physics_interpolation()
+	if cam:
+		cam.apply_planet_heading_delta(yaw_delta)
+
+
+func set_expedition_locked(locked: bool) -> void:
+	if expedition_locked == locked:
+		return
+	if locked:
+		if vehicle:
+			exit_vehicle()
+		if state == S.SWING:
+			_release(false)
+		velocity = Vector3.ZERO
+		_collision_shape.set_deferred("disabled", true)
+		collision_layer = 0
+		collision_mask = 0
+	else:
+		_collision_shape.set_deferred("disabled", false)
+		collision_layer = 1
+		collision_mask = 1
+		state = S.AIR
+		reset_physics_interpolation()
+	expedition_locked = locked
+	_sync_weapon_presentation(true)
+
+
+func _replicate_expedition_pose(dt: float) -> void:
+	_send_t += dt
+	if Net.active and _send_t >= 0.05:
+		_send_t = 0.0
+		Net.send_state(global_position, rig.yaw_angle(), Vector3.ZERO, _anim(),
+			false, Vector3.ZERO, 0.0, PackedVector3Array(), weapon_slot - 1,
+			true, false, int(active_weapon.ammo) if active_weapon else 0,
+			false, 0.0, false)
+
+
+func _environment_gravity_ratio() -> float:
+	return environment_gravity_mps2 / FREEFALL_ACCELERATION
+
+
+## Suit-limited takeoff scales with sqrt(g), preserving readable jump height
+## while the much longer low-gravity hang time supplies the lunar feel.
+func _environment_jump_velocity(earth_velocity: float) -> float:
+	return earth_velocity * sqrt(_environment_gravity_ratio())
+
+
+func _environment_traversal_gravity() -> float:
+	return GRAVITY * _environment_gravity_ratio()
+
+
 # ---- states ----------------------------------------------------------------
 
 func _st_ground(dt: float, inp: Dictionary) -> void:
@@ -1054,7 +1146,7 @@ func _st_ground(dt: float, inp: Dictionary) -> void:
 
 	if buffer_t > 0.0 and roll_t <= 0.0:
 		buffer_t = 0.0
-		velocity.y = JUMP_VEL
+		velocity.y = _environment_jump_velocity(JUMP_VEL)
 		jumps_used = 1
 		state = S.AIR
 		Sfx.play("jump", -8)
@@ -1090,7 +1182,7 @@ func _st_slide(dt: float, inp: Dictionary) -> void:
 
 	if buffer_t > 0.0:
 		buffer_t = 0.0
-		velocity.y = JUMP_VEL * 0.92
+		velocity.y = _environment_jump_velocity(JUMP_VEL * 0.92)
 		jumps_used = 1
 		state = S.AIR
 		Sfx.play("jump", -8)
@@ -1107,15 +1199,16 @@ func _st_air(dt: float, inp: Dictionary) -> void:
 	# apex-crossing tick so the descending fraction is never accelerated by the
 	# stronger jump or jump-cut tuning.
 	if velocity.y > 0.0:
-		var ascent_acceleration := GRAVITY \
-			+ (0.0 if inp.jump_held else JUMP_CUT)
+		var ascent_acceleration := _environment_traversal_gravity() \
+			+ (0.0 if inp.jump_held else JUMP_CUT \
+				* _environment_gravity_ratio())
 		var time_to_apex := velocity.y / ascent_acceleration
 		if time_to_apex >= dt:
 			velocity.y -= ascent_acceleration * dt
 		else:
-			velocity.y = -FREEFALL_ACCELERATION * (dt - time_to_apex)
+			velocity.y = -environment_gravity_mps2 * (dt - time_to_apex)
 	else:
-		velocity.y -= FREEFALL_ACCELERATION * dt
+		velocity.y -= environment_gravity_mps2 * dt
 
 	var wish := _wish_dir(inp)
 	var hvel := Vector3(velocity.x, 0, velocity.z)
@@ -1134,7 +1227,8 @@ func _st_air(dt: float, inp: Dictionary) -> void:
 		if buffer_t > 0.0:
 			buffer_t = 0.0
 			var keep := Vector3(velocity.x, 0, velocity.z) * 0.35
-			velocity = wn * WALL_JUMP_OUT + Vector3.UP * WALL_JUMP_UP + keep
+			velocity = wn * WALL_JUMP_OUT + Vector3.UP \
+				* _environment_jump_velocity(WALL_JUMP_UP) + keep
 			jumps_used = 1
 			Sfx.play("djump", -8)
 			return
@@ -1142,12 +1236,13 @@ func _st_air(dt: float, inp: Dictionary) -> void:
 	if buffer_t > 0.0:
 		if coyote_t > 0.0 and jumps_used == 0:
 			buffer_t = 0.0
-			velocity.y = JUMP_VEL
+			velocity.y = _environment_jump_velocity(JUMP_VEL)
 			jumps_used = 1
 			Sfx.play("jump", -8)
 		elif jumps_used <= 1:
 			buffer_t = 0.0
-			velocity.y = maxf(velocity.y, 0.0) * 0.3 + DOUBLE_JUMP_VEL
+			velocity.y = maxf(velocity.y, 0.0) * 0.3 \
+				+ _environment_jump_velocity(DOUBLE_JUMP_VEL)
 			jumps_used = 2
 			Sfx.play("djump", -8)
 
@@ -1396,7 +1491,10 @@ func _post(dt: float, inp: Dictionary, pre_floor: bool, pre_vy: float) -> void:
 		Net.send_ook(global_position)
 
 	# fell out of the world (should never happen, but never strand the monkey)
-	if global_position.y < -25.0 and world and world.has_method("respawn"):
+	var void_rescue_y: float = world.void_rescue_height(self) \
+		if world and world.has_method("void_rescue_height") else -25.0
+	if global_position.y < void_rescue_y \
+			and world and world.has_method("respawn"):
 		world.respawn(self)
 
 	# replicate

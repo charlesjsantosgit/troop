@@ -14,6 +14,7 @@ var hut_id := ""
 var ammo_kind := Gen.SUPPLY_AMMO_REVOLVER
 var ammo_amount := 0
 var bandage_count := 0
+var normal_backpack := false
 var biome := Gen.Biome.RAINFOREST
 
 var _opened := false
@@ -30,6 +31,7 @@ func configure(data: Dictionary, initially_opened := false) -> void:
 	ammo_kind = int(data.get("ammo_kind", Gen.SUPPLY_AMMO_REVOLVER))
 	ammo_amount = maxi(int(data.get("ammo_amount", 0)), 0)
 	bandage_count = maxi(int(data.get("bandages", 0)), 0)
+	normal_backpack = bool(data.get("normal_backpack", false))
 	biome = int(data.get("biome", Gen.Biome.RAINFOREST))
 	position = data.get("pos", Vector3.ZERO)
 	rotation.y = float(data.get("yaw", 0.0))
@@ -70,6 +72,7 @@ func loot_payload() -> Dictionary:
 		"ammo_kind": ammo_kind,
 		"ammo_amount": ammo_amount,
 		"bandages": bandage_count,
+		"normal_backpack": normal_backpack,
 	}
 
 

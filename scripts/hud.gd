@@ -22,6 +22,7 @@ var damage_overlay: ColorRect
 var hint: Label
 var roster: Label
 var minimap: Minimap
+var world_map: WorldMap
 var crosshair: CombatCrosshair
 var hit_marker: HitMarker
 var aircraft_aim_reticle: AircraftAimReticle
@@ -46,9 +47,11 @@ var _voice_error := ""
 var _voice_error_t := 0.0
 var _fps_refresh_remaining := 0.0
 var _displayed_fps := -1
+var _normal_canvas_layer := 0
 
 
 func _ready() -> void:
+	_normal_canvas_layer = layer
 	var margin := 14
 	var status_panel := Panel.new()
 	status_panel.mouse_filter = Control.MOUSE_FILTER_IGNORE
@@ -99,6 +102,14 @@ func _ready() -> void:
 	if player and player.world:
 		minimap.configure(player.world)
 	add_child(minimap)
+
+	world_map = WorldMap.new()
+	world_map.name = "PlanetaryWorldMap"
+	if player and player.world:
+		world_map.configure(player.world)
+	add_child(world_map)
+	world_map.opened.connect(_on_world_map_opened)
+	world_map.closed.connect(_on_world_map_closed)
 
 	roster = _label(15)
 	roster.position = Vector2(0, margin)
@@ -349,6 +360,10 @@ func _ready() -> void:
 	# Diagnostics stay readable over the optical and damage layers while all
 	# normal combat information keeps the intended scope presentation.
 	move_child(hit_marker, get_child_count() - 1)
+	# The planetary atlas is full-screen and must sit above every combat widget.
+	# FPS intentionally remains last so performance stays inspectable while the
+	# atlas incrementally bakes terrain.
+	move_child(world_map, get_child_count() - 1)
 	move_child(fps_label, get_child_count() - 1)
 	player.health_changed.connect(_on_health_changed)
 	player.bullet_hit_confirmed.connect(_on_bullet_hit_confirmed)
@@ -515,7 +530,8 @@ func _process(dt: float) -> void:
 	health_label.text = "HP %d" % ceili(player.health)
 
 	if minimap:
-		minimap.visible = minimap.mode != 2 and not _sniper_scope_active
+		minimap.visible = minimap.mode != 2 and not _sniper_scope_active \
+			and (not world_map or not world_map.is_open())
 		roster.position.y = 12.0 + (minimap.size.y + 8.0 \
 			if minimap.visible else 0.0)
 	var weapon = player.active_weapon if player.active_weapon else player.gun
@@ -685,9 +701,33 @@ func _process(dt: float) -> void:
 	elif not player.last_target.is_empty():
 		hint.text = "hold E to GRAB · LMB fire · hold RMB to aim"
 	elif _help_t > 0.0:
-		hint.text = "WASD run · E vine/chest · LMB fire · H bandage · RMB aim · C camera · 1/2/3/4 weapons · R reload"
+		hint.text = "WASD run · E vine/chest · LMB fire · H bandage · RMB aim · C camera · X world map · 1/2/3/4 weapons · R reload"
 	else:
 		hint.text = ""
+
+
+func toggle_world_map() -> void:
+	if world_map:
+		world_map.toggle()
+
+
+func close_world_map() -> void:
+	if world_map and world_map.is_open():
+		world_map.close_map()
+
+
+func world_map_is_open() -> bool:
+	return world_map != null and world_map.is_open()
+
+
+func _on_world_map_opened() -> void:
+	# Session chat/admin/trade live on layer 60. Temporarily raise the complete
+	# HUD canvas so none of those labels bleed through the opaque atlas.
+	layer = 90
+
+
+func _on_world_map_closed() -> void:
+	layer = _normal_canvas_layer
 
 
 func _update_fps_meter(dt: float) -> void:

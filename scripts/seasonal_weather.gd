@@ -25,6 +25,7 @@ var particles: GPUParticles3D
 var weather := SeasonalCycle.Weather.CLEAR
 var _high_effects := false
 var _fullscreen_performance := false
+var _atmosphere_enabled := true
 var _process_materials: Dictionary = {}
 var _particle_meshes: Dictionary = {}
 
@@ -46,6 +47,24 @@ func setup(follow_target: Node3D, initial_weather: SeasonalCycle.Weather) -> voi
 func _process(_dt: float) -> void:
 	if target and is_instance_valid(target):
 		global_position = target.global_position + Vector3.UP * 11.0
+
+
+## Transit and the lunar surface are vacuum presentation realms. Keep the same
+## cached emitter/resources ready for Earth return, but stop both following and
+## GPU simulation so precipitation cannot trail a rocket into space.
+func set_atmosphere_enabled(enabled: bool) -> void:
+	_atmosphere_enabled = enabled
+	visible = enabled
+	set_process(enabled)
+	if not particles:
+		return
+	particles.emitting = enabled and weather != SeasonalCycle.Weather.CLEAR
+	if particles.emitting:
+		particles.restart()
+
+
+func atmosphere_enabled() -> bool:
+	return _atmosphere_enabled
 
 
 func set_weather(next_weather: SeasonalCycle.Weather) -> void:
@@ -73,7 +92,7 @@ func set_weather(next_weather: SeasonalCycle.Weather) -> void:
 			particles.preprocess = 6.5
 	_apply_quality()
 	particles.restart()
-	particles.emitting = true
+	particles.emitting = _atmosphere_enabled
 
 
 func set_quality(high_effects: bool, fullscreen_performance: bool) -> void:

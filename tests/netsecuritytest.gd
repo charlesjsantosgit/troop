@@ -132,6 +132,7 @@ func _run() -> void:
 	var saved_peer_on_foot_positions: Dictionary = \
 		net._peer_on_foot_positions.duplicate(true)
 	var saved_vehicle_positions: Dictionary = net._vehicle_positions.duplicate(true)
+	var saved_player_realms: Dictionary = net.player_realms.duplicate(true)
 	var saved_world_seed: int = net.world_seed
 	var saved_gen_seed: int = gen.world_seed
 	var saved_gen_debug: bool = gen.debug_world
@@ -156,6 +157,10 @@ func _run() -> void:
 		88: Vector3(30.0, 2.0, 30.0),
 	}
 	net._vehicle_positions = {}
+	net.player_realms = {
+		77: net.PlayerRealm.EARTH,
+		88: net.PlayerRealm.MOON,
+	}
 	gen.debug_world = false
 	gen.setup(1337)
 	net.world_seed = 1337
@@ -171,6 +176,91 @@ func _run() -> void:
 	_check(admin_flying and not non_admin_flying and not non_admin_grounded \
 		and stripped_flight_packet_valid,
 		"movement relay keeps admin flight, clears non-admin wings, and preserves the remaining valid packet")
+
+	var earth_state_position := Vector3(12.0, 1000.0, -8.0)
+	var moon_state_position := Vector3(12.0,
+		net.MOON_WORLD_ORIGIN_Y + 8.0, -8.0)
+	var earth_peer_accepts_earth: bool = net._valid_state_for_peer(77,
+		earth_state_position, 0.0, Vector3.ZERO, 0, false, Vector3.ZERO,
+		0.0, empty_wraps, net.WEAPON_REVOLVER, 0, 0.0, -1, "",
+		Vector3.ZERO)
+	var earth_peer_rejects_moon: bool = not net._valid_state_for_peer(77,
+		moon_state_position, 0.0, Vector3.ZERO, 0, false, Vector3.ZERO,
+		0.0, empty_wraps, net.WEAPON_REVOLVER, 0, 0.0, -1, "",
+		Vector3.ZERO)
+	var moon_peer_accepts_moon: bool = net._valid_state_for_peer(88,
+		moon_state_position, 0.0, Vector3.ZERO, 0, false, Vector3.ZERO,
+		0.0, empty_wraps, net.WEAPON_REVOLVER, 0, 0.0, -1, "",
+		Vector3.ZERO)
+	var moon_peer_rejects_earth: bool = not net._valid_state_for_peer(88,
+		earth_state_position, 0.0, Vector3.ZERO, 0, false, Vector3.ZERO,
+		0.0, empty_wraps, net.WEAPON_REVOLVER, 0, 0.0, -1, "",
+		Vector3.ZERO)
+	net.player_realms[77] = net.PlayerRealm.TRANSIT
+	var transit_rejects_client_motion: bool = not net._valid_state_for_peer(77,
+		earth_state_position, 0.0, Vector3.ZERO, 0, false, Vector3.ZERO,
+		0.0, empty_wraps, net.WEAPON_REVOLVER, 0, 0.0, -1, "",
+		Vector3.ZERO)
+	net.player_realms[77] = net.PlayerRealm.EARTH
+	var moon_wrap := PackedVector3Array([moon_state_position])
+	var cross_realm_rope_rejected: bool = not net._valid_state_for_peer(77,
+		earth_state_position, 0.0, Vector3.ZERO, 0, true,
+		moon_state_position, 3.0, moon_wrap, net.WEAPON_REVOLVER, 0, 0.0,
+		-1, "", Vector3.ZERO)
+	_check(earth_peer_accepts_earth and earth_peer_rejects_moon \
+		and moon_peer_accepts_moon and moon_peer_rejects_earth \
+		and transit_rejects_client_motion and cross_realm_rope_rejected,
+		"authority binds movement, swing anchors, and rope points to Earth or Moon and drops client motion in transit")
+
+	var earth_rocket_position: Vector3 = net._earth_rocket_position()
+	var moon_rocket_position := Vector3(-54.0,
+		net.MOON_WORLD_ORIGIN_Y + 2.0, 42.0)
+	net._peer_on_foot_positions[77] = earth_rocket_position
+	var earth_boarding_near: bool = net._rocket_boarding_in_range(77,
+		net.PlayerRealm.EARTH)
+	net.player_realms[77] = net.PlayerRealm.MOON
+	var stale_earth_boarding_rejected: bool = not net._rocket_boarding_in_range(
+		77, net.PlayerRealm.MOON)
+	net._peer_on_foot_positions[77] = moon_rocket_position
+	var moon_boarding_near: bool = net._rocket_boarding_in_range(77,
+		net.PlayerRealm.MOON)
+	net._peer_on_foot_positions[77] = net.MOON_CHEESE_SHOP_POSITION
+	var moon_shop_near: bool = net._moon_cheese_purchase_in_range(77)
+	net.player_realms[77] = net.PlayerRealm.EARTH
+	var cross_realm_shop_rejected: bool = not \
+		net._moon_cheese_purchase_in_range(77)
+	net.player_realms[77] = net.PlayerRealm.MOON
+	net._peer_on_foot_positions[77] = net.MOON_CHEESE_SHOP_POSITION \
+		+ Vector3(net.MOON_CHEESE_SHOP_RANGE + 1.0, 0.0, 0.0)
+	var distant_shop_rejected: bool = not net._moon_cheese_purchase_in_range(77)
+	_check(earth_boarding_near and stale_earth_boarding_rejected \
+		and moon_boarding_near and moon_shop_near and cross_realm_shop_rejected \
+		and distant_shop_rejected,
+		"remote rocket boarding and Moon-cheese trade use a same-realm accepted on-foot position")
+
+	net.player_realms[77] = net.PlayerRealm.EARTH
+	net.player_realms[88] = net.PlayerRealm.EARTH
+	net._peer_on_foot_positions[77] = Vector3(10.0, 2.0, 10.0)
+	var near_combat_origin: bool = net._valid_combat_origin(77,
+		Vector3(11.5, 3.0, 10.0))
+	var distant_combat_origin_rejected: bool = not net._valid_combat_origin(77,
+		Vector3(80.0, 3.0, 10.0))
+	var cross_band_combat_origin_rejected: bool = not net._valid_combat_origin(77,
+		Vector3(10.0, net.MOON_WORLD_ORIGIN_Y, 10.0))
+	var same_realm_combat_relay: bool = net._can_relay_combat_between(77, 88)
+	net.player_realms[88] = net.PlayerRealm.MOON
+	var cross_realm_combat_relay_rejected: bool = not \
+		net._can_relay_combat_between(77, 88)
+	net.player_realms[77] = net.PlayerRealm.TRANSIT
+	var transit_combat_rejected: bool = not net._valid_combat_origin(77,
+		Vector3(10.0, 2.0, 10.0))
+	_check(near_combat_origin and distant_combat_origin_rejected \
+		and cross_band_combat_origin_rejected and same_realm_combat_relay \
+		and cross_realm_combat_relay_rejected and transit_combat_rejected,
+		"bullet and melee origins stay near the accepted actor and relay only inside one active realm")
+	net.player_realms[77] = net.PlayerRealm.EARTH
+	net.player_realms[88] = net.PlayerRealm.MOON
+	net._peer_on_foot_positions[77] = Vector3(10.0, 2.0, 10.0)
 	_check(net._admin_target_fingerprint(77, 88) == fingerprint_a \
 		and net._admin_target_fingerprint(77, 77).is_empty() \
 		and net._admin_target_fingerprint(77, 99).is_empty() \
@@ -340,6 +430,7 @@ func _run() -> void:
 	net.vehicle_spawn_definitions = saved_vehicle_spawn_definitions
 	net._peer_on_foot_positions = saved_peer_on_foot_positions
 	net._vehicle_positions = saved_vehicle_positions
+	net.player_realms = saved_player_realms
 	net.world_seed = saved_world_seed
 	gen.debug_world = saved_gen_debug
 	gen.setup(saved_gen_seed)
@@ -419,10 +510,18 @@ func _run() -> void:
 	net._vehicle_positions[owned_vehicle] = Vector3(20.0, 2.0, 20.0)
 	var accepted_release := [Vector3(21.0, 2.0, 20.0), 0.0, 0.0, 0.0]
 	_check(net._valid_vehicle_release_position(owned_vehicle,
-			accepted_release[0]) \
+			accepted_release[0], net.PlayerRealm.EARTH) \
 		and not net._valid_vehicle_release_position(owned_vehicle,
-			Vector3(200.0, 2.0, 20.0)),
+			Vector3(200.0, 2.0, 20.0), net.PlayerRealm.EARTH),
 		"release rest cannot teleport away from the last accepted vehicle state")
+	var seam_last := Vector3(gen.PLANET_HALF_CIRCUMFERENCE - 2.0, 2.0, 20.0)
+	var seam_release := Vector3(-gen.PLANET_HALF_CIRCUMFERENCE + 2.0,
+		2.0, 20.0)
+	net._vehicle_positions[owned_vehicle] = seam_last
+	_check(net._valid_vehicle_release_position(owned_vehicle, seam_release,
+			net.PlayerRealm.EARTH),
+		"vehicle release accepts the adjacent Earth chart image across the longitude seam")
+	net._vehicle_positions[owned_vehicle] = accepted_release[0]
 	net._remember_vehicle_release_handoff(77, owned_vehicle, accepted_release)
 	_check(net._peer_on_foot_positions[77] == accepted_release[0] \
 		and net._vehicle_claim_in_range(77, owned_vehicle),

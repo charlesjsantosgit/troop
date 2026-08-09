@@ -56,14 +56,10 @@ func _build_terrain_and_water() -> void:
 		for ix in range(CELLS + 1):
 			var x := x0 + float(ix) * step
 			var z := z0 + float(iz) * step
-			var h := Gen.height(x, z)
+			var visual := Gen.skyline_visual_sample(x, z)
+			var h := float(visual.elevation)
 			heights[iz * (CELLS + 1) + ix] = h
-			var ground := Gen.ground_color(h, x, z)
-			var cover := Gen.canopy_cover(h, x, z)
-			if cover > 0.0:
-				ground = ground.lerp(Gen.canopy_color(x, z, h),
-					cover * CANOPY_TINT)
-			terrain.set_color(ground)
+			terrain.set_color(visual.color)
 			terrain.add_vertex(Vector3(x - position.x, h, z - position.z))
 	for iz in range(CELLS):
 		for ix in range(CELLS):

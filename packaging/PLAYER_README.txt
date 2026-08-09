@@ -1,7 +1,7 @@
 TROOP
 =====
 
-Run, swing, and fight through an infinite procedural jungle.
+Run, swing, drive, and fight around a generated planet — then fly to the Moon.
 
 Windows
 -------

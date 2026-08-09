@@ -40,11 +40,15 @@ signal admin_roster_changed
 signal admin_notice(message: String)
 signal admin_action(action: String, args: Dictionary)
 signal cycle_hour_changed(hour: float)
+signal expedition_state_changed(state: Dictionary)
+signal player_realm_changed(peer_id: int, realm: int)
+signal moon_cheese_purchase_result(quantity: int, accepted: bool,
+	new_balance: int, reason: String)
 
 const PORT := 30623
 const MAX_CLIENTS := 24
 const CHANNEL_COUNT := 2
-const PROTOCOL_VERSION := 6
+const PROTOCOL_VERSION := 7
 const MAX_NAME_LENGTH := 20
 const REGISTRATION_TIMEOUT_SECONDS := 5.0
 const MAX_STATE_PACKETS_PER_SECOND := 30
@@ -76,6 +80,21 @@ const MAX_ADMIN_GRANT_FILE_BYTES := 20000
 const MAX_ADMIN_PUBLIC_KEY_BYTES := 4096
 const MAX_ADMIN_PRIVATE_KEY_BYTES := 10000
 const MAX_ADMIN_SIGNATURE_BYTES := 512
+const MAX_ROCKET_CREW := 4
+const ROCKET_OUTBOUND_SECONDS := 180.0
+const ROCKET_RETURN_SECONDS := 120.0
+const ROCKET_RECOVERY_SECONDS := 18.0
+const ROCKET_SYNC_SECONDS := 1.0
+const MOON_CHEESE_PRICE := 3
+const MAX_MOON_CHEESE_QUANTITY := 8
+const MOON_WORLD_ORIGIN_Y := 300000.0
+const MOON_CHEESE_SHOP_POSITION := Vector3(58.0, MOON_WORLD_ORIGIN_Y, -32.0)
+const MOON_CHEESE_SHOP_RANGE := 12.0
+# Earth terrain and aircraft live far below the elevated lunar scene. Keep a
+# wide dead band between them so a packet can belong to exactly one playable
+# realm, while still leaving ample headroom for high-altitude Earth flight.
+const MOON_REALM_MIN_Y := MOON_WORLD_ORIGIN_Y * 0.5
+const MAX_COMBAT_ORIGIN_DISTANCE := 12.0
 const ADMIN_NONCE_BYTES := 32
 const ADMIN_BOOTSTRAP_PROOF_BYTES := 32
 const ADMIN_GRANT_UNCHANGED := 0
@@ -88,10 +107,20 @@ const ADMIN_IDENTITY_SECRET_FILE := "user://admin_identity_secret.txt"
 const ADMIN_KEY_FINGERPRINT_DOMAIN := "TROOP/admin-public-key/v1:"
 const ADMIN_PROOF_DOMAIN := "TROOP/admin-registration-proof/v1"
 const ADMIN_KEY_STORAGE_DOMAIN := "TROOP/admin-key-storage/v1:"
-const PLAYER_ADMIN_ACTIONS := ["kill", "heal", "give_ammo", "teleport_to"]
+enum PlayerRealm { EARTH, TRANSIT, MOON }
+enum RocketMissionPhase {
+	EARTH_READY,
+	OUTBOUND,
+	MOON_READY,
+	RETURN,
+	SPLASHDOWN_RECOVERY,
+}
+
+const PLAYER_ADMIN_ACTIONS := ["kill", "heal", "give_ammo", "teleport_to",
+	"travel_realm"]
 const ADMIN_ACTIONS := ["kick", "ban", "kill", "heal", "give_ammo",
 	"teleport_to", "announce", "grant_admin", "revoke_admin", "set_time",
-	"clear_time"]
+	"clear_time", "travel_realm"]
 const ADMIN_ARG_KEYS := {
 	"kick": ["target", "reason"],
 	"ban": ["target", "minutes"],
@@ -99,6 +128,7 @@ const ADMIN_ARG_KEYS := {
 	"heal": ["target"],
 	"give_ammo": ["target", "kind", "amount"],
 	"teleport_to": ["target", "position"],
+	"travel_realm": ["target", "realm"],
 	"announce": ["text"],
 	"grant_admin": ["target"],
 	"revoke_admin": ["target"],
@@ -136,6 +166,10 @@ var _vehicle_kinds: Dictionary = {}     # authority: trusted stable id -> kind
 var _admin_vehicle_creators: Dictionary = {} # admin-delivered id -> creator peer
 var _peer_on_foot_positions: Dictionary = {} # authority: peer -> latest on-foot pos
 var _vehicle_positions: Dictionary = {} # authority: id -> spawn/rest/live pos
+var player_realms: Dictionary = {} # peer id -> PlayerRealm
+var rocket_state: Dictionary = {} # phase, crew, elapsed, duration, serial
+var _rocket_started_msec := 0
+var _rocket_sync_remaining := 0.0
 
 var _wired := false
 var _registered: Dictionary = {}
@@ -148,6 +182,58 @@ var _cycle_initialized := false
 
 func local_id() -> int:
 	return multiplayer.get_unique_id() if active else 1
+
+
+func _reset_expedition_state(include_local_player: bool) -> void:
+	player_realms = {1: PlayerRealm.EARTH} if include_local_player else {}
+	rocket_state = {
+		"phase": RocketMissionPhase.EARTH_READY,
+		"crew": [],
+		"elapsed": 0.0,
+		"duration": 0.0,
+		"serial": 0,
+	}
+	_rocket_started_msec = 0
+	_rocket_sync_remaining = 0.0
+
+
+func _process(delta: float) -> void:
+	if delta <= 0.0 or not _owns_expedition_authority():
+		return
+	var phase := int(rocket_state.get("phase",
+		RocketMissionPhase.EARTH_READY))
+	var duration := _rocket_phase_duration(phase)
+	if duration <= 0.0:
+		return
+	var elapsed := minf(float(Time.get_ticks_msec() - _rocket_started_msec)
+		/ 1000.0, duration)
+	rocket_state.elapsed = elapsed
+	rocket_state.duration = duration
+	if elapsed >= duration:
+		if phase == RocketMissionPhase.SPLASHDOWN_RECOVERY:
+			_complete_splashdown_recovery()
+		else:
+			_complete_rocket_voyage(phase)
+		return
+	_rocket_sync_remaining -= delta
+	if _rocket_sync_remaining <= 0.0:
+		_rocket_sync_remaining = ROCKET_SYNC_SECONDS
+		_broadcast_expedition_state()
+
+
+func _owns_expedition_authority() -> bool:
+	return not active or is_host
+
+
+func _rocket_phase_duration(phase: int) -> float:
+	match phase:
+		RocketMissionPhase.OUTBOUND:
+			return ROCKET_OUTBOUND_SECONDS
+		RocketMissionPhase.RETURN:
+			return ROCKET_RETURN_SECONDS
+		RocketMissionPhase.SPLASHDOWN_RECOVERY:
+			return ROCKET_RECOVERY_SECONDS
+	return 0.0
 
 
 ## The authority anchors a one-real-hour game day to its local civil time once,
@@ -242,6 +328,7 @@ func host(pname: String, seed_v: int, port := PORT) -> Error:
 	_admin_vehicle_creators = {}
 	_peer_on_foot_positions = {}
 	_vehicle_positions = {}
+	_reset_expedition_state(true)
 	_registered = {1: true}
 	_pending_registrations = {}
 	_rate_windows = {}
@@ -298,6 +385,7 @@ func start_dedicated(seed_v: int, port := PORT, bind_ip := "*",
 	_admin_vehicle_creators = {}
 	_peer_on_foot_positions = {}
 	_vehicle_positions = {}
+	_reset_expedition_state(false)
 	_registered = {}
 	_pending_registrations = {}
 	_rate_windows = {}
@@ -341,6 +429,7 @@ func join(address: String, pname: String, port := PORT) -> Error:
 	_admin_vehicle_creators = {}
 	_peer_on_foot_positions = {}
 	_vehicle_positions = {}
+	_reset_expedition_state(false)
 	_registered = {}
 	_pending_registrations = {}
 	_rate_windows = {}
@@ -371,6 +460,7 @@ func solo(pname: String, seed_v: int) -> void:
 	_admin_vehicle_creators = {}
 	_peer_on_foot_positions = {}
 	_vehicle_positions = {}
+	_reset_expedition_state(true)
 	_registered = {}
 	_pending_registrations = {}
 	_rate_windows = {}
@@ -402,6 +492,7 @@ func shutdown() -> void:
 	vehicle_spawn_definitions = {}
 	_peer_on_foot_positions = {}
 	_vehicle_positions = {}
+	_reset_expedition_state(false)
 	_admins = {}
 	_peer_key_fingerprints = {}
 	_admin_key_fingerprints = {}
@@ -813,6 +904,8 @@ func _enforce_registration_timeout(id: int, epoch: int) -> void:
 func _on_peer_disconnected(id: int) -> void:
 	var was_registered := _registered.has(id) or names.has(id)
 	_release_vehicles_of_peer(id)
+	_remove_peer_from_rocket(id)
+	player_realms.erase(id)
 	_registered.erase(id)
 	_pending_registrations.erase(id)
 	_peer_on_foot_positions.erase(id)
@@ -824,6 +917,7 @@ func _on_peer_disconnected(id: int) -> void:
 	if is_host:
 		rpc("cl_roster", names, scores)
 		_refresh_admin_roster()
+		_broadcast_expedition_state()
 	if was_registered:
 		roster_changed.emit()
 		peer_left.emit(id)
@@ -968,6 +1062,7 @@ func _finish_registration(id: int, pname: String, fingerprint: String,
 	_registered[id] = true
 	names[id] = _sanitize_name(pname, id)
 	scores[id] = 0
+	player_realms[id] = PlayerRealm.EARTH
 	if _registration_is_admin(fingerprint, bootstrap_admin):
 		_admins[id] = true
 		rpc_id(id, "cl_admin", true)
@@ -976,7 +1071,8 @@ func _finish_registration(id: int, pname: String, fingerprint: String,
 	rpc_id(id, "cl_world", world_seed, collected.keys(),
 		claimed_supply_chests, authoritative_cycle_hour(),
 		effective_game_version(), claimed_vehicles, vehicle_rests,
-		vehicle_spawn_definitions)
+		vehicle_spawn_definitions, player_realms, expedition_state_snapshot())
+	_broadcast_expedition_state()
 	roster_changed.emit()
 
 
@@ -1015,7 +1111,8 @@ func cl_roster(new_names: Dictionary, new_scores: Dictionary) -> void:
 func cl_world(seed_v: int, taken: Array, supply_claims: Dictionary,
 		cycle_hour: float, _server_version: String,
 		vehicle_claims := {}, vehicle_rest_states := {},
-		vehicle_spawn_states := {}) -> void:
+		vehicle_spawn_states := {}, realm_states := {},
+		expedition_state := {}) -> void:
 	if not is_finite(cycle_hour):
 		net_error.emit("server sent invalid day-cycle state")
 		call_deferred("shutdown")
@@ -1076,7 +1173,391 @@ func cl_world(seed_v: int, taken: Array, supply_claims: Dictionary,
 			_vehicle_kinds[stable_vid] = vehicle_kind
 			_vehicle_positions[stable_vid] = spawn_position
 			vehicle_copied += 1
+	player_realms = {}
+	for peer_value in realm_states:
+		var realm_peer := int(peer_value)
+		var realm := int(realm_states[peer_value])
+		if names.has(realm_peer) and _valid_player_realm(realm):
+			player_realms[realm_peer] = realm
+	if not player_realms.has(local_id()):
+		player_realms[local_id()] = PlayerRealm.EARTH
+	_apply_expedition_state(expedition_state)
 	world_ready.emit()
+
+
+# ---- planetary realms and lunar expedition --------------------------------
+
+func player_realm(peer_id := -1) -> int:
+	var resolved := local_id() if peer_id < 0 else peer_id
+	return int(player_realms.get(resolved, PlayerRealm.EARTH))
+
+
+func expedition_state_snapshot() -> Dictionary:
+	var snapshot := rocket_state.duplicate(true)
+	var phase := int(snapshot.get("phase", RocketMissionPhase.EARTH_READY))
+	var duration := _rocket_phase_duration(phase)
+	if _owns_expedition_authority() and duration > 0.0 \
+			and _rocket_started_msec > 0:
+		snapshot.elapsed = clampf(float(Time.get_ticks_msec()
+			- _rocket_started_msec) / 1000.0, 0.0, duration)
+		snapshot.duration = duration
+	return snapshot
+
+
+func request_rocket_board(boarding: bool) -> bool:
+	var requester := local_id()
+	if not active:
+		return _host_set_rocket_board(requester, boarding)
+	if is_host:
+		return _host_set_rocket_board(requester, boarding)
+	rpc_id(1, "srv_rocket_board", boarding)
+	return true
+
+
+@rpc("any_peer", "call_remote", "reliable", 0)
+func srv_rocket_board(boarding: bool) -> void:
+	var sender := multiplayer.get_remote_sender_id()
+	if _registered_peer(sender) and _allow_rate(sender, "rocket_board", 8):
+		_host_set_rocket_board(sender, boarding)
+
+
+func _host_set_rocket_board(peer_id: int, boarding: bool) -> bool:
+	if not _owns_expedition_authority() or not names.has(peer_id):
+		return false
+	var phase := int(rocket_state.get("phase",
+		RocketMissionPhase.EARTH_READY))
+	if phase not in [RocketMissionPhase.EARTH_READY,
+			RocketMissionPhase.MOON_READY]:
+		return false
+	var expected_realm := PlayerRealm.EARTH \
+		if phase == RocketMissionPhase.EARTH_READY else PlayerRealm.MOON
+	if player_realm(peer_id) != expected_realm:
+		return false
+	var crew: Array = rocket_state.get("crew", [])
+	var index := crew.find(peer_id)
+	if not boarding:
+		if index < 0:
+			return false
+		crew.remove_at(index)
+	elif index >= 0:
+		return true
+	else:
+		if crew.size() >= MAX_ROCKET_CREW \
+				or not _rocket_boarding_in_range(peer_id, expected_realm):
+			return false
+		crew.append(peer_id)
+	rocket_state.crew = crew
+	_broadcast_expedition_state()
+	return true
+
+
+func request_rocket_launch() -> bool:
+	var requester := local_id()
+	if not active:
+		return _host_start_rocket(requester)
+	if is_host:
+		return _host_start_rocket(requester)
+	rpc_id(1, "srv_rocket_launch")
+	return true
+
+
+@rpc("any_peer", "call_remote", "reliable", 0)
+func srv_rocket_launch() -> void:
+	var sender := multiplayer.get_remote_sender_id()
+	if _registered_peer(sender) and _allow_rate(sender, "rocket_launch", 2,
+			3000):
+		_host_start_rocket(sender)
+
+
+func _host_start_rocket(requester: int) -> bool:
+	if not _owns_expedition_authority():
+		return false
+	var crew: Array = rocket_state.get("crew", [])
+	var phase := int(rocket_state.get("phase",
+		RocketMissionPhase.EARTH_READY))
+	if crew.is_empty() or not crew.has(requester) \
+			or phase not in [RocketMissionPhase.EARTH_READY,
+				RocketMissionPhase.MOON_READY]:
+		return false
+	var next_phase := RocketMissionPhase.OUTBOUND \
+		if phase == RocketMissionPhase.EARTH_READY else RocketMissionPhase.RETURN
+	for peer_value in crew:
+		var peer_id := int(peer_value)
+		_clear_peer_realm_position(peer_id)
+		player_realms[peer_id] = PlayerRealm.TRANSIT
+		player_realm_changed.emit(peer_id, PlayerRealm.TRANSIT)
+	rocket_state.phase = next_phase
+	rocket_state.elapsed = 0.0
+	rocket_state.duration = ROCKET_OUTBOUND_SECONDS \
+		if next_phase == RocketMissionPhase.OUTBOUND else ROCKET_RETURN_SECONDS
+	rocket_state.serial = int(rocket_state.get("serial", 0)) + 1
+	_rocket_started_msec = Time.get_ticks_msec()
+	_rocket_sync_remaining = 0.0
+	_broadcast_expedition_state()
+	return true
+
+
+func _complete_rocket_voyage(completed_phase: int) -> void:
+	var crew: Array = rocket_state.get("crew", []).duplicate()
+	var outbound_arrival := completed_phase == RocketMissionPhase.OUTBOUND
+	var destination := PlayerRealm.MOON if outbound_arrival else PlayerRealm.EARTH
+	for peer_value in crew:
+		var peer_id := int(peer_value)
+		if names.has(peer_id):
+			_clear_peer_realm_position(peer_id)
+			player_realms[peer_id] = destination
+			player_realm_changed.emit(peer_id, destination)
+	rocket_state.elapsed = 0.0
+	if outbound_arrival:
+		rocket_state.crew = []
+		rocket_state.phase = RocketMissionPhase.MOON_READY
+		rocket_state.duration = 0.0
+		_rocket_started_msec = 0
+	else:
+		# Splashdown is a shared mission phase, not a per-client visual delay. Keeping
+		# its clock authoritative makes the ocean pose and boarding lock identical for
+		# existing peers, late joiners, and the dedicated server. Retain the recovery
+		# manifest until the clock ends so every peer knows exactly which actors must
+		# stay in the capsule and return to the launch pad.
+		rocket_state.phase = RocketMissionPhase.SPLASHDOWN_RECOVERY
+		rocket_state.duration = ROCKET_RECOVERY_SECONDS
+		_rocket_started_msec = Time.get_ticks_msec()
+	_rocket_sync_remaining = 0.0
+	_broadcast_expedition_state()
+
+
+func _complete_splashdown_recovery() -> void:
+	if int(rocket_state.get("phase", RocketMissionPhase.EARTH_READY)) \
+			!= RocketMissionPhase.SPLASHDOWN_RECOVERY:
+		return
+	rocket_state.phase = RocketMissionPhase.EARTH_READY
+	rocket_state.crew = []
+	rocket_state.elapsed = 0.0
+	rocket_state.duration = 0.0
+	_rocket_started_msec = 0
+	_rocket_sync_remaining = 0.0
+	_broadcast_expedition_state()
+
+
+func _remove_peer_from_rocket(peer_id: int) -> void:
+	var crew: Array = rocket_state.get("crew", [])
+	var index := crew.find(peer_id)
+	if index >= 0:
+		crew.remove_at(index)
+		rocket_state.crew = crew
+	# A voyage without passengers is not a valid replicated state and has no
+	# actor left to complete it. Return the craft to the world it departed from
+	# immediately so disconnecting or admin-moving the final crew member cannot
+	# strand the global mission clock for another three minutes.
+	if crew.is_empty():
+		var phase := int(rocket_state.get("phase",
+			RocketMissionPhase.EARTH_READY))
+		if phase in [RocketMissionPhase.OUTBOUND, RocketMissionPhase.RETURN]:
+			rocket_state.phase = RocketMissionPhase.EARTH_READY \
+				if phase == RocketMissionPhase.OUTBOUND \
+				else RocketMissionPhase.MOON_READY
+			rocket_state.elapsed = 0.0
+			rocket_state.duration = 0.0
+			_rocket_started_msec = 0
+			_rocket_sync_remaining = 0.0
+
+
+func _rocket_boarding_in_range(peer_id: int, realm: int) -> bool:
+	# The local listen-host/offline player already passes the physical interaction
+	# check in ExpeditionManager. Remote clients must also be near the trusted
+	# deterministic launch or lunar landing position on the authority.
+	if peer_id == local_id() and not is_dedicated:
+		return true
+	if not _peer_on_foot_position_in_realm(peer_id, realm) \
+			or _peer_has_vehicle_claim(peer_id):
+		return false
+	var actor_position: Vector3 = _peer_on_foot_positions[peer_id]
+	var rocket_position := _earth_rocket_position() if realm == PlayerRealm.EARTH \
+		else Vector3(-54.0, MOON_WORLD_ORIGIN_Y + 2.0, 42.0)
+	return _realm_distance(actor_position, rocket_position, realm) <= 16.0
+
+
+func _earth_rocket_position() -> Vector3:
+	if Gen.has_method("rocket_launch_position"):
+		var generated: Variant = Gen.call("rocket_launch_position")
+		if generated is Vector3 and _finite_vec(generated):
+			return generated
+	var xz := Vector2(92.0, 76.0)
+	return Vector3(xz.x, Gen.height(xz.x, xz.y) + 2.0, xz.y)
+
+
+func _broadcast_expedition_state() -> void:
+	var snapshot := expedition_state_snapshot()
+	expedition_state_changed.emit(snapshot)
+	if active and is_host and multiplayer.multiplayer_peer:
+		rpc("cl_expedition_state", snapshot, player_realms)
+
+
+@rpc("authority", "call_remote", "reliable", 0)
+func cl_expedition_state(state: Dictionary, realms: Dictionary) -> void:
+	if not active or is_host:
+		return
+	# Publish the new mission snapshot only after realm signals, but install it
+	# first. Realm handlers can therefore distinguish a natural RETURN ->
+	# SPLASHDOWN_RECOVERY arrival (manifest still contains the passenger) from an
+	# admin extraction (RETURN manifest no longer contains it), while the final
+	# expedition signal reapplies the correct cabin lock after the realm change.
+	if not _valid_expedition_state(state):
+		return
+	rocket_state = state.duplicate(true)
+	for peer_value in realms:
+		var peer_id := int(peer_value)
+		var realm := int(realms[peer_value])
+		if names.has(peer_id) and _valid_player_realm(realm):
+			var changed := player_realm(peer_id) != realm
+			player_realms[peer_id] = realm
+			if changed:
+				player_realm_changed.emit(peer_id, realm)
+	expedition_state_changed.emit(expedition_state_snapshot())
+
+
+func _apply_expedition_state(state: Dictionary) -> bool:
+	if not _valid_expedition_state(state):
+		return false
+	rocket_state = state.duplicate(true)
+	expedition_state_changed.emit(expedition_state_snapshot())
+	return true
+
+
+func _valid_expedition_state(state: Dictionary) -> bool:
+	var allowed := ["phase", "crew", "elapsed", "duration", "serial"]
+	if state.size() != allowed.size():
+		return false
+	for key in state:
+		if not allowed.has(str(key)):
+			return false
+	var phase: Variant = state.get("phase")
+	var crew_value: Variant = state.get("crew")
+	var elapsed: Variant = state.get("elapsed")
+	var duration: Variant = state.get("duration")
+	var serial: Variant = state.get("serial")
+	if not (phase is int) or int(phase) < RocketMissionPhase.EARTH_READY \
+			or int(phase) > RocketMissionPhase.SPLASHDOWN_RECOVERY \
+			or not (crew_value is Array) or crew_value.size() > MAX_ROCKET_CREW \
+			or not (elapsed is float or elapsed is int) \
+			or not (duration is float or duration is int) or not (serial is int) \
+			or int(serial) < 0 or not is_finite(float(elapsed)) \
+			or not is_finite(float(duration)) or float(elapsed) < 0.0 \
+			or float(duration) < 0.0 or float(elapsed) > ROCKET_OUTBOUND_SECONDS \
+			or float(duration) > ROCKET_OUTBOUND_SECONDS:
+		return false
+	var phase_value := int(phase)
+	var elapsed_value := float(elapsed)
+	var duration_value := float(duration)
+	match phase_value:
+		RocketMissionPhase.EARTH_READY, RocketMissionPhase.MOON_READY:
+			if absf(elapsed_value) > 0.001 or absf(duration_value) > 0.001:
+				return false
+		RocketMissionPhase.OUTBOUND:
+			if crew_value.is_empty() \
+					or absf(duration_value - ROCKET_OUTBOUND_SECONDS) > 0.001 \
+					or elapsed_value > ROCKET_OUTBOUND_SECONDS:
+				return false
+		RocketMissionPhase.RETURN:
+			if crew_value.is_empty() \
+					or absf(duration_value - ROCKET_RETURN_SECONDS) > 0.001 \
+					or elapsed_value > ROCKET_RETURN_SECONDS:
+				return false
+		RocketMissionPhase.SPLASHDOWN_RECOVERY:
+			# Recovery may retain up to four arriving passengers. Disconnect/admin
+			# removal can legitimately shrink it to zero before the timer completes.
+			if absf(duration_value - ROCKET_RECOVERY_SECONDS) > 0.001 \
+					or elapsed_value > ROCKET_RECOVERY_SECONDS:
+				return false
+	var seen := {}
+	for peer_value in crew_value:
+		if not (peer_value is int) or int(peer_value) <= 0 \
+				or seen.has(int(peer_value)):
+			return false
+		seen[int(peer_value)] = true
+	return true
+
+
+func _valid_player_realm(realm: int) -> bool:
+	return realm >= PlayerRealm.EARTH and realm <= PlayerRealm.MOON
+
+
+func request_moon_cheese(quantity := 1) -> bool:
+	quantity = clampi(quantity, 1, MAX_MOON_CHEESE_QUANTITY)
+	var requester := local_id()
+	if not active:
+		return _host_purchase_moon_cheese(requester, quantity)
+	if is_host:
+		return _host_purchase_moon_cheese(requester, quantity)
+	rpc_id(1, "srv_moon_cheese", quantity)
+	return true
+
+
+@rpc("any_peer", "call_remote", "reliable", 0)
+func srv_moon_cheese(quantity: int) -> void:
+	var sender := multiplayer.get_remote_sender_id()
+	if _registered_peer(sender) and _allow_rate(sender, "moon_cheese", 5):
+		_host_purchase_moon_cheese(sender, quantity)
+
+
+func _host_purchase_moon_cheese(peer_id: int, quantity: int) -> bool:
+	if not _owns_expedition_authority() or not names.has(peer_id) \
+			or player_realm(peer_id) != PlayerRealm.MOON \
+			or quantity < 1 or quantity > MAX_MOON_CHEESE_QUANTITY:
+		_send_moon_cheese_result(peer_id, quantity, false,
+			"Moon cheese is sold only at the lunar shop.")
+		return false
+	# Listen-host/offline input is already physically checked by the local shop
+	# UI and belongs to the authority. Every remote buyer must also be beside the
+	# deterministic kiosk according to their latest authority-accepted on-foot
+	# state, preventing a modified client from buying anywhere on the Moon.
+	if (peer_id != local_id() or is_dedicated) \
+			and not _moon_cheese_purchase_in_range(peer_id):
+		_send_moon_cheese_result(peer_id, quantity, false,
+			"Walk up to the Crater & Curd counter to trade.")
+		return false
+	var cost := quantity * MOON_CHEESE_PRICE
+	var balance := int(scores.get(peer_id, 0))
+	if balance < cost:
+		_send_moon_cheese_result(peer_id, quantity, false,
+			"Not enough bananas.")
+		return false
+	scores[peer_id] = balance - cost
+	score_changed.emit()
+	roster_changed.emit()
+	if active and is_host and multiplayer.multiplayer_peer:
+		rpc("cl_roster", names, scores)
+	_send_moon_cheese_result(peer_id, quantity, true, "")
+	return true
+
+
+func _moon_cheese_purchase_in_range(peer_id: int) -> bool:
+	if not _peer_on_foot_position_in_realm(peer_id, PlayerRealm.MOON) \
+			or _peer_has_vehicle_claim(peer_id):
+		return false
+	var actor_position: Vector3 = _peer_on_foot_positions[peer_id]
+	return actor_position.distance_to(MOON_CHEESE_SHOP_POSITION) \
+		<= MOON_CHEESE_SHOP_RANGE
+
+
+func _send_moon_cheese_result(peer_id: int, quantity: int, accepted: bool,
+		reason: String) -> void:
+	var balance := int(scores.get(peer_id, 0))
+	if peer_id == local_id() and not is_dedicated:
+		moon_cheese_purchase_result.emit(quantity, accepted, balance, reason)
+	elif active and is_host and _registered_peer(peer_id):
+		rpc_id(peer_id, "cl_moon_cheese_result", quantity, accepted, balance,
+			reason.left(120))
+
+
+@rpc("authority", "call_remote", "reliable", 0)
+func cl_moon_cheese_result(quantity: int, accepted: bool, new_balance: int,
+		reason: String) -> void:
+	if quantity < 1 or quantity > MAX_MOON_CHEESE_QUANTITY \
+			or new_balance < 0:
+		return
+	moon_cheese_purchase_result.emit(quantity, accepted, new_balance,
+		_sanitize_chat(reason).left(120))
 
 
 # ---- movement --------------------------------------------------------------
@@ -1114,7 +1595,7 @@ func srv_state(pos: Vector3, yaw: float, vel: Vector3, anim: int,
 	var authorized_flying := _server_authorized_flying(sender, flying)
 	if not _registered_peer(sender) \
 			or not _allow_rate(sender, "state", MAX_STATE_PACKETS_PER_SECOND) \
-			or not _valid_state(pos, yaw, vel, anim,
+			or not _valid_state_for_peer(sender, pos, yaw, vel, anim,
 			swinging, anchor, rope_tail, wraps, weapon_kind, weapon_ammo,
 			healing_progress, vehicle_kind, vehicle_id, vehicle_aux,
 			authorized_flying) \
@@ -1140,7 +1621,7 @@ func cl_state(id: int, pos: Vector3, yaw: float, vel: Vector3, anim: int,
 		vehicle_id := "", vehicle_aux := Vector3.ZERO) -> void:
 	if id == local_id() or not names.has(id):
 		return
-	if not _valid_state(pos, yaw, vel, anim, swinging, anchor, rope_tail,
+	if not _valid_state_for_peer(id, pos, yaw, vel, anim, swinging, anchor, rope_tail,
 			wraps, weapon_kind, weapon_ammo, healing_progress, vehicle_kind,
 			vehicle_id, vehicle_aux, flying):
 		return
@@ -1430,6 +1911,10 @@ func _host_claim_vehicle(vehicle_id: String, claimant_id: int) -> bool:
 				int(claimed_vehicles[vehicle_id]))
 		return false
 	claimed_vehicles[vehicle_id] = claimant_id
+	# A claimed driver is no longer an on-foot proximity authority. Keeping the
+	# old entry would let a modified client board the rocket or trade from the
+	# stale place where it entered the vehicle.
+	_peer_on_foot_positions.erase(claimant_id)
 	vehicle_rests.erase(vehicle_id)
 	vehicle_claimed.emit(vehicle_id, claimant_id)
 	rpc("cl_vehicle_claimed", vehicle_id, claimant_id)
@@ -1445,7 +1930,8 @@ func _host_release_vehicle(vehicle_id: String, releasing_id: int,
 	if not _valid_vehicle_rest(rest):
 		rest = []
 	elif releasing_id != local_id() \
-			and not _valid_vehicle_release_position(vehicle_id, rest[0]):
+			and not _valid_vehicle_release_position(vehicle_id, rest[0],
+				player_realm(releasing_id)):
 		rest = []
 	claimed_vehicles.erase(vehicle_id)
 	if not rest.is_empty():
@@ -1459,7 +1945,7 @@ func _host_release_vehicle(vehicle_id: String, releasing_id: int,
 ## The host clears every vehicle a disconnecting driver still held so the
 ## machine is not locked forever where they dropped.
 func _release_vehicles_of_peer(id: int) -> void:
-	if not is_host:
+	if active and not is_host:
 		return
 	var held: Array = []
 	for vid in claimed_vehicles:
@@ -1468,35 +1954,61 @@ func _release_vehicles_of_peer(id: int) -> void:
 	for vid in held:
 		claimed_vehicles.erase(vid)
 		vehicle_released.emit(vid, [])
-		rpc("cl_vehicle_released", vid, [])
+		if active and multiplayer.multiplayer_peer:
+			rpc("cl_vehicle_released", vid, [])
 
 
 func _vehicle_claim_in_range(claimant_id: int, vehicle_id: String) -> bool:
-	if not _peer_on_foot_positions.has(claimant_id) \
+	var realm := player_realm(claimant_id)
+	if not _peer_on_foot_position_in_realm(claimant_id, realm) \
 			or not _vehicle_positions.has(vehicle_id):
 		return false
-	var claimant_position: Variant = _peer_on_foot_positions[claimant_id]
+	var claimant_position: Vector3 = _peer_on_foot_positions[claimant_id]
 	var vehicle_position: Variant = _vehicle_positions[vehicle_id]
-	return claimant_position is Vector3 and vehicle_position is Vector3 \
-		and claimant_position.distance_to(vehicle_position) \
+	return vehicle_position is Vector3 \
+		and _position_matches_realm(vehicle_position, realm) \
+		and _realm_distance(claimant_position, vehicle_position, realm) \
 			<= VEHICLE_CLAIM_DISTANCE
 
 
 func _remember_authoritative_state_position(peer_id: int, position: Vector3,
 		vehicle_kind: int, vehicle_id: String) -> void:
+	if not _position_matches_player_realm(peer_id, position):
+		return
 	if vehicle_kind == -1:
 		_peer_on_foot_positions[peer_id] = position
 	elif _valid_vehicle_kind(vehicle_kind) and _valid_vehicle_id(vehicle_id):
 		_vehicle_positions[vehicle_id] = position
 
 
+func _clear_peer_realm_position(peer_id: int) -> void:
+	_peer_on_foot_positions.erase(peer_id)
+
+
+func _peer_has_vehicle_claim(peer_id: int) -> bool:
+	for vehicle_id in claimed_vehicles:
+		if int(claimed_vehicles[vehicle_id]) == peer_id:
+			return true
+	return false
+
+
+func _peer_on_foot_position_in_realm(peer_id: int, realm: int) -> bool:
+	if player_realm(peer_id) != realm \
+			or realm == PlayerRealm.TRANSIT \
+			or not _peer_on_foot_positions.has(peer_id):
+		return false
+	var position: Variant = _peer_on_foot_positions[peer_id]
+	return position is Vector3 and _finite_vec(position) \
+		and not _outside_world(position) and _position_matches_realm(position, realm)
+
+
 func _valid_vehicle_release_position(vehicle_id: String,
-		release_position: Vector3) -> bool:
+		release_position: Vector3, realm: int) -> bool:
 	if not _vehicle_positions.has(vehicle_id):
 		return false
 	var last_position: Variant = _vehicle_positions[vehicle_id]
 	return last_position is Vector3 \
-		and last_position.distance_to(release_position) \
+		and _realm_distance(last_position, release_position, realm) \
 			<= VEHICLE_RELEASE_POSITION_TOLERANCE
 
 
@@ -1507,7 +2019,8 @@ func _remember_vehicle_release_handoff(peer_id: int, vehicle_id: String,
 		rest: Array) -> void:
 	var handoff_position: Variant = rest[0] if not rest.is_empty() \
 		else _vehicle_positions.get(vehicle_id)
-	if handoff_position is Vector3:
+	if handoff_position is Vector3 \
+			and _position_matches_realm(handoff_position, player_realm(peer_id)):
 		_peer_on_foot_positions[peer_id] = handoff_position
 
 
@@ -1670,10 +2183,11 @@ func srv_fire_bullet(origin: Vector3, velocity: Vector3, play_fx: bool,
 		weapon_kind: int) -> void:
 	var sender := multiplayer.get_remote_sender_id()
 	if not _registered_peer(sender) or not _allow_rate(sender, "bullet", 80) \
-			or not _valid_bullet(origin, velocity, weapon_kind):
+			or not _valid_bullet(origin, velocity, weapon_kind) \
+			or not _valid_combat_origin(sender, origin):
 		return
 	var canonical := _weapon_rules(weapon_kind)
-	if not is_dedicated:
+	if not is_dedicated and _can_relay_combat_between(sender, local_id()):
 		bullet_fired.emit(sender, origin, velocity, canonical.damage,
 			canonical.headshot, play_fx, weapon_kind)
 	_relay_bullet(sender, origin, velocity, play_fx, weapon_kind)
@@ -1682,7 +2196,8 @@ func srv_fire_bullet(origin: Vector3, velocity: Vector3, play_fx: bool,
 func _relay_bullet(sender: int, origin: Vector3, velocity: Vector3,
 		play_fx: bool, weapon_kind: int) -> void:
 	for peer_id in names:
-		if peer_id != 1 and peer_id != sender:
+		if peer_id != 1 and peer_id != sender \
+				and _can_relay_combat_between(sender, int(peer_id)):
 			rpc_id(peer_id, "cl_fire_bullet", sender, origin, velocity, play_fx,
 				weapon_kind)
 
@@ -1691,6 +2206,9 @@ func _relay_bullet(sender: int, origin: Vector3, velocity: Vector3,
 func cl_fire_bullet(shooter_id: int, origin: Vector3, velocity: Vector3,
 		play_fx: bool, weapon_kind: int) -> void:
 	if not names.has(shooter_id) or not _valid_bullet(origin, velocity, weapon_kind):
+		return
+	if not _can_relay_combat_between(shooter_id, local_id()) \
+			or not _position_matches_player_realm(shooter_id, origin):
 		return
 	var canonical := _weapon_rules(weapon_kind)
 	bullet_fired.emit(shooter_id, origin, velocity, canonical.damage,
@@ -1712,10 +2230,11 @@ func melee_attack(origin: Vector3, direction: Vector3, combo: int) -> void:
 func srv_melee_attack(origin: Vector3, direction: Vector3, combo: int) -> void:
 	var sender := multiplayer.get_remote_sender_id()
 	if not _registered_peer(sender) or not _allow_rate(sender, "melee", 8) \
-			or not _valid_melee(origin, direction, combo):
+			or not _valid_melee(origin, direction, combo) \
+			or not _valid_combat_origin(sender, origin):
 		return
 	var normalized := direction.normalized()
-	if not is_dedicated:
+	if not is_dedicated and _can_relay_combat_between(sender, local_id()):
 		melee_swung.emit(sender, origin, normalized, combo)
 	_relay_melee(sender, origin, normalized, combo)
 
@@ -1723,14 +2242,17 @@ func srv_melee_attack(origin: Vector3, direction: Vector3, combo: int) -> void:
 func _relay_melee(sender: int, origin: Vector3, direction: Vector3,
 		combo: int) -> void:
 	for peer_id in names:
-		if peer_id != 1 and peer_id != sender:
+		if peer_id != 1 and peer_id != sender \
+				and _can_relay_combat_between(sender, int(peer_id)):
 			rpc_id(peer_id, "cl_melee_attack", sender, origin, direction, combo)
 
 
 @rpc("authority", "call_remote", "reliable", 0)
 func cl_melee_attack(shooter_id: int, origin: Vector3, direction: Vector3,
 		combo: int) -> void:
-	if names.has(shooter_id) and _valid_melee(origin, direction, combo):
+	if names.has(shooter_id) and _valid_melee(origin, direction, combo) \
+			and _can_relay_combat_between(shooter_id, local_id()) \
+			and _position_matches_player_realm(shooter_id, origin):
 		melee_swung.emit(shooter_id, origin, direction.normalized(), combo)
 
 
@@ -1890,6 +2412,17 @@ func admin_command(action: String, args: Dictionary) -> void:
 	if not is_admin or not _valid_admin_envelope(action, args):
 		return
 	if not active:
+		if action == "travel_realm":
+			var target := int(args.get("target", local_id()))
+			var realm := int(args.get("realm", PlayerRealm.EARTH))
+			if names.has(target) and realm in [PlayerRealm.EARTH,
+					PlayerRealm.MOON]:
+				_remove_peer_from_rocket(target)
+				_release_vehicles_of_peer(target)
+				_clear_peer_realm_position(target)
+				player_realms[target] = realm
+				player_realm_changed.emit(target, realm)
+				_broadcast_expedition_state()
 		admin_action.emit(action, args)
 		return
 	if is_host:
@@ -1924,6 +2457,23 @@ func _host_admin(sender: int, action: String, args: Dictionary) -> void:
 			if _set_shared_cycle_hour(server_hour):
 				_notify_admin_requester(sender,
 					"Shared clock returned to the server's local cycle.")
+		"travel_realm":
+			var realm := int(args.get("realm", PlayerRealm.EARTH))
+			if names.has(target) and realm in [PlayerRealm.EARTH,
+					PlayerRealm.MOON]:
+				_remove_peer_from_rocket(target)
+				_release_vehicles_of_peer(target)
+				_clear_peer_realm_position(target)
+				player_realms[target] = realm
+				player_realm_changed.emit(target, realm)
+				if target == local_id() and not is_dedicated:
+					admin_action.emit(action, args)
+				else:
+					rpc_id(target, "cl_admin_apply", action, args)
+				_broadcast_expedition_state()
+				_notify_admin_requester(sender, "%s sent to %s." % [
+					str(names.get(target, "Monkey")),
+					"the Moon" if realm == PlayerRealm.MOON else "Earth"])
 		"grant_admin", "revoke_admin":
 			var target_name := str(names.get(target, "that player"))
 			var enabled := action == "grant_admin"
@@ -2154,6 +2704,10 @@ func _valid_admin_envelope(action: String, args: Dictionary) -> bool:
 			var position: Variant = args.get("position")
 			return _valid_admin_target_arg(args) and position is Vector3 \
 				and _finite_vec(position) and not _outside_world(position)
+		"travel_realm":
+			return args.size() == 2 and _valid_admin_target_arg(args) \
+				and args.get("realm") is int \
+				and int(args.realm) in [PlayerRealm.EARTH, PlayerRealm.MOON]
 		"grant_admin", "revoke_admin", "kill", "heal":
 			return args.size() == 1 and _valid_admin_target_arg(args)
 	return false
@@ -2183,6 +2737,60 @@ func _sanitize_name(value: String, id: int) -> String:
 		cleaned = cleaned.replace("  ", " ")
 	cleaned = cleaned.substr(0, MAX_NAME_LENGTH).strip_edges()
 	return cleaned if not cleaned.is_empty() else "Monkey-%d" % maxi(id, 1)
+
+
+## Packet-shape validation alone cannot decide which physical world a position
+## belongs to. The authority additionally binds every accepted spatial field to
+## its sender's current realm and treats TRANSIT as a server-driven state.
+func _valid_state_for_peer(peer_id: int, pos: Vector3, yaw: float,
+		vel: Vector3, anim: int, swinging: bool, anchor: Vector3,
+		rope_tail: float, wraps: PackedVector3Array, weapon_kind: int,
+		weapon_ammo: int, healing_progress: float, vehicle_kind := -1,
+		vehicle_id := "", vehicle_aux := Vector3.ZERO, flying := false) -> bool:
+	return _valid_state(pos, yaw, vel, anim, swinging, anchor, rope_tail, wraps,
+		weapon_kind, weapon_ammo, healing_progress, vehicle_kind, vehicle_id,
+		vehicle_aux, flying) and _state_spatial_payload_matches_realm(peer_id,
+		pos, swinging, anchor, wraps)
+
+
+func _state_spatial_payload_matches_realm(peer_id: int, pos: Vector3,
+		swinging: bool, anchor: Vector3, wraps: PackedVector3Array) -> bool:
+	var realm := player_realm(peer_id)
+	if not _position_matches_realm(pos, realm):
+		return false
+	if swinging and not _position_matches_realm(anchor, realm):
+		return false
+	for point in wraps:
+		if not _position_matches_realm(point, realm):
+			return false
+	return true
+
+
+func _position_matches_player_realm(peer_id: int, position: Vector3) -> bool:
+	return names.has(peer_id) \
+		and _position_matches_realm(position, player_realm(peer_id))
+
+
+func _position_matches_realm(position: Vector3, realm: int) -> bool:
+	if not _finite_vec(position) or _outside_world(position):
+		return false
+	match realm:
+		PlayerRealm.EARTH:
+			return position.y < MOON_REALM_MIN_Y
+		PlayerRealm.MOON:
+			return position.y >= MOON_REALM_MIN_Y
+	return false
+
+
+func _realm_distance(a: Vector3, b: Vector3, realm: int) -> float:
+	if realm != PlayerRealm.EARTH:
+		return a.distance_to(b)
+	# Across the longitude seam, two Earth points can be physically adjacent but
+	# use chart coordinates one circumference apart. Compare the nearest image so
+	# legitimate muzzle/proximity checks remain seamless at the wrap boundary.
+	var nearest_xz: Vector2 = Gen.nearest_world_image(Vector2(a.x, a.z),
+		Vector2(b.x, b.z))
+	return Vector3(nearest_xz.x, a.y, nearest_xz.y).distance_to(b)
 
 
 func _valid_state(pos: Vector3, yaw: float, vel: Vector3, anim: int,
@@ -2339,6 +2947,39 @@ func _valid_vine_release(id: String, hand: Vector3, velocity: Vector3,
 		if not _finite_vec(point) or _outside_world(point):
 			return false
 	return true
+
+
+func _can_relay_combat_between(sender: int, recipient: int) -> bool:
+	if sender == recipient or not names.has(sender) or not names.has(recipient):
+		return false
+	var sender_realm := player_realm(sender)
+	return sender_realm != PlayerRealm.TRANSIT \
+		and sender_realm == player_realm(recipient)
+
+
+## Remote clients author aim, not arbitrary weapon origins. A shot or melee
+## swing must originate beside the sender's most recent authority-accepted body
+## (or claimed vehicle), and both coordinates must belong to the same realm.
+func _valid_combat_origin(sender: int, origin: Vector3) -> bool:
+	if not names.has(sender) or not _position_matches_player_realm(sender, origin):
+		return false
+	var realm := player_realm(sender)
+	var has_vehicle := false
+	for vehicle_id in claimed_vehicles:
+		if int(claimed_vehicles[vehicle_id]) != sender:
+			continue
+		has_vehicle = true
+		var vehicle_position: Variant = _vehicle_positions.get(vehicle_id)
+		if vehicle_position is Vector3 \
+				and _position_matches_realm(vehicle_position, realm) \
+				and _realm_distance(origin, vehicle_position, realm) \
+					<= MAX_COMBAT_ORIGIN_DISTANCE:
+			return true
+	if has_vehicle or not _peer_on_foot_position_in_realm(sender, realm):
+		return false
+	var actor_position: Vector3 = _peer_on_foot_positions[sender]
+	return _realm_distance(origin, actor_position, realm) \
+		<= MAX_COMBAT_ORIGIN_DISTANCE
 
 
 func _valid_bullet(origin: Vector3, velocity: Vector3, weapon_kind: int) -> bool:

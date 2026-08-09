@@ -226,14 +226,14 @@ func run(main) -> void:
 		airfield_jet_defs.size() == 6 and airfield_jet_ids.size() == 6
 		and every_jet_parked_inside)
 	# Exercise the actual chunk constructor for every owning hangar and jet chunk,
-	# not just the pure layouts. Far chunks omit collision until approached, but
-	# they synchronously publish all visible bay models and world-level vehicles.
+	# not just the pure layouts. Runtime streaming intentionally stages details;
+	# the explicit warm path completes those bounded jobs for this deterministic
+	# fixture before it inspects the visible models.
 	var airfield_stream_chunks := hangar_chunks.duplicate()
 	for airfield_chunk in airfield_vehicle_chunks:
 		airfield_stream_chunks[airfield_chunk] = true
 	for airfield_chunk in airfield_stream_chunks:
-		if not w.chunks.has(airfield_chunk):
-			w.call("_build_chunk", airfield_chunk, false)
+		w.call("_warm_chunk", airfield_chunk, false)
 	var streamed_hangar_count := 0
 	var all_hangar_shells_approach_visible := true
 	for airfield_chunk in hangar_chunks:

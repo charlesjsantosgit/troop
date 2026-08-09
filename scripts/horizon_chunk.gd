@@ -48,9 +48,10 @@ func _build_terrain_and_water() -> void:
 		for ix in range(cells + 1):
 			var x := x0 + float(ix) * step
 			var z := z0 + float(iz) * step
-			var h := Gen.height(x, z)
+			var visual := Gen.terrain_vertex_sample(x, z)
+			var h := float(visual.elevation)
 			heights[iz * (cells + 1) + ix] = h
-			terrain.set_color(Gen.ground_color(h, x, z))
+			terrain.set_color(visual.color)
 			terrain.add_vertex(Vector3(x - position.x, h, z - position.z))
 	for iz in range(cells):
 		for ix in range(cells):

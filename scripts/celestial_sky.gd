@@ -8,7 +8,7 @@ const ATLAS_WIDTH := 1024
 const ATLAS_HEIGHT := 1024
 const RANDOM_STAR_COUNT := 900
 const PLANET_COUNT := 4
-const MOON_DIAMETER_DEGREES := 1.1
+const MOON_DIAMETER_DEGREES := 1.45
 const MOON_CRATER_COUNT := 7
 # The prior shader's half-opacity contour was the midpoint of its two cosine
 # thresholds, which resolves to 0.635338416 degrees rather than its rounded

@@ -47,7 +47,7 @@ void fragment() {
 	// winter hills clip into one featureless value under the noon sun.
 	// Permanent altitude snow joins seasonal snow: peaks stay white all year,
 	// matching the rock/snow bands the vertex tint already carries.
-	float alt_snow = smoothstep(26.0, 40.0, world_pos.y);
+	float alt_snow = smoothstep(3000.0, 4300.0, world_pos.y);
 	float snow = max(snow_amount * smoothstep(0.28, 0.72, world_normal.y),
 		alt_snow * smoothstep(0.20, 0.65, world_normal.y))
 		* mix(0.70, 0.92, fine);
@@ -239,7 +239,7 @@ void fragment() {
 	if (hash21(floor(world_pos.xz * 0.36)) > coverage) { discard; }
 	vec3 ground = vertex_tint.rgb * 0.84;
 	float snow_noise = hash21(floor(world_pos.xz * 0.12));
-	float alt_snow = smoothstep(26.0, 40.0, world_pos.y);
+	float alt_snow = smoothstep(3000.0, 4300.0, world_pos.y);
 	float snow = max(snow_amount, alt_snow) * mix(0.68, 0.90, snow_noise);
 	vec3 snow_color = vec3(0.68, 0.75, 0.81)
 		* mix(0.90, 1.07, snow_noise);
@@ -289,7 +289,7 @@ void fragment() {
 	vec3 shaded = mix(ground, forest, canopy * 0.82);
 
 	float snow_noise = hash21(floor(world_pos.xz * 0.012));
-	float alt_snow = smoothstep(26.0, 40.0, world_pos.y);
+	float alt_snow = smoothstep(3000.0, 4300.0, world_pos.y);
 	float snow = max(snow_amount, alt_snow) * mix(0.68, 0.90, snow_noise);
 	vec3 snow_color = vec3(0.68, 0.75, 0.81) * mix(0.90, 1.07, snow_noise);
 	ALBEDO = mix(shaded, snow_color, snow);
@@ -592,7 +592,7 @@ void fragment() {
 	vec3 stone = mix(vec3(0.32, 0.39, 0.36), vec3(0.58, 0.62, 0.55), grain * 0.65 + bands * 0.18);
 	float moss = smoothstep(0.45, 0.82, world_normal.y) * hash31(floor(world_pos * 0.7));
 	vec3 rock = mix(stone, vec3(0.20, 0.40, 0.13), moss * 0.52);
-	float alt_snow = smoothstep(26.0, 40.0, world_pos.y);
+	float alt_snow = smoothstep(3000.0, 4300.0, world_pos.y);
 	float snow = max(snow_amount, alt_snow)
 		* smoothstep(0.38, 0.78, world_normal.y)
 		* smoothstep(0.18, 0.90, grain);

@@ -36,7 +36,8 @@ func _build_terrain() -> void:
 		for ix in range(CELLS + 1):
 			var x := x0 + float(ix) * step
 			var z := z0 + float(iz) * step
-			var h := Gen.height(x, z)
+			var visual := Gen.stratos_visual_sample(x, z)
+			var h := float(visual.elevation)
 			if h < Gen.WATER_Y:
 				# Flatten submerged vertices to the waterline and tint them by
 				# depth: at multi-kilometre range a colored plane reads exactly
@@ -54,12 +55,10 @@ func _build_terrain() -> void:
 				# Tint and physically lift forested vertices. A few metres of
 				# deterministic cluster relief gives the 192 m lattice a broken
 				# crown line without allocating per-tree geometry across 24 km.
-				var ground := Gen.ground_color(h, x, z)
-				var cover := Gen.canopy_cover(h, x, z)
-				var relief := Gen.stratos_canopy_relief(cover, x, z)
+				var ground: Color = visual.color
+				var cover := float(visual.cover)
+				var relief := float(visual.relief)
 				if cover > 0.0:
-					ground = ground.lerp(Gen.canopy_color(x, z, h),
-						cover * 0.74)
 					canopy_vertex_count += 1
 					canopy_relief_max = maxf(canopy_relief_max, relief)
 				ground.a = cover
