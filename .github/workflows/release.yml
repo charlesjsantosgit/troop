@@ -92,6 +92,8 @@ jobs:
           "$GODOT_BIN" --headless --path . --script res://tests/voicetest.gd
           "$GODOT_BIN" --headless --path . --script res://tests/netsecuritytest.gd
           "$GODOT_BIN" --headless --path . res://scenes/main.tscn \
+            --quit-after 30000 -- wingtest
+          "$GODOT_BIN" --headless --path . res://scenes/main.tscn \
             --quit-after 30000 -- freefalltest
           "$GODOT_BIN" --headless --path . res://scenes/main.tscn \
             --quit-after 30000 -- generationtest

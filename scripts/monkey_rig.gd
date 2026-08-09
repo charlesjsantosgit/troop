@@ -23,6 +23,13 @@ const ROPE_TAIL_SEGMENTS := 6
 const ROPE_GRAVITY := Vector3(0, -20.0, 0)
 const ROPE_DAMPING := 0.992
 const LOCAL_BODY_VISUAL_LAYER := 1 << 1
+const ANGEL_FEATHER_LENGTH_SEGMENTS := 18
+const ANGEL_FEATHER_WIDTH_SEGMENTS := 8
+const ANGEL_FEATHER_TRIANGLES := ANGEL_FEATHER_LENGTH_SEGMENTS \
+	* ANGEL_FEATHER_WIDTH_SEGMENTS * 4 + ANGEL_FEATHER_LENGTH_SEGMENTS * 4 \
+	+ ANGEL_FEATHER_WIDTH_SEGMENTS * 4
+const ANGEL_WING_FEATHERS_PER_SIDE := 91
+const ANGEL_WING_RENDER_OBJECTS := 6
 
 const FURS := [Color(0.48, 0.31, 0.17), Color(0.36, 0.23, 0.12), Color(0.54, 0.5, 0.47),
 	Color(0.72, 0.54, 0.25), Color(0.23, 0.18, 0.14), Color(0.56, 0.35, 0.2)]
@@ -34,6 +41,8 @@ const SCARF_COLORS := [
 
 static var _winter_scarf_mesh: ArrayMesh
 static var _winter_scarf_materials: Dictionary = {}
+static var _angel_feather_mesh: ArrayMesh
+static var _angel_feather_material: StandardMaterial3D
 
 var yaw_node: Node3D
 var hips: Node3D
@@ -114,6 +123,13 @@ var _wings_active := false
 var _wing_unfold := 0.0
 var _wing_l: Node3D
 var _wing_r: Node3D
+var _wing_l_elbow: Node3D
+var _wing_r_elbow: Node3D
+var _wing_l_tip: Node3D
+var _wing_r_tip: Node3D
+var _wing_l_coverts: Node3D
+var _wing_r_coverts: Node3D
+var _wing_flap_phase := 0.0
 
 
 func setup(display_name: String, show_tag: bool) -> void:
@@ -732,7 +748,7 @@ func _rope_seg(a: Vector3, b: Vector3, w: float, ca: Color, cb: Color) -> void:
 ## gripping arms onto the rope when swinging.
 func update_motion(dt: float, anim: int, vel: Vector3, on_floor: bool, anchor: Vector3) -> void:
 	_t += dt
-	_update_angel_wings(dt)
+	_update_angel_wings(dt, vel)
 	if anim != _anim_prev:
 		if anim == Anim.SPRINT or _anim_prev == Anim.SPRINT:
 			_reset_gait_plants()
@@ -1971,53 +1987,348 @@ func has_angel_wings_visible() -> bool:
 	return _wing_l != null and _wing_unfold > 0.05
 
 
+## Stable inspection hooks for animation/visual acceptance tests.  The returned
+## shoulder, elbow and wrist nodes are the three independently posed segments;
+## callers never need to know how the batched feathers are packed below them.
+func angel_wing_articulation_nodes() -> Dictionary:
+	return {
+		"left": {"shoulder": _wing_l, "elbow": _wing_l_elbow,
+			"wrist": _wing_l_tip},
+		"right": {"shoulder": _wing_r, "elbow": _wing_r_elbow,
+			"wrist": _wing_r_tip},
+	}
+
+
+func angel_wing_detail_metrics() -> Dictionary:
+	return {
+		"feathers_per_side": ANGEL_WING_FEATHERS_PER_SIDE,
+		"total_feathers": ANGEL_WING_FEATHERS_PER_SIDE * 2,
+		"length_segments": ANGEL_FEATHER_LENGTH_SEGMENTS,
+		"width_segments": ANGEL_FEATHER_WIDTH_SEGMENTS,
+		"triangles_per_feather": ANGEL_FEATHER_TRIANGLES,
+		"instanced_triangles": ANGEL_FEATHER_TRIANGLES
+			* ANGEL_WING_FEATHERS_PER_SIDE * 2,
+		"render_objects": ANGEL_WING_RENDER_OBJECTS,
+	}
+
+
+## One shared feather carries the geometric detail for every visible barb.  The
+## wing uses MultiMeshes below, so a pair of 182-feather wings still needs only
+## six feather render objects and one resident high-resolution mesh.
+static func _shared_angel_feather_mesh() -> ArrayMesh:
+	if _angel_feather_mesh:
+		return _angel_feather_mesh
+	var surface := SurfaceTool.new()
+	surface.begin(Mesh.PRIMITIVE_TRIANGLES)
+	for i in range(ANGEL_FEATHER_LENGTH_SEGMENTS):
+		var t0 := float(i) / float(ANGEL_FEATHER_LENGTH_SEGMENTS)
+		var t1 := float(i + 1) / float(ANGEL_FEATHER_LENGTH_SEGMENTS)
+		for j in range(ANGEL_FEATHER_WIDTH_SEGMENTS):
+			var a0 := lerpf(-1.0, 1.0,
+				float(j) / float(ANGEL_FEATHER_WIDTH_SEGMENTS))
+			var a1 := lerpf(-1.0, 1.0,
+				float(j + 1) / float(ANGEL_FEATHER_WIDTH_SEGMENTS))
+			var top_00 := _angel_feather_point(t0, a0, true)
+			var top_01 := _angel_feather_point(t0, a1, true)
+			var top_10 := _angel_feather_point(t1, a0, true)
+			var top_11 := _angel_feather_point(t1, a1, true)
+			_angel_feather_triangle(surface,
+				top_00, Vector2((a0 + 1.0) * 0.5, t0),
+				top_01, Vector2((a1 + 1.0) * 0.5, t0),
+				top_11, Vector2((a1 + 1.0) * 0.5, t1), true)
+			_angel_feather_triangle(surface,
+				top_00, Vector2((a0 + 1.0) * 0.5, t0),
+				top_11, Vector2((a1 + 1.0) * 0.5, t1),
+				top_10, Vector2((a0 + 1.0) * 0.5, t1), true)
+			var bottom_00 := _angel_feather_point(t0, a0, false)
+			var bottom_01 := _angel_feather_point(t0, a1, false)
+			var bottom_10 := _angel_feather_point(t1, a0, false)
+			var bottom_11 := _angel_feather_point(t1, a1, false)
+			_angel_feather_triangle(surface,
+				bottom_00, Vector2((a0 + 1.0) * 0.5, t0),
+				bottom_11, Vector2((a1 + 1.0) * 0.5, t1),
+				bottom_01, Vector2((a1 + 1.0) * 0.5, t0), false)
+			_angel_feather_triangle(surface,
+				bottom_00, Vector2((a0 + 1.0) * 0.5, t0),
+				bottom_10, Vector2((a0 + 1.0) * 0.5, t1),
+				bottom_11, Vector2((a1 + 1.0) * 0.5, t1), false)
+	# Close both irregular vane edges and the quill/tip ends.  These thin side
+	# faces are what let the feathers keep a solid silhouette at grazing angles.
+	for i in range(ANGEL_FEATHER_LENGTH_SEGMENTS):
+		var t0 := float(i) / float(ANGEL_FEATHER_LENGTH_SEGMENTS)
+		var t1 := float(i + 1) / float(ANGEL_FEATHER_LENGTH_SEGMENTS)
+		for edge in [-1.0, 1.0]:
+			var edge_top_0 := _angel_feather_point(t0, edge, true)
+			var edge_top_1 := _angel_feather_point(t1, edge, true)
+			var edge_bottom_0 := _angel_feather_point(t0, edge, false)
+			var edge_bottom_1 := _angel_feather_point(t1, edge, false)
+			if edge < 0.0:
+				_angel_feather_triangle(surface, edge_top_0, Vector2(0, t0),
+					edge_top_1, Vector2(0, t1), edge_bottom_1,
+					Vector2(1, t1), true)
+				_angel_feather_triangle(surface, edge_top_0, Vector2(0, t0),
+					edge_bottom_1, Vector2(1, t1), edge_bottom_0,
+					Vector2(1, t0), false)
+			else:
+				_angel_feather_triangle(surface, edge_top_0, Vector2(0, t0),
+					edge_bottom_1, Vector2(1, t1), edge_top_1,
+					Vector2(0, t1), true)
+				_angel_feather_triangle(surface, edge_top_0, Vector2(0, t0),
+					edge_bottom_0, Vector2(1, t0), edge_bottom_1,
+					Vector2(1, t1), false)
+	for end_t in [0.0, 1.0]:
+		for j in range(ANGEL_FEATHER_WIDTH_SEGMENTS):
+			var a0 := lerpf(-1.0, 1.0,
+				float(j) / float(ANGEL_FEATHER_WIDTH_SEGMENTS))
+			var a1 := lerpf(-1.0, 1.0,
+				float(j + 1) / float(ANGEL_FEATHER_WIDTH_SEGMENTS))
+			var p_top_0 := _angel_feather_point(end_t, a0, true)
+			var p_top_1 := _angel_feather_point(end_t, a1, true)
+			var p_bottom_0 := _angel_feather_point(end_t, a0, false)
+			var p_bottom_1 := _angel_feather_point(end_t, a1, false)
+			if end_t < 0.5:
+				# Godot treats clockwise winding as front-facing.  The quill cap
+				# therefore uses the opposite order from the +Y distal cap.
+				_angel_feather_triangle(surface, p_top_0, Vector2(0, 0),
+					p_top_1, Vector2(1, 0), p_bottom_1,
+					Vector2(1, 1), true)
+				_angel_feather_triangle(surface, p_top_0, Vector2(0, 0),
+					p_bottom_1, Vector2(1, 1), p_bottom_0,
+					Vector2(0, 1), false)
+			else:
+				# The distal cap faces +Y, opposite the quill cap, so both ends
+				# remain exterior-facing with back-face culling enabled.
+				_angel_feather_triangle(surface, p_top_0, Vector2(0, 0),
+					p_bottom_1, Vector2(1, 1), p_top_1,
+					Vector2(1, 0), true)
+				_angel_feather_triangle(surface, p_top_0, Vector2(0, 0),
+					p_bottom_0, Vector2(0, 1), p_bottom_1,
+					Vector2(1, 1), false)
+	# Weld shared grid vertices before generating normals.  Reversing these two
+	# calls leaves every triangle with its own face normal, which makes the dense
+	# curved vane look like a sparkling wire grid in direct sunlight.
+	surface.index()
+	surface.generate_normals()
+	_angel_feather_mesh = surface.commit()
+	_angel_feather_mesh.resource_name = "HighDetailAngelFeather"
+	return _angel_feather_mesh
+
+
+static func _angel_feather_point(t: float, across: float,
+		top: bool) -> Vector3:
+	# A real flight feather has unequal vanes, a pronounced rachis, longitudinal
+	# camber and tiny edge notches.  The dense tessellation makes those details
+	# read in highlights instead of relying on a flat alpha-card texture.
+	var body_width := 0.003 + 0.132 * pow(maxf(sin(PI * t), 0.0), 0.58) \
+		* lerpf(1.0, 0.82, t)
+	var vane_asymmetry := 1.08 if across < 0.0 else 0.92
+	var edge_serration := 1.0 - (0.020 + 0.018 * t) \
+		* pow(absf(sin(t * PI * 17.0)), 3.0) * pow(absf(across), 7.0)
+	var x := across * body_width * vane_asymmetry * edge_serration
+	var camber := 0.013 * sin(PI * t) * (1.0 - across * across)
+	var barb_relief := sin(t * PI * 27.0 + across * 1.7) * 0.00115 \
+		* pow(absf(across), 0.55) * sin(PI * t)
+	var rachis := 0.009 * (1.0 - t * 0.72) \
+		* exp(-absf(across) * 20.0)
+	var thickness := lerpf(0.0044, 0.0012, t) \
+		* lerpf(0.66, 1.0, 1.0 - absf(across))
+	var z := camber + barb_relief
+	if top:
+		z += thickness + rachis
+	else:
+		z -= thickness + rachis * 0.22
+	return Vector3(x, t, z)
+
+
+static func _angel_feather_color(uv: Vector2, top: bool) -> Color:
+	var across := uv.x * 2.0 - 1.0
+	var shaft := exp(-absf(across) * 18.0)
+	var edge := smoothstep(0.70, 1.0, absf(across))
+	var color := Color(0.982, 0.975, 0.948)
+	color = color.lerp(Color(1.0, 0.985, 0.865), shaft * 0.68)
+	color = color.darkened(edge * 0.055 + uv.y * 0.020)
+	if not top:
+		color = color.darkened(0.065)
+	return color
+
+
+static func _angel_feather_triangle(surface: SurfaceTool,
+		p0: Vector3, uv0: Vector2, p1: Vector3, uv1: Vector2,
+		p2: Vector3, uv2: Vector2, top: bool) -> void:
+	for pair in [[p0, uv0], [p1, uv1], [p2, uv2]]:
+		var uv: Vector2 = pair[1]
+		surface.set_uv(uv)
+		surface.set_color(_angel_feather_color(uv, top))
+		surface.add_vertex(pair[0])
+
+
+static func _shared_angel_feather_material() -> StandardMaterial3D:
+	if _angel_feather_material:
+		return _angel_feather_material
+	_angel_feather_material = StandardMaterial3D.new()
+	_angel_feather_material.resource_name = "NaturalIvoryAngelFeather"
+	_angel_feather_material.albedo_color = Color(1.0, 0.995, 0.975)
+	_angel_feather_material.vertex_color_use_as_albedo = true
+	_angel_feather_material.roughness = 0.58
+	_angel_feather_material.metallic = 0.0
+	_angel_feather_material.cull_mode = BaseMaterial3D.CULL_BACK
+	return _angel_feather_material
+
+
+static func _angel_feather_transform(position: Vector3, side: float,
+		angle: float, length: float, width: float, pitch: float,
+		twist: float) -> Transform3D:
+	# The mesh grows along local +Y.  Mirrored Z rotation fans it away from the
+	# spine without a negative scale, preserving winding and normal direction.
+	var basis := Basis.from_euler(Vector3(pitch, side * twist, -side * angle))
+	basis = basis * Basis.from_scale(Vector3(width, length, 1.0))
+	return Transform3D(basis, position)
+
+
+func _add_angel_feather_cluster(parent: Node3D, cluster_name: String,
+		transforms: Array[Transform3D], tones: Array[Color],
+		casts_shadow: bool) -> void:
+	var multi_mesh := MultiMesh.new()
+	multi_mesh.transform_format = MultiMesh.TRANSFORM_3D
+	multi_mesh.use_colors = true
+	multi_mesh.mesh = _shared_angel_feather_mesh()
+	multi_mesh.instance_count = transforms.size()
+	# Animated parent nodes otherwise make the automatically calculated AABB lag
+	# a frame at the edge of view.  This still tightly bounds the authored wing.
+	multi_mesh.custom_aabb = AABB(Vector3(-1.9, -1.2, -0.5),
+		Vector3(3.8, 2.4, 1.0))
+	for i in range(transforms.size()):
+		multi_mesh.set_instance_transform(i, transforms[i])
+		multi_mesh.set_instance_color(i, tones[i])
+	var feathers := MultiMeshInstance3D.new()
+	feathers.name = cluster_name
+	feathers.multimesh = multi_mesh
+	feathers.material_override = _shared_angel_feather_material()
+	feathers.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON \
+		if casts_shadow else GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	if _is_local_visual:
+		feathers.layers = LOCAL_BODY_VISUAL_LAYER
+	parent.add_child(feathers)
+
+
 func _build_angel_wings() -> void:
-	var feather := StandardMaterial3D.new()
-	feather.albedo_color = Color(0.97, 0.97, 0.99)
-	feather.roughness = 0.72
-	feather.emission_enabled = true
-	feather.emission = Color(0.92, 0.94, 1.0)
-	feather.emission_energy_multiplier = 0.14
+	# Anatomical layout: long primaries articulate at the wrist, secondaries fan
+	# from the forearm, and three overlapping covert tiers hide every feather
+	# root.  All transforms instance the same 680-triangle feather mesh.
 	for side in [-1.0, 1.0]:
 		var root := Node3D.new()
 		root.name = "AngelWingL" if side < 0.0 else "AngelWingR"
-		root.position = Vector3(0.085 * side, 0.34, 0.16)
+		root.position = Vector3(0.095 * side, 0.34, 0.17)
 		torso_p.add_child(root)
-		# Three sweeping feather rows, each row a fan of flattened capsules.
-		for row in range(3):
-			var row_length: float = [0.62, 0.47, 0.33][row]
-			var row_lift: float = [0.30, 0.16, 0.02][row]
-			for i in range(4):
-				var t := float(i) / 3.0
-				var quill := MeshInstance3D.new()
-				var m := CapsuleMesh.new()
-				m.radius = 0.028
-				m.height = row_length * lerpf(1.0, 0.55, t)
-				m.radial_segments = 6
-				m.rings = 2
-				quill.mesh = m
-				quill.material_override = feather
-				quill.cast_shadow = \
-					GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-				if _is_local_visual:
-					quill.layers = LOCAL_BODY_VISUAL_LAYER
-				quill.position = Vector3(
-					side * (0.10 + t * 0.30) * (1.0 - 0.18 * row),
-					row_lift - t * (0.14 + 0.10 * row),
-					0.035 * row)
-				quill.rotation = Vector3(0.0, 0.0,
-					side * (-0.55 - t * 0.85 - row * 0.10))
-				quill.scale = Vector3(1.0, 1.0, 0.35)
-				root.add_child(quill)
+
+		var coverts := Node3D.new()
+		coverts.name = "LayeredCoverts"
+		root.add_child(coverts)
+		var elbow := Node3D.new()
+		elbow.name = "ArticulatedElbow"
+		elbow.position = Vector3(0.23 * side, 0.15, -0.006)
+		root.add_child(elbow)
+		var tip := Node3D.new()
+		tip.name = "ArticulatedWristAndWingtip"
+		tip.position = Vector3(0.23 * side, 0.13, -0.006)
+		elbow.add_child(tip)
+
+		var secondary_xforms: Array[Transform3D] = []
+		var secondary_tones: Array[Color] = []
+		for i in range(20):
+			var u := float(i) / 19.0
+			secondary_xforms.append(_angel_feather_transform(Vector3(
+				side * lerpf(0.035, 0.47, u),
+				lerpf(0.13, 0.27, u) + sin(PI * u) * 0.035,
+				lerpf(0.018, -0.026, u)), side,
+				lerpf(0.72, 1.55, u), lerpf(0.58, 0.76, u),
+				lerpf(1.02, 0.84, u), lerpf(-0.05, 0.055, u),
+				lerpf(0.08, -0.07, u)))
+			secondary_tones.append(Color(0.985 - u * 0.025,
+				0.977 - u * 0.010, 0.935 + u * 0.040))
+		_add_angel_feather_cluster(root, "SecondaryFlightFeathers",
+			secondary_xforms, secondary_tones, true)
+
+		var primary_xforms: Array[Transform3D] = []
+		var primary_tones: Array[Color] = []
+		for i in range(15):
+			var u := float(i) / 14.0
+			primary_xforms.append(_angel_feather_transform(Vector3(
+				side * lerpf(0.015, 0.23, u), lerpf(0.045, -0.13, u),
+				lerpf(0.012, -0.035, u)), side,
+				lerpf(1.19, 2.06, u), lerpf(0.76, 1.02, u),
+				lerpf(0.79, 0.61, u), lerpf(0.01, 0.10, u),
+				lerpf(-0.05, 0.11, u)))
+			primary_tones.append(Color(0.955 + u * 0.025,
+				0.965 + u * 0.020, 0.990))
+		var greater_xforms: Array[Transform3D] = []
+		var greater_tones: Array[Color] = []
+		for i in range(18):
+			var u := float(i) / 17.0
+			greater_xforms.append(_angel_feather_transform(Vector3(
+				side * lerpf(0.025, 0.49, u),
+				lerpf(0.21, 0.31, u) + sin(PI * u) * 0.025,
+				0.042 + u * 0.018), side,
+				lerpf(0.58, 1.43, u), lerpf(0.39, 0.55, u),
+				lerpf(1.22, 1.02, u), lerpf(-0.08, 0.02, u),
+				lerpf(0.05, -0.055, u)))
+			greater_tones.append(Color(0.995, 0.973 - u * 0.015,
+				0.905 + u * 0.045))
+		var median_xforms: Array[Transform3D] = []
+		var median_tones: Array[Color] = []
+		for row in range(2):
+			var count := 14 - row * 2
+			for i in range(count):
+				var u := float(i) / float(count - 1)
+				median_xforms.append(_angel_feather_transform(Vector3(
+					side * lerpf(0.005 + row * 0.035, 0.43 - row * 0.02, u),
+					lerpf(0.29 + row * 0.075, 0.39 + row * 0.035, u)
+						+ sin(PI * u) * 0.025,
+					0.068 + row * 0.028 + u * 0.008), side,
+					lerpf(0.43, 1.25, u),
+					lerpf(0.33, 0.25, float(row)) + u * 0.045,
+					lerpf(1.34, 1.10, u), -0.07 + u * 0.08,
+					lerpf(0.045, -0.04, u)))
+				var warm := 0.018 * float((i + row) % 3)
+				median_tones.append(Color(1.0, 0.985 - warm,
+					0.925 - warm * 0.7))
+		greater_xforms.append_array(median_xforms)
+		greater_tones.append_array(median_tones)
+		_add_angel_feather_cluster(coverts, "LayeredCoverts",
+			greater_xforms, greater_tones, false)
+
+		var tip_covert_xforms: Array[Transform3D] = []
+		var tip_covert_tones: Array[Color] = []
+		for i in range(12):
+			var u := float(i) / 11.0
+			tip_covert_xforms.append(_angel_feather_transform(Vector3(
+				side * lerpf(-0.045, 0.19, u), lerpf(0.11, -0.055, u),
+				0.052 + u * 0.018), side,
+				lerpf(1.00, 1.72, u), lerpf(0.38, 0.57, u),
+				lerpf(1.08, 0.84, u), -0.025 + u * 0.08,
+				lerpf(-0.045, 0.065, u)))
+			tip_covert_tones.append(Color(0.975, 0.980,
+				0.965 + u * 0.025))
+		primary_xforms.append_array(tip_covert_xforms)
+		primary_tones.append_array(tip_covert_tones)
+		_add_angel_feather_cluster(tip, "PrimariesCovertsAndAlula",
+			primary_xforms, primary_tones, true)
+
 		if side < 0.0:
 			_wing_l = root
+			_wing_l_elbow = elbow
+			_wing_l_tip = tip
+			_wing_l_coverts = coverts
 		else:
 			_wing_r = root
+			_wing_r_elbow = elbow
+			_wing_r_tip = tip
+			_wing_r_coverts = coverts
 	_wing_l.scale = Vector3.ONE * 0.02
 	_wing_r.scale = Vector3.ONE * 0.02
 
 
-func _update_angel_wings(dt: float) -> void:
+func _update_angel_wings(dt: float, flight_velocity := Vector3.ZERO) -> void:
 	if not _wing_l:
 		return
 	var target := 1.0 if _wings_active else 0.0
@@ -2028,10 +2339,44 @@ func _update_angel_wings(dt: float) -> void:
 	if not visible_now:
 		return
 	var grow: float = SatisfyingReload.smooth01(_wing_unfold)
-	var flap := sin(_t * 3.1) * 0.30 + sin(_t * 6.2) * 0.06
-	var spread := lerpf(-1.15, 0.28 + flap * 0.5, grow)
-	for entry in [[_wing_l, 1.0], [_wing_r, -1.0]]:
+	# A phase-integrated stroke avoids snapping when climb speed changes.  Level
+	# flight is a gentle 0.72 Hz beat; climbing adds authority while descending
+	# relaxes toward a shallow glide.  Elbow and wrist phases trail the shoulder
+	# by roughly 60 and 120 ms, so the primaries flex instead of moving as a fan.
+	var climb := smoothstep(1.5, 12.0, flight_velocity.y)
+	var glide := smoothstep(2.0, 14.0, -flight_velocity.y)
+	var flap_hz := lerpf(0.72, 1.02, climb)
+	flap_hz = lerpf(flap_hz, 0.55, glide)
+	var flap_amplitude := lerpf(0.070, 0.096, climb)
+	flap_amplitude = lerpf(flap_amplitude, 0.046, glide)
+	_wing_flap_phase = fposmod(_wing_flap_phase
+		+ minf(dt, 0.1) * TAU * flap_hz, TAU)
+	var shoulder_flap := sin(_wing_flap_phase) * flap_amplitude \
+		+ sin(_wing_flap_phase * 2.0 + 0.55) * flap_amplitude * 0.14
+	var elbow_flap := sin(_wing_flap_phase - 0.28) \
+		* flap_amplitude * 1.06 \
+		+ sin(_wing_flap_phase * 2.0 - 0.01) * flap_amplitude * 0.10
+	var tip_flap := sin(_wing_flap_phase - 0.55) \
+		* flap_amplitude * 1.14 \
+		+ sin(_wing_flap_phase * 2.0 - 0.55) * flap_amplitude * 0.08
+	var covert_ripple := sin(_wing_flap_phase * 1.35 + 1.1) * 0.012
+	var spread := lerpf(1.18, 0.055, grow)
+	for entry in [[_wing_l, _wing_l_elbow, _wing_l_tip,
+			_wing_l_coverts, -1.0], [_wing_r, _wing_r_elbow,
+			_wing_r_tip, _wing_r_coverts, 1.0]]:
 		var wing: Node3D = entry[0]
-		var side: float = entry[1]
+		var elbow: Node3D = entry[1]
+		var tip: Node3D = entry[2]
+		var coverts: Node3D = entry[3]
+		var side: float = entry[4]
 		wing.scale = Vector3.ONE * maxf(grow, 0.02)
-		wing.rotation = Vector3(0.12 - flap * 0.22, side * spread, 0.0)
+		wing.rotation = Vector3(0.035 - shoulder_flap * 0.40, side * spread,
+			-side * shoulder_flap)
+		elbow.rotation = Vector3(-elbow_flap * 0.28,
+			side * elbow_flap * 0.08,
+			-side * (0.012 + elbow_flap * 0.40))
+		tip.rotation = Vector3(-tip_flap * 0.44,
+			side * tip_flap * 0.16,
+			-side * (0.016 + tip_flap * 0.55))
+		coverts.rotation = Vector3(covert_ripple, 0.0,
+			-side * covert_ripple * 0.32)
