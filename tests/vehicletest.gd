@@ -244,6 +244,26 @@ func run(main) -> void:
 		"height bike=%.2f jeep=%.2f boat=%.2f jet=%.2f" % [
 			bike.camera_height, jeep.camera_height, boat.camera_height,
 			jet.camera_height])
+	var minimap := main.hud.minimap as Minimap
+	var on_foot_map_center: Vector3 = p.global_position
+	var on_foot_map_window: float = minimap.window_meters()
+	var on_foot_map_px: float = minimap.map_px()
+	var on_foot_plus_x := minimap._world_to_map(
+		on_foot_map_center + Vector3.RIGHT * 20.0,
+		on_foot_map_center, on_foot_map_window)
+	var on_foot_plus_z := minimap._world_to_map(
+		on_foot_map_center + Vector3.BACK * 20.0,
+		on_foot_map_center, on_foot_map_window)
+	var expected_on_foot_arrow := Vector2(
+		sin(p.rig.yaw_angle() + PI), cos(p.rig.yaw_angle() + PI)).normalized()
+	check("on-foot minimap remains north-up with the existing body arrow",
+		absf(minimap.map_rotation_radians()) < 0.0001 \
+			and on_foot_plus_x.x > on_foot_map_px * 0.5 \
+			and absf(on_foot_plus_x.y - on_foot_map_px * 0.5) < 0.001 \
+			and on_foot_plus_z.y > on_foot_map_px * 0.5 \
+			and absf(on_foot_plus_z.x - on_foot_map_px * 0.5) < 0.001 \
+			and minimap.local_arrow_forward().distance_to(
+				expected_on_foot_arrow) < 0.0001)
 	# Five dedicated outlets cover the four machines (the airboat has twin
 	# headers). Keep this registry separate from unrelated jet wingtip trails.
 	var exhaust_counts_ok: bool = bike.exhaust_emitters.size() == 1 \
@@ -408,7 +428,10 @@ func run(main) -> void:
 	jeep._update_exhaust(0.25)
 	check("remote vehicle exhaust follows replicated engine RPM",
 		jeep_outlet.target_intensity > 0.45 \
-		and jeep_outlet.particles.emitting)
+			and jeep_outlet.particles.emitting)
+	check("remote vehicle ownership never rotates the local minimap",
+		p.vehicle == null and jeep.remote_controlled \
+			and absf(minimap.map_rotation_radians()) < 0.0001)
 	jeep.set_remote_controlled(false)
 	jeep._update_exhaust(0.25)
 	# Jet packets encode the independent burner bit alongside normalized spool;
@@ -711,6 +734,167 @@ func run(main) -> void:
 	jeep.global_basis = orbit_fixture_basis
 	jeep.reset_physics_interpolation()
 	p.cam._process(1.0 / 60.0)
+	# Heading-up is a map-space transform, independent of camera orbit and speed.
+	# Exercise all four chassis cardinals against the real mounted local player.
+	var map_cardinals_ok := true
+	var mounted_map_window: float = minimap.window_meters()
+	var mounted_map_center: Vector3 = jeep.global_position
+	var mounted_map_px: float = minimap.map_px()
+	for heading_yaw in [0.0, PI * 0.5, PI, -PI * 0.5]:
+		jeep.global_basis = Basis(Vector3.UP, heading_yaw)
+		jeep.reset_physics_interpolation()
+		var map_rotation: float = minimap.map_rotation_radians()
+		var flat_heading := Vector2(jeep.global_basis.z.x,
+			jeep.global_basis.z.z).normalized()
+		var ahead_on_map := minimap._world_to_map(mounted_map_center \
+			+ jeep.global_basis.z * 20.0, mounted_map_center, mounted_map_window)
+		map_cardinals_ok = map_cardinals_ok \
+			and flat_heading.rotated(map_rotation).distance_to(Vector2.UP) < 0.0001 \
+			and absf(ahead_on_map.x - mounted_map_px * 0.5) < 0.001 \
+			and ahead_on_map.y < mounted_map_px * 0.5 \
+			and minimap.local_arrow_forward().distance_to(Vector2.UP) < 0.0001
+	check("locally driven vehicle stays heading-up at every cardinal",
+		map_cardinals_ok)
+
+	# At 45 degrees a rotated square needs sqrt(2) wider tile coverage. The
+	# rotated-corner fixture is deliberately outside the old unrotated cull.
+	jeep.global_basis = Basis(Vector3.UP, PI * 0.25)
+	jeep.reset_physics_interpolation()
+	var diagonal_rotation: float = minimap.map_rotation_radians()
+	var diagonal_half := Minimap.tile_request_half_extent(
+		mounted_map_window, diagonal_rotation)
+	minimap._request_visible_tiles()
+	var diagonal_tier: int = minimap._pick_tier(
+		mounted_map_window / mounted_map_px)
+	var request_center := Vector2(p.global_position.x, p.global_position.z)
+	var actual_required := Minimap.required_tile_keys(diagonal_tier,
+		request_center, mounted_map_window, diagonal_rotation, mounted_map_px)
+	var requested_keys_present := true
+	for key in actual_required:
+		requested_keys_present = requested_keys_present \
+			and minimap._tiles[diagonal_tier].has(key)
+	var caches_bounded := true
+	for tier_cache in minimap._tiles:
+		caches_bounded = caches_bounded \
+			and (tier_cache as Dictionary).size() <= Minimap.TILES_PER_TIER
+	var old_cull_hole_rect := Rect2(
+		Vector2(mounted_map_px * 0.56, -10.0), Vector2(20.0, 20.0))
+	check("diagonal vehicle maps request and retain every rotated corner tile",
+		absf(diagonal_half - mounted_map_window * sqrt(2.0) * 0.5) < 0.01 \
+			and requested_keys_present and caches_bounded \
+			and Minimap.ROWS_PER_FRAME == 24 \
+			and Minimap.rotated_tile_visible(old_cull_hole_rect,
+				diagonal_rotation, mounted_map_px))
+
+	# Stress the largest tier-0 view just below its switch point. At this center,
+	# the diagonal alone needs 66 tiles (well above the old 40-tile cap), while a
+	# quarter-turn sweep has a bounded union that the retained cache can reuse.
+	var stress_px := Minimap.SIZE_LARGE
+	var stress_window := 2639.0
+	var stress_tier: int = minimap._pick_tier(stress_window / stress_px)
+	var stress_tile_world: float = minimap._tile_world(stress_tier)
+	var stress_center := Vector2(stress_tile_world * 0.2,
+		stress_tile_world * 0.3)
+	minimap._tiles[stress_tier].clear()
+	minimap._bake_queue = minimap._bake_queue.filter(
+		func(entry): return entry[0] != stress_tier)
+	var stress_result: Dictionary = minimap._request_tiles_for_view(
+		stress_center, stress_window, PI * 0.25, stress_px)
+	var stress_required: Dictionary = stress_result["required"]
+	var initial_texture_ids: Dictionary = {}
+	var stress_coverage_ok := int(stress_result["tier"]) == stress_tier \
+		and stress_required.size() > 40 \
+		and stress_required.size() <= Minimap.TILES_PER_TIER
+	var placeholders_nonblack := true
+	for key in stress_required:
+		var tile: Dictionary = minimap._tiles[stress_tier].get(key, {})
+		stress_coverage_ok = stress_coverage_ok and not tile.is_empty()
+		if tile.is_empty():
+			continue
+		initial_texture_ids[key] = tile.texture.get_instance_id()
+		var placeholder: Color = tile.image.get_pixel(
+			Minimap.TILE_PX - 1, Minimap.TILE_PX - 1)
+		placeholders_nonblack = placeholders_nonblack \
+			and placeholder.r + placeholder.g + placeholder.b > 0.02
+	check("large diagonal minimap keeps every visible tile nonblank",
+		stress_coverage_ok and placeholders_nonblack \
+			and minimap._last_required_tier == stress_tier \
+			and minimap._last_required_keys.size() == stress_required.size(),
+		"required=%d cache=%d cap=%d" % [stress_required.size(),
+			(minimap._tiles[stress_tier] as Dictionary).size(),
+			Minimap.TILES_PER_TIER])
+
+	var sweep_coverage_ok := true
+	var latest_required: Dictionary = {}
+	for sweep_rotation in [0.0, PI / 12.0, PI / 6.0, PI * 0.25,
+			PI / 3.0, PI * 5.0 / 12.0, PI * 0.5]:
+		var sweep_result: Dictionary = minimap._request_tiles_for_view(
+			stress_center, stress_window, sweep_rotation, stress_px)
+		latest_required = sweep_result["required"]
+		for key in latest_required:
+			sweep_coverage_ok = sweep_coverage_ok \
+				and minimap._tiles[stress_tier].has(key)
+		sweep_coverage_ok = sweep_coverage_ok \
+			and (minimap._tiles[stress_tier] as Dictionary).size() \
+				<= Minimap.TILES_PER_TIER
+	var initial_tiles_reused := true
+	for key in stress_required:
+		var retained: Dictionary = minimap._tiles[stress_tier].get(key, {})
+		initial_tiles_reused = initial_tiles_reused and not retained.is_empty()
+		if not retained.is_empty():
+			initial_tiles_reused = initial_tiles_reused \
+				and retained.texture.get_instance_id() == initial_texture_ids[key]
+	var queue_unique := true
+	var queued_keys: Dictionary = {}
+	var required_queue_is_prefix := true
+	var saw_nonrequired_queue_entry := false
+	for entry in minimap._bake_queue:
+		if entry[0] != stress_tier:
+			continue
+		var queued_key: Vector2i = entry[1]
+		queue_unique = queue_unique and not queued_keys.has(queued_key)
+		queued_keys[queued_key] = true
+		var is_latest_required := latest_required.has(queued_key)
+		if is_latest_required and saw_nonrequired_queue_entry:
+			required_queue_is_prefix = false
+		elif not is_latest_required:
+			saw_nonrequired_queue_entry = true
+	minimap._bake_rows()
+	var bounded_bake_rows := minimap._last_baked_rows > 0 \
+		and minimap._last_baked_rows <= Minimap.ROWS_PER_FRAME
+	check("heading sweep reuses a bounded prioritized minimap cache",
+		sweep_coverage_ok and initial_tiles_reused and queue_unique \
+			and required_queue_is_prefix and bounded_bake_rows,
+		"cache=%d queued=%d rows=%d" % [
+			(minimap._tiles[stress_tier] as Dictionary).size(),
+			queued_keys.size(), minimap._last_baked_rows])
+	# Return the cache request diagnostics to the real mounted view before the
+	# remaining vehicle assertions run.
+	minimap._request_visible_tiles()
+
+	var chassis_map_rotation := minimap.map_rotation_radians()
+	var saved_map_velocity: Vector3 = jeep.linear_velocity
+	p.cam.apply_look(Vector2(0.18 / p.cam.effective_sensitivity(), 0.0))
+	jeep.linear_velocity = -jeep.global_basis.z * 12.0
+	check("camera orbit and reversing cannot steer the vehicle minimap",
+		absf(angle_difference(chassis_map_rotation,
+			minimap.map_rotation_radians())) < 0.0001)
+	p.cam.center_vehicle_chase()
+	jeep.linear_velocity = saved_map_velocity
+
+	# A vertical aircraft has no XZ nose projection. Retain the prior usable
+	# heading rather than snapping or producing an invalid map transform.
+	var last_flat_rotation := minimap.map_rotation_radians()
+	jeep.global_basis = Basis(Vector3.RIGHT, Vector3.FORWARD, Vector3.UP)
+	jeep.reset_physics_interpolation()
+	var vertical_rotation := minimap.map_rotation_radians()
+	check("vertical vehicle attitude retains the last finite minimap heading",
+		is_finite(vertical_rotation) \
+			and absf(angle_difference(last_flat_rotation, vertical_rotation)) < 0.0001 \
+			and minimap.local_arrow_forward().distance_to(Vector2.UP) < 0.0001)
+	jeep.global_basis = orbit_fixture_basis
+	jeep.reset_physics_interpolation()
+	minimap.map_rotation_radians()
 	# The driven chassis is excluded (full open-air extension), while the arm keeps
 	# its real world collision mask for terrain, walls, and other vehicles.
 	var open_arm_length: float = p.cam._arm.get_hit_length()
@@ -901,6 +1085,11 @@ func run(main) -> void:
 	check("E dismounts and restores the monkey",
 		p.vehicle == null and not p._collision_shape.disabled
 		and p.collision_layer == 1)
+	var dismounted_arrow := Vector2(sin(p.rig.yaw_angle() + PI),
+		cos(p.rig.yaw_angle() + PI)).normalized()
+	check("dismount restores north-up minimap and the on-foot body arrow",
+		absf(minimap.map_rotation_radians()) < 0.0001 \
+			and minimap.local_arrow_forward().distance_to(dismounted_arrow) < 0.0001)
 	check("released jeep parks with its brakes on",
 		jeep.driver == null and jeep.input_brake > 0.99
 		and jeep.input_handbrake
@@ -1523,14 +1712,26 @@ func run(main) -> void:
 		and p.cam.view_mode == CameraRig.ViewMode.SHOULDER \
 		and not p.cam.front_view and flight_reticle.visible)
 	# Cockpit presentation follows the aircraft attitude while the pursuit aim
-	# stays in world space. Roll the parked airframe between physics ticks so the
-	# assertion is deterministic and cannot disturb the takeoff run below.
+	# stays in world space. Author the exact stale chase bank/velocity history
+	# that used to survive a C-toggle, then roll the parked airframe between
+	# physics ticks so the assertion cannot disturb the takeoff run below.
 	var parked_jet_basis: Basis = jet.global_basis
+	p.cam._camera_mount.rotation = Vector3(0.025, 0.0, 0.08)
+	p.cam._last_velocity = jet.linear_velocity - jet.global_basis.z * 4.0
 	p.cam._apply_view_mode(CameraRig.ViewMode.FIRST_PERSON)
+	var cockpit_transition_cleared: bool = \
+		p.cam._camera_mount.rotation.length() < 0.0001 \
+		and p.cam._last_velocity.distance_to(jet.linear_velocity) < 0.0001
 	jet.global_basis = parked_jet_basis.rotated(
 		parked_jet_basis.z.normalized(), 0.42)
 	jet.reset_physics_interpolation()
 	p.cam._process(1.0 / 60.0)
+	check("jet cockpit transition clears stale chase camera motion",
+		cockpit_transition_cleared \
+			and p.cam._camera_mount.rotation.length() < 0.0001,
+		"transition=%s live_mount=%s velocity_error=%.4f" % [
+			str(cockpit_transition_cleared), p.cam._camera_mount.rotation,
+			p.cam._last_velocity.distance_to(jet.linear_velocity)])
 	check("cockpit camera follows the jet's rolled horizon",
 		p.cam.global_basis.y.dot(jet.global_basis.y) > 0.98)
 	p.cam.center_aircraft_aim()

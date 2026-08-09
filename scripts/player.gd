@@ -9,6 +9,7 @@ signal landed(impact: float)
 signal health_changed(current: float, maximum: float)
 signal defeated_by(source: Node3D)
 signal bandages_changed(count: int)
+signal bullet_hit_confirmed(headshot: bool, damage: float)
 
 enum S { GROUND, AIR, SWING, SLIDE, SWIM }
 
@@ -1841,7 +1842,7 @@ func admin_kill() -> void:
 
 func admin_heal() -> void:
 	health = MAX_HEALTH
-	health_changed.emit(health)
+	health_changed.emit(health, MAX_HEALTH)
 
 
 func admin_teleport(destination: Vector3) -> void:

@@ -156,7 +156,17 @@ func _physics_process(dt: float) -> void:
 					"head" if was_headshot else "body")
 			else:
 				hit_actor.take_damage(damage, shooter, impact_impulse)
-			if was_headshot and (uses_revolver_headshots or sniper_headshot):
+			# Replicated puppets intentionally apply no health locally, but their
+			# swept hitboxes are the shooter's visual hit-confirmation source. The
+			# victim's own client simulates the same bullet against its authoritative
+			# MonkeyPlayer. Keep this cue local-only and exclude props/practice targets.
+			var other_player := hit_actor is Puppet \
+				or (hit_actor is MonkeyPlayer and hit_actor != shooter)
+			var scored_headshot := was_headshot \
+				and (uses_revolver_headshots or sniper_headshot)
+			if other_player and shooter is MonkeyPlayer and shooter.is_local:
+				shooter.bullet_hit_confirmed.emit(scored_headshot, damage)
+			if scored_headshot:
 				Sfx.play_at("headshot", hit.position, -2.0)
 				if world and world.has_method("report_headshot"):
 					world.report_headshot(shooter, hit_actor,

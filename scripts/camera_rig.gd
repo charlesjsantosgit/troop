@@ -199,6 +199,8 @@ func _apply_view_mode(mode: int) -> void:
 	view_mode = clampi(mode, ViewMode.SHOULDER, ViewMode.FRONT)
 	first_person = view_mode == ViewMode.FIRST_PERSON
 	front_view = view_mode == ViewMode.FRONT
+	var crossed_vehicle_cockpit_boundary := _vehicle_view \
+		and is_instance_valid(_vehicle) and was_cockpit != first_person
 	var relative_cockpit := _vehicle_view and first_person \
 		and is_instance_valid(_vehicle) \
 		and _vehicle.kind != Vehicle.Kind.JET
@@ -219,6 +221,14 @@ func _apply_view_mode(mode: int) -> void:
 	_arm.position = SHOULDER_OFFSET \
 		if view_mode == ViewMode.SHOULDER and not _vehicle_view \
 		else Vector3.ZERO
+	if crossed_vehicle_cockpit_boundary:
+		# Chase banks its intermediate mount with the chassis. Carrying that bank
+		# into cockpit for even one eased frame rotates the HUD's screen axes away
+		# from the aircraft pursuit basis. Clear only this presentation layer and
+		# seed its velocity history so the first cockpit/chase frame cannot invent
+		# a longitudinal acceleration kick from stale mode state.
+		_zero_movement_output()
+		_last_velocity = _vehicle.linear_velocity
 	if first_person:
 		_cam.cull_mask &= ~MonkeyRig.LOCAL_BODY_VISUAL_LAYER
 	else:

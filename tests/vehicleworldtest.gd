@@ -395,6 +395,141 @@ func run(main) -> void:
 		check("teleport lands beside the hidden machine",
 			p.global_position.distance_to(hidden.pos) < 9.0)
 
+	# --- bounded actor collision shells and chunk retirement ------------------
+	# Hold the local monkey high above a quiet test cell, then place a replicated
+	# actor three chunks away: outside the ordinary 5x5 near window but inside the
+	# explicit ground-actor collision range. Its floor shell must join the bounded
+	# near queue and finish collision without moving the local streaming center.
+	if p.vehicle:
+		p.exit_vehicle()
+	var collision_focus_key := Vector2i(140, -140)
+	var focus_x := (float(collision_focus_key.x) + 0.5) * Gen.CHUNK
+	var focus_z := (float(collision_focus_key.y) + 0.5) * Gen.CHUNK
+	var focus_ground := Gen.height(focus_x, focus_z)
+	p.admin_teleport(Vector3(focus_x, focus_ground + 80.0, focus_z))
+	p.set_fly_mode(true)
+	p.velocity = Vector3.ZERO
+	p.set_physics_process(false)
+	var remote_key := collision_focus_key + Vector2i(3, 0)
+	var remote_x := (float(remote_key.x) + 0.5) * Gen.CHUNK
+	var remote_z := (float(remote_key.y) + 0.5) * Gen.CHUNK
+	var remote_probe := Node3D.new()
+	w.add_child(remote_probe)
+	remote_probe.global_position = Vector3(remote_x,
+		Gen.height(remote_x, remote_z) + 1.0, remote_z)
+	const REMOTE_PROBE_PEER := 987654
+	w.puppets[REMOTE_PROBE_PEER] = remote_probe
+	w._update_collision_requirement(p.global_position)
+	var collision_targets_changed: bool = w._refresh_collision_targets(
+		collision_focus_key, collision_focus_key)
+	w._refresh_near_targets(collision_focus_key, collision_focus_key)
+	var ordinary_near_target_limit := (Gen.VIEW_R * 2 + 1) \
+		* (Gen.VIEW_R * 2 + 1)
+	check("remote actor outside the visible near ring queues its floor shell",
+		collision_targets_changed \
+		and maxi(absi(remote_key.x - collision_focus_key.x),
+			absi(remote_key.y - collision_focus_key.y)) > Gen.VIEW_R \
+		and w._actor_collision_targets.has(remote_key) \
+		and w._collision_targets.has(remote_key) \
+		and w._near_targets.has(remote_key))
+	check("remote actor shell expansion remains explicitly bounded",
+		w._actor_collision_targets.size() \
+			<= World.GROUND_ACTOR_COLLISION_SHELL_TARGET_LIMIT \
+		and w._near_targets.size() <= ordinary_near_target_limit \
+			+ World.GROUND_ACTOR_COLLISION_SHELL_TARGET_LIMIT,
+		"actor=%d near=%d limit=%d" % [w._actor_collision_targets.size(),
+			w._near_targets.size(),
+			World.GROUND_ACTOR_COLLISION_SHELL_TARGET_LIMIT])
+	var remote_floor_ready := false
+	for i in range(300):
+		await sim(1)
+		var remote_chunk = w.chunks.get(remote_key)
+		if is_instance_valid(remote_chunk) \
+				and (remote_chunk as Chunk).has_collisions():
+			remote_floor_ready = true
+			break
+	check("remote actor floor shell completes collision while local pilot is high",
+		remote_floor_ready)
+	w.puppets.erase(REMOTE_PROBE_PEER)
+	remote_probe.queue_free()
+	w._update_collision_requirement(p.global_position)
+	w._refresh_collision_targets(collision_focus_key, collision_focus_key)
+
+	# An empty shell catches the exact child-loop indentation regression: retirement
+	# must erase and queue the chunk once even when there are no children to visit.
+	var empty_key := collision_focus_key + Vector2i(40, 40)
+	var empty_chunk := Chunk.new()
+	empty_chunk.key = empty_key
+	w.add_child(empty_chunk)
+	w.chunks[empty_key] = empty_chunk
+	check("empty streamed chunk starts with no retirement-loop children",
+		empty_chunk.get_child_count() == 0)
+	w._refresh_near_targets(collision_focus_key, collision_focus_key)
+	check("chunk retirement runs once outside the child loop",
+		not w.chunks.has(empty_key) and empty_chunk.is_queued_for_deletion())
+
+	# --- touched wilderness retention ----------------------------------------
+	# Mount through the real solo entry path, dismount, move the near corridor
+	# away, and retry the deterministic spawn. The same live node must remain at
+	# the parked transform; an untouched neighbour must still be disposable.
+	var touched_source := collision_focus_key + Vector2i(1, 1)
+	var touched_x := (float(touched_source.x) + 0.5) * Gen.CHUNK
+	var touched_z := (float(touched_source.y) + 0.5) * Gen.CHUNK
+	var touched_pos := Vector3(touched_x, Gen.height(touched_x, touched_z), touched_z)
+	var touched_id := "v:%d,%d#0" % [touched_source.x, touched_source.y]
+	var touched_def := {
+		"id": touched_id,
+		"kind": Vehicle.Kind.JEEP,
+		"pos": touched_pos,
+		"yaw": 0.0,
+	}
+	w.request_vehicle_spawns([touched_def])
+	var touched_vehicle: Vehicle = w.vehicle_by_id(touched_id)
+	if touched_vehicle:
+		touched_vehicle.freeze = true
+		p.global_position = touched_vehicle.interaction_position()
+		p.velocity = Vector3.ZERO
+	var entered_touched: bool = touched_vehicle != null and w.try_enter_vehicle(p) \
+		and touched_vehicle.driver == p
+	if entered_touched:
+		p.exit_vehicle()
+		touched_vehicle.freeze = true
+	var parked_position := touched_vehicle.global_position \
+		if touched_vehicle else Vector3.ZERO
+	var parked_instance_id := touched_vehicle.get_instance_id() \
+		if touched_vehicle else 0
+	check("solo mounting marks a wilderness vehicle as a session citizen",
+		entered_touched and w._retained_wilderness_vehicle_ids.has(touched_id))
+	w._near_targets.clear()
+	w._near_targets[collision_focus_key + Vector2i(80, 80)] = true
+	w._retire_streamed_wilderness_vehicles()
+	w.request_vehicle_spawns([touched_def])
+	var retained_vehicle: Vehicle = w.vehicle_by_id(touched_id)
+	check("dismounted wilderness vehicle keeps its parked node and transform",
+		retained_vehicle != null \
+		and retained_vehicle.get_instance_id() == parked_instance_id \
+		and retained_vehicle.global_position.distance_to(parked_position) < 0.01)
+
+	var untouched_source := touched_source + Vector2i(1, 0)
+	var untouched_x := (float(untouched_source.x) + 0.5) * Gen.CHUNK
+	var untouched_z := (float(untouched_source.y) + 0.5) * Gen.CHUNK
+	var untouched_id := "v:%d,%d#0" % [untouched_source.x, untouched_source.y]
+	w.request_vehicle_spawns([{
+		"id": untouched_id,
+		"kind": Vehicle.Kind.BIKE,
+		"pos": Vector3(untouched_x, Gen.height(untouched_x, untouched_z),
+			untouched_z),
+		"yaw": 0.0,
+	}])
+	var untouched_vehicle: Vehicle = w.vehicle_by_id(untouched_id)
+	if untouched_vehicle:
+		untouched_vehicle.freeze = true
+	w._retire_streamed_wilderness_vehicles()
+	check("untouched wilderness population remains disposable and bounded",
+		w.vehicle_by_id(untouched_id) == null \
+		and int(w.streaming_snapshot().streamed_unprotected_vehicles) \
+			<= World.STREAMED_WILDERNESS_VEHICLE_LIMIT)
+
 	print("VEHICLEWORLDTEST %d/%d %s" % [total - fails, total,
 		"PASS" if fails == 0 else "FAIL"])
 	main.get_tree().quit(1 if fails > 0 else 0)

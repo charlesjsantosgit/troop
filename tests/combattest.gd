@@ -1349,6 +1349,10 @@ func run(main) -> void:
 	ai.health = ai.MAX_HEALTH
 	ai._invulnerable_t = 0.0
 	await get_tree().physics_frame
+	var hit_confirmations: Array[Vector2] = []
+	player.bullet_hit_confirmed.connect(func(headshot: bool, damage: float):
+		hit_confirmations.append(Vector2(1.0 if headshot else 0.0, damage)))
+	var hud_hits_before_shotgun: int = main.hud.hit_marker.flash_count
 	for pellet_direction in PumpShotgun.pellet_directions(Vector3(0, 0, -1), 1337):
 		world.spawn_bullet(player, range_test_player + Vector3(0, 0.65, -0.6),
 			pellet_direction * PumpShotgun.MUZZLE_SPEED,
@@ -1356,8 +1360,18 @@ func run(main) -> void:
 	for i in range(18):
 		await get_tree().physics_frame
 	var close_damage := ai.MAX_HEALTH - ai.health
-	_check(close_damage >= 60.0,
-		"close shotgun pattern lands at least four pellets")
+	var close_hit_count := hit_confirmations.size()
+	var shotgun_markers_are_body_hits := close_hit_count > 0
+	for confirmation in hit_confirmations:
+		shotgun_markers_are_body_hits = shotgun_markers_are_body_hits \
+			and confirmation.x == 0.0 \
+			and confirmation.y == PumpShotgun.PELLET_DAMAGE
+	_check(close_damage >= 60.0 \
+		and close_hit_count == roundi(close_damage / PumpShotgun.PELLET_DAMAGE) \
+		and main.hud.hit_marker.flash_count - hud_hits_before_shotgun \
+			== close_hit_count and shotgun_markers_are_body_hits \
+		and not main.hud.hit_marker.last_headshot,
+		"close shotgun confirms every landed pellet without false headshot markers")
 
 	ai.global_position = range_test_player + Vector3(0, 0, -25)
 	ai.health = ai.MAX_HEALTH
@@ -1377,16 +1391,26 @@ func run(main) -> void:
 	player.global_position = player_pos
 	ai.global_position = player_pos + Vector3(0, 0, -6.0)
 	ai.health = ai.MAX_HEALTH
+	var body_confirmations_before := hit_confirmations.size()
+	var body_hud_flashes_before: int = main.hud.hit_marker.flash_count
 	world.spawn_bullet(player, player_pos + Vector3(0, 0.65, -0.6),
 		Vector3(0, 0, -BananaGun.MUZZLE_SPEED))
 	for i in range(12):
 		await get_tree().physics_frame
-	_check(ai.health == ai.MAX_HEALTH - BananaBullet.DAMAGE,
-		"swept bullet damages another monkey")
+	_check(ai.health == ai.MAX_HEALTH - BananaBullet.DAMAGE \
+		and hit_confirmations.size() == body_confirmations_before + 1 \
+		and hit_confirmations[-1].x == 0.0 \
+		and hit_confirmations[-1].y == BananaBullet.DAMAGE \
+		and main.hud.hit_marker.flash_count == body_hud_flashes_before + 1 \
+		and main.hud.hit_marker.get_index() > main.hud.sniper_scope.get_index() \
+		and main.hud.hit_marker.get_index() > main.hud.damage_overlay.get_index(),
+		"swept bullet confirms one body hit through the visible HUD layer")
 
 	ai.health = ai.MAX_HEALTH
 	ai.defeated = false
 	ai._invulnerable_t = 0.0
+	var head_confirmations_before := hit_confirmations.size()
+	var head_hud_flashes_before: int = main.hud.hit_marker.flash_count
 	world.spawn_bullet(player, player_pos + Vector3(0, 1.17, -0.6),
 		Vector3(0, 0, -BananaGun.MUZZLE_SPEED))
 	for i in range(12):
@@ -1397,12 +1421,49 @@ func run(main) -> void:
 		ai.death_ragdoll.head != null and
 		ai.death_ragdoll.head.get_node_or_null("Smile") != null,
 		"swept lethal head hit defeats the monkey and detaches its ragdoll head")
+	_check(hit_confirmations.size() == head_confirmations_before + 1 \
+		and hit_confirmations[-1].x == 1.0 \
+		and hit_confirmations[-1].y == ai.MAX_HEALTH \
+		and main.hud.hit_marker.flash_count == head_hud_flashes_before + 1 \
+		and main.hud.hit_marker.last_headshot,
+		"head impacts confirm once with the final applied projectile damage")
+	var marker := HitMarker.new()
+	marker.size = Vector2(44, 44)
+	world.add_child(marker)
+	marker.flash(false)
+	marker._process(HitMarker.HOLD_SECONDS + HitMarker.FADE_SECONDS - 0.02)
+	var nearly_expired := marker.remaining_seconds()
+	marker.flash(false)
+	_check(marker.visible and marker.flash_count == 2 and not marker.last_headshot \
+		and marker.remaining_seconds() > nearly_expired,
+		"repeated hits restart one bounded marker without allocating another HUD node")
+	marker._process(HitMarker.HOLD_SECONDS + HitMarker.FADE_SECONDS + 0.01)
+	_check(not marker.visible and marker.remaining_seconds() == 0.0,
+		"hit marker fades completely after its bounded confirmation window")
+	marker.queue_free()
 
 	var target := PracticeTarget.new()
 	world.add_child(target)
 	target.setup(player_pos + Vector3(4, 0, -5), player_pos)
-	target.take_damage(BananaBullet.DAMAGE, player, Vector3.ZERO)
-	_check(target.collision_layer == 0, "practice target reacts when hit")
+	var excluded_confirmations_before := hit_confirmations.size()
+	var excluded_hud_flashes_before: int = main.hud.hit_marker.flash_count
+	world.spawn_bullet(player, target.global_position + Vector3(0, 1.85, 2.0),
+		Vector3(0, 0, -BananaGun.MUZZLE_SPEED))
+	for i in range(8):
+		await get_tree().physics_frame
+	_check(target.collision_layer == 0 \
+		and hit_confirmations.size() == excluded_confirmations_before \
+		and main.hud.hit_marker.flash_count == excluded_hud_flashes_before,
+		"practice targets react to bullets without producing player hit markers")
+	var wall_pos := player_pos + Vector3(7, 1.0, -5)
+	world.add_debug_wall(wall_pos, Vector3(1.2, 2.0, 0.4))
+	world.spawn_bullet(player, wall_pos + Vector3(0, 0, 2.0),
+		Vector3(0, 0, -BananaGun.MUZZLE_SPEED))
+	for i in range(8):
+		await get_tree().physics_frame
+	_check(hit_confirmations.size() == excluded_confirmations_before \
+		and main.hud.hit_marker.flash_count == excluded_hud_flashes_before,
+		"world impacts never produce player hit markers")
 
 	ai.revive_at(player_pos + Vector3(9, 0, -9))
 	ai.target = player

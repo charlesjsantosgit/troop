@@ -86,6 +86,15 @@ func run() -> void:
 		and joints.right.shoulder != null and joints.right.elbow != null \
 		and joints.right.wrist != null
 	_check(joints_valid, "both wings expose shoulder, elbow, and wrist articulation")
+	var expected_left_root := Vector3(-MonkeyRig.ANGEL_WING_ROOT_OFFSET.x,
+		MonkeyRig.ANGEL_WING_ROOT_OFFSET.y, MonkeyRig.ANGEL_WING_ROOT_OFFSET.z)
+	var expected_right_root := Vector3(MonkeyRig.ANGEL_WING_ROOT_OFFSET.x,
+		MonkeyRig.ANGEL_WING_ROOT_OFFSET.y, MonkeyRig.ANGEL_WING_ROOT_OFFSET.z)
+	_check(joints.left.shoulder.get_parent() == rig.torso_p \
+		and joints.right.shoulder.get_parent() == rig.torso_p \
+		and joints.left.shoulder.position.distance_to(expected_left_root) < 0.0001 \
+		and joints.right.shoulder.position.distance_to(expected_right_root) < 0.0001,
+		"wing roots use the exact lowered mid-back anchors")
 	var attachment_error: float = absf(joints.left.shoulder.position.x
 		+ joints.right.shoulder.position.x) \
 		+ absf(joints.left.shoulder.position.y - joints.right.shoulder.position.y) \
@@ -169,6 +178,14 @@ func run() -> void:
 		remote_shared = remote_shared and remote_feathers.multimesh.mesh == shared_mesh
 	_check(puppet.rig.has_angel_wings_visible() and remote_shared,
 		"replicated flying state shows the same shared detailed wings")
+	var remote_joints: Dictionary = puppet.rig.angel_wing_articulation_nodes()
+	_check(remote_joints.left.shoulder.get_parent() == puppet.rig.torso_p \
+		and remote_joints.right.shoulder.get_parent() == puppet.rig.torso_p \
+		and remote_joints.left.shoulder.position.distance_to(
+			joints.left.shoulder.position) < 0.0001 \
+		and remote_joints.right.shoulder.position.distance_to(
+			joints.right.shoulder.position) < 0.0001,
+		"replicated wings use the exact local mid-back root placement")
 	var remote_phase_before: float = puppet.rig._wing_flap_phase
 	var remote_ids: Array[int] = []
 	for child in remote_nodes:

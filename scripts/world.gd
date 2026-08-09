@@ -11,11 +11,37 @@ signal combat_score_changed
 signal villager_trade_requested(villager: Node3D, player: Node3D)
 signal headshot_scored(source: Node3D, target: Node3D, lethal: bool, distance: float)
 
-const BUILD_BUDGET := 1  # cap streaming work to avoid traversal frame spikes
-const HORIZON_BUILD_BUDGET := 1
+const STREAM_SHELL_BUDGET_USEC := 2400
+const STREAM_SAFETY_BUDGET_USEC := 1400
+const STREAM_DECORATION_BUDGET_USEC := 1400
+const STREAM_SHELL_MAX_OPS := 3
+const STREAM_SAFETY_MAX_OPS := 3
+const STREAM_DECORATION_MAX_OPS := 3
 const HORIZON_TREE_SOURCE_BUDGET := 4
 const SKYLINE_TREE_SOURCE_BUDGET := 16
-const NEAR_PREDICTION_TIME := 0.65
+const HORIZON_TREE_SOURCE_BUDGET_FAST := 8
+const SKYLINE_TREE_SOURCE_BUDGET_FAST := 32
+const NEAR_PREDICTION_TIME := 0.85
+const NEAR_PREDICTION_MAX_CHUNKS := 8.0
+const NEAR_CORRIDOR_RADIUS := 2
+const STREAM_FAST_SPEED := 180.0
+const HORIZON_PREDICTION_TIME := 1.4
+const HORIZON_PREDICTION_MAX_SECTORS := 3
+const GROUND_COLLISION_ALTITUDE_MARGIN := 18.0
+const DESCENT_COLLISION_LOOKAHEAD := 3.0
+const GROUND_ACTOR_COLLISION_RANGE_CHUNKS := Gen.VIEW_R + 2
+const GROUND_ACTOR_COLLISION_PATCH_RADIUS := 1
+# Every tracked actor is range-gated to the local player's surrounding chunk
+# square before its 3x3 floor patch is added. This fixed ceiling keeps remote/AI
+# collision shells from turning the near-stream queue into an unbounded lane.
+const GROUND_ACTOR_COLLISION_SHELL_RADIUS := \
+	GROUND_ACTOR_COLLISION_RANGE_CHUNKS + GROUND_ACTOR_COLLISION_PATCH_RADIUS
+const GROUND_ACTOR_COLLISION_SHELL_TARGET_LIMIT := \
+	(GROUND_ACTOR_COLLISION_SHELL_RADIUS * 2 + 1) \
+	* (GROUND_ACTOR_COLLISION_SHELL_RADIUS * 2 + 1)
+const STRATOS_PREDICTION_TIME := 2.0
+const STREAMED_WILDERNESS_VEHICLE_LIMIT := 16
+const STREAM_DETAIL_ENQUEUED_META := &"stream_detail_enqueued_usec"
 const DEFEAT_VIEW_TIME := 2.35
 const MELEE_RADIUS := 0.88
 const MELEE_DAMAGE := [24.0, 29.0, 38.0]
@@ -34,31 +60,62 @@ static var _impact_actor_material: StandardMaterial3D
 var chunks: Dictionary = {}          # Vector2i -> Chunk
 var _queue: Array = []
 var _near_pending: Dictionary = {}
+var _near_targets: Dictionary = {}
+var _near_enqueued_at: Dictionary = {}
+var _collision_targets: Dictionary = {}
 var _collision_queue: Array[Chunk] = []
 var _chunk_detail_queue: Array[Chunk] = []
 var horizon_chunks: Dictionary = {}  # Vector2i -> HorizonChunk macro sectors
 var _horizon_queue: Array = []
 var _horizon_pending: Dictionary = {}
+var _horizon_targets: Dictionary = {}
+var _horizon_enqueued_at: Dictionary = {}
 var _horizon_detail_queue: Array[HorizonChunk] = []
 var skyline_chunks: Dictionary = {}  # Vector2i -> SkylineChunk mountain vista
 var _skyline_queue: Array = []
 var _skyline_pending: Dictionary = {}
+var _skyline_enqueued_at: Dictionary = {}
 var _skyline_detail_queue: Array[SkylineChunk] = []
 var _skyline_center := Vector2i(0x3fffffff, 0x3fffffff)
 var stratos_chunks: Dictionary = {}  # Vector2i -> StratosChunk (altitude tier)
 var _stratos_queue: Array = []
+var _stratos_enqueued_at: Dictionary = {}
+var _stratos_targets: Dictionary = {}
+var _stratos_required_targets: Dictionary = {}
 var _stratos_center := Vector2i(0x3fffffff, 0x3fffffff)
+var _stratos_prefetch_center := Vector2i(0x3fffffff, 0x3fffffff)
 var _stratos_ring := -1
 var current_view_distance := Gen.VIEW_BASE_DISTANCE
 var _altitude_quality_low := false
 var _stream_center := Vector2i(0x3fffffff, 0x3fffffff)
 var _prefetch_center := Vector2i(0x3fffffff, 0x3fffffff)
 var _horizon_center := Vector2i(0x3fffffff, 0x3fffffff)
+var _horizon_prefetch_center := Vector2i(0x3fffffff, 0x3fffffff)
+var _far_shell_lane := 0
+var _far_shell_defer_frames := 0
+var _far_tree_lane := 0
+var _decoration_lane := 0
+var _stream_speed_mps := 0.0
+var _ground_collision_required := true
+var _local_collision_required := true
+var _ground_actor_collision_centers: Array[Vector2i] = []
+var _actor_collision_targets: Dictionary = {}
+var _tracked_ground_vehicle_count := 0
+var _stream_shell_usec_last := 0
+var _stream_safety_usec_last := 0
+var _stream_decoration_usec_last := 0
+var _stream_shell_ops_last := 0
+var _stream_safety_ops_last := 0
+var _stream_decoration_ops_last := 0
+var _stream_shells_built := 0
+var _stream_cancelled_jobs := 0
 var local_player: MonkeyPlayer
 var puppets: Dictionary = {}         # peer id -> Puppet
 var vehicles: Dictionary = {}        # stable vehicle id -> Vehicle node
 var _pending_vehicle_entry := ""     # vid awaiting the host's seat claim
-var _spawned_vehicle_ids: Dictionary = {}  # session dedupe for chunk spawns
+var _spawned_vehicle_ids: Dictionary = {}  # dedupe for currently retained spawns
+var _streamed_vehicle_sources: Dictionary = {} # wilderness id -> origin chunk
+var _retained_wilderness_vehicle_ids: Dictionary = {} # mounted once -> session citizen
 var _marker: MeshInstance3D
 var _particles: GPUParticles3D
 var water_fx: WaterFX
@@ -531,18 +588,97 @@ func spawn_vehicle(kind: int, vid: String, pos: Vector3,
 	return v
 
 
-## Chunk streaming hands deterministic spawn definitions up here; each stable
-## id spawns at most once per session so re-streamed chunks never duplicate a
-## machine that has since been driven away.
+## Chunk streaming hands deterministic spawn definitions up here. Retained,
+## driven, curated, and networked IDs remain deduplicated for the session;
+## untouched disposable wilderness IDs leave this set when their chunks retire,
+## allowing the same deterministic machine to respawn if the player returns.
 func request_vehicle_spawns(defs: Array) -> void:
 	for def in defs:
 		var vid := str(def.get("id", ""))
 		if vid.is_empty() or _spawned_vehicle_ids.has(vid) \
 				or vehicles.has(vid):
 			continue
+		var spawn_pos: Vector3 = def.get("pos", Vector3.ZERO)
+		var source := Vector2i(floori(spawn_pos.x / Gen.CHUNK),
+			floori(spawn_pos.z / Gen.CHUNK))
+		# Only coordinate IDs are disposable wilderness finds. Curated pool/dock/
+		# hangar machines and admin/network definitions remain session citizens.
+		if vid == "v:%d,%d#0" % [source.x, source.y]:
+			_streamed_vehicle_sources[vid] = source
 		_spawned_vehicle_ids[vid] = true
-		spawn_vehicle(int(def.get("kind", 0)), vid,
-			def.get("pos", Vector3.ZERO), float(def.get("yaw", 0.0)))
+		spawn_vehicle(int(def.get("kind", 0)), vid, spawn_pos,
+			float(def.get("yaw", 0.0)))
+
+
+## Once a player has successfully mounted a deterministic wilderness find, it is
+## no longer disposable streaming scenery. Keep its stable ID and live node for
+## the rest of this world session so dismounting preserves the parked transform.
+func _mark_wilderness_vehicle_touched(vid: String) -> void:
+	if _streamed_vehicle_sources.has(vid):
+		_retained_wilderness_vehicle_ids[vid] = true
+
+
+func _streamed_vehicle_is_protected(vid: String, vehicle: Vehicle) -> bool:
+	return not is_instance_valid(vehicle) or vehicle.driver != null \
+		or vehicle.remote_controlled or vehicle.occupied_by_peer != 0 \
+		or _pending_vehicle_entry == vid or Net.claimed_vehicles.has(vid) \
+		or Net.vehicle_rests.has(vid) \
+		or Net.vehicle_spawn_definitions.has(vid) \
+		or _retained_wilderness_vehicle_ids.has(vid)
+
+
+func _retire_streamed_wilderness_vehicle(vid: String) -> void:
+	var candidate = vehicles.get(vid)
+	if is_instance_valid(candidate):
+		(candidate as Vehicle).queue_free()
+	vehicles.erase(vid)
+	_streamed_vehicle_sources.erase(vid)
+	_retained_wilderness_vehicle_ids.erase(vid)
+	_spawned_vehicle_ids.erase(vid)
+
+
+## Deterministic untouched wilderness finds follow their source/actual chunk and
+## retire once both are outside the bounded near corridor. Driven, claimed, or
+## replicated machines are explicitly retained, preserving the old promise that
+## a player can take a vehicle kilometres from where it originally spawned.
+func _retire_streamed_wilderness_vehicles() -> void:
+	var disposable: Array[String] = []
+	for vid_value in _streamed_vehicle_sources.keys():
+		var vid := str(vid_value)
+		var candidate = vehicles.get(vid)
+		if not is_instance_valid(candidate):
+			disposable.append(vid)
+			continue
+		var vehicle := candidate as Vehicle
+		if _streamed_vehicle_is_protected(vid, vehicle):
+			continue
+		var source: Vector2i = _streamed_vehicle_sources[vid]
+		var actual := Vector2i(floori(vehicle.global_position.x / Gen.CHUNK),
+			floori(vehicle.global_position.z / Gen.CHUNK))
+		if not _near_targets.has(source) and not _near_targets.has(actual):
+			disposable.append(vid)
+	for vid in disposable:
+		_retire_streamed_wilderness_vehicle(vid)
+
+	# The deterministic density normally leaves only 2-5 finds inside the swept
+	# corridor. Keep a hard safety bound for pathological seeds by retiring the
+	# farthest untouched machines first; protected player/network state is exempt.
+	var unprotected: Array[Vehicle] = []
+	for vid_value in _streamed_vehicle_sources.keys():
+		var vid := str(vid_value)
+		var candidate = vehicles.get(vid)
+		if is_instance_valid(candidate) \
+				and not _streamed_vehicle_is_protected(vid, candidate as Vehicle):
+			unprotected.append(candidate as Vehicle)
+	if unprotected.size() <= STREAMED_WILDERNESS_VEHICLE_LIMIT:
+		return
+	var focus := local_player.global_position if local_player else Vector3.ZERO
+	unprotected.sort_custom(func(a: Vehicle, b: Vehicle):
+		return a.global_position.distance_squared_to(focus) \
+			> b.global_position.distance_squared_to(focus))
+	while unprotected.size() > STREAMED_WILDERNESS_VEHICLE_LIMIT:
+		var vehicle: Vehicle = unprotected.pop_front() as Vehicle
+		_retire_streamed_wilderness_vehicle(vehicle.vid)
 
 
 func vehicle_by_id(vid: String) -> Vehicle:
@@ -588,6 +724,8 @@ func try_enter_vehicle(player: Node3D) -> bool:
 		return false
 	if not Net.active:
 		player.call("enter_vehicle", v)
+		if v.driver == player:
+			_mark_wilderness_vehicle_touched(v.vid)
 		return true
 	_pending_vehicle_entry = v.vid
 	if Net.request_vehicle(v.vid):
@@ -602,6 +740,8 @@ func _on_vehicle_claimed(vid: String, claimant_id: int) -> void:
 		if _pending_vehicle_entry == vid and v and local_player \
 				and is_instance_valid(local_player):
 			local_player.enter_vehicle(v)
+			if v.driver == local_player:
+				_mark_wilderness_vehicle_touched(v.vid)
 		_pending_vehicle_entry = ""
 		return
 	if v:
@@ -982,6 +1122,55 @@ func water_surface_y(x: float, z: float) -> float:
 
 # ---- streaming -------------------------------------------------------------
 
+func _track_ground_actor_collision(actor: Node3D, focus: Vector3) -> bool:
+	if not is_instance_valid(actor) or actor.is_queued_for_deletion() \
+			or actor == local_player:
+		return false
+	var horizontal_delta := Vector2(actor.global_position.x - focus.x,
+		actor.global_position.z - focus.z)
+	var range_limit := Gen.CHUNK * float(GROUND_ACTOR_COLLISION_RANGE_CHUNKS)
+	if horizontal_delta.length_squared() > range_limit * range_limit:
+		return false
+	var ground := Gen.height(actor.global_position.x, actor.global_position.z)
+	if actor.global_position.y - ground > GROUND_COLLISION_ALTITUDE_MARGIN:
+		return false
+	var center := Vector2i(floori(actor.global_position.x / Gen.CHUNK),
+		floori(actor.global_position.z / Gen.CHUNK))
+	if not _ground_actor_collision_centers.has(center):
+		_ground_actor_collision_centers.append(center)
+	return true
+
+
+func _update_collision_requirement(player_pos: Vector3) -> void:
+	var ground := Gen.height(player_pos.x, player_pos.z)
+	var clearance := player_pos.y - ground
+	var vertical_velocity := local_player.velocity.y if local_player else 0.0
+	# A descending aircraft requests its swept collision corridor several seconds
+	# before impact, not only after it is already within 18 m of the terrain.
+	var predicted_clearance := clearance \
+		+ minf(vertical_velocity, 0.0) * DESCENT_COLLISION_LOOKAHEAD
+	_local_collision_required = clearance <= GROUND_COLLISION_ALTITUDE_MARGIN \
+		or predicted_clearance <= GROUND_COLLISION_ALTITUDE_MARGIN
+	_ground_actor_collision_centers.clear()
+	_tracked_ground_vehicle_count = 0
+	if ai_opponent and is_instance_valid(ai_opponent):
+		_track_ground_actor_collision(ai_opponent, player_pos)
+	for actor in friendly_monkeys:
+		if actor is Node3D:
+			_track_ground_actor_collision(actor, player_pos)
+	for actor in puppets.values():
+		if actor is Node3D:
+			_track_ground_actor_collision(actor, player_pos)
+	# Parked rigid bodies need the same terrain floor while the local player is
+	# flying overhead. High aircraft naturally fail the clearance test, while a
+	# nearby Jeep, bike, boat, or landed jet keeps a 3x3 collision safety patch.
+	for actor in vehicles.values():
+		if actor is Node3D \
+				and _track_ground_actor_collision(actor as Node3D, player_pos):
+			_tracked_ground_vehicle_count += 1
+	_ground_collision_required = _local_collision_required \
+		or not _ground_actor_collision_centers.is_empty()
+
 func center_chunk() -> Vector2i:
 	var c := local_player.global_position if local_player else Vector3.ZERO
 	return Vector2i(floori(c.x / Gen.CHUNK), floori(c.z / Gen.CHUNK))
@@ -1001,7 +1190,7 @@ static func gameplay_camera_far_distance(streamed_distance: float,
 func _process(dt: float) -> void:
 	_t += dt
 	_update_day_night(dt)
-	_stream(BUILD_BUDGET)
+	_stream()
 	if local_player:
 		Visuals.set_far_focus(local_player.global_position)
 		_update_biome_ambience(dt)
@@ -1201,138 +1390,321 @@ func _apply_day_night(update_sky: bool) -> void:
 		_sun.global_basis.z.normalized())
 
 
-func _stream(budget: int) -> void:
+func _stream() -> void:
 	var cc := center_chunk()
+	var player_pos := local_player.global_position if local_player else Vector3.ZERO
+	var horizontal_velocity := Vector2.ZERO
+	if local_player:
+		horizontal_velocity = Vector2(local_player.velocity.x, local_player.velocity.z)
+	_stream_speed_mps = horizontal_velocity.length()
+	_update_collision_requirement(player_pos)
+
 	var predicted := _predicted_near_center(cc)
-	if cc != _stream_center or predicted != _prefetch_center:
+	# Actor collision patches can cross a chunk boundary while the local player and
+	# its predictive center remain unchanged. Refresh collision targets first and
+	# rebuild the near shell set whenever that membership changes.
+	var collision_targets_changed := _refresh_collision_targets(cc, predicted)
+	if cc != _stream_center or predicted != _prefetch_center \
+			or collision_targets_changed:
 		_refresh_near_targets(cc, predicted)
 	var hc := center_horizon_sector()
-	if hc != _horizon_center:
-		_refresh_horizon_targets(hc)
+	var horizon_sector_size := Gen.CHUNK * Gen.HORIZON_SECTOR_CHUNKS
+	var horizon_lead := Vector2(player_pos.x, player_pos.z) \
+		+ horizontal_velocity * HORIZON_PREDICTION_TIME
+	var predicted_hc := Vector2i(floori(horizon_lead.x / horizon_sector_size),
+		floori(horizon_lead.y / horizon_sector_size))
+	var horizon_offset := predicted_hc - hc
+	predicted_hc = hc + Vector2i(clampi(horizon_offset.x,
+		-HORIZON_PREDICTION_MAX_SECTORS, HORIZON_PREDICTION_MAX_SECTORS),
+		clampi(horizon_offset.y, -HORIZON_PREDICTION_MAX_SECTORS,
+			HORIZON_PREDICTION_MAX_SECTORS))
+	if hc != _horizon_center or predicted_hc != _horizon_prefetch_center:
+		_refresh_horizon_targets(hc, predicted_hc)
 	var sc := center_skyline_sector()
 	if sc != _skyline_center:
 		_refresh_skyline_targets(sc)
 	var stratos_sector_size := Gen.CHUNK * Gen.STRATOS_SECTOR_CHUNKS
-	var player_pos := local_player.global_position if local_player \
-		else Vector3.ZERO
 	var stc := Vector2i(floori(player_pos.x / stratos_sector_size),
 		floori(player_pos.z / stratos_sector_size))
+	var stratos_lead := Vector2(player_pos.x, player_pos.z) \
+		+ horizontal_velocity * STRATOS_PREDICTION_TIME
+	var predicted_stc := Vector2i(floori(stratos_lead.x / stratos_sector_size),
+		floori(stratos_lead.y / stratos_sector_size))
+	var stratos_offset := predicted_stc - stc
+	predicted_stc = stc + Vector2i(clampi(stratos_offset.x, -1, 1),
+		clampi(stratos_offset.y, -1, 1))
 	var ring := clampi(ceili(current_view_distance / stratos_sector_size), 1, 4)
-	if stc != _stratos_center or ring != _stratos_ring:
-		_refresh_stratos_targets(stc, ring)
-	var did_heavy_work := false
-	if not _queue.is_empty():
-		var n := mini(budget, _queue.size())
-		for i in range(n):
-			var k: Vector2i = _queue.pop_front()
-			_near_pending.erase(k)
-			if (_chunk_in_window(k, cc, Gen.VIEW_R) \
-					or _chunk_in_window(k, predicted, Gen.VIEW_R)) \
-					and not chunks.has(k):
-				_build_chunk(k, true)
-				did_heavy_work = true
-	# Only the current and adjacent chunks need collision broadphase entries.
-	# A full 48 m safety ring remains around even the fastest monkey.
+	if stc != _stratos_center or predicted_stc != _stratos_prefetch_center \
+			or ring != _stratos_ring:
+		_refresh_stratos_targets(stc, predicted_stc, ring)
+
+	# Terrain shells, collision-critical completion, and visual decoration each
+	# receive their own elapsed-time budget. A busy safety lane can no longer
+	# consume every frame and indefinitely starve horizon/skyline tree silhouettes.
+	_run_shell_work(cc, hc, sc, stc, ring)
+	_sync_collision_queue()
+	_run_safety_work(cc, predicted)
+	_run_decorative_work()
+
+
+func _run_shell_work(cc: Vector2i, hc: Vector2i, sc: Vector2i,
+		stc: Vector2i, ring: int) -> void:
+	var started := Time.get_ticks_usec()
+	var ops := 0
+	var built_near := _build_one_near_shell(cc)
+	if built_near:
+		ops += 1
+	# The predictive guard normally makes this zero. If a 1000 mph diagonal or
+	# abrupt turn still exposes a current 5x5 shell, complete that shell before
+	# discretionary far work. This uses the existing three-op hard ceiling and
+	# does not relax the elapsed-time budget for ordinary prefetch work.
+	while ops < STREAM_SHELL_MAX_OPS \
+			and _missing_square(chunks, cc, Gen.VIEW_R) > 0:
+		if not _build_one_near_shell(cc):
+			break
+		ops += 1
+	# Do not blindly start another heavy mesh after the near shell has consumed
+	# this frame's allowance. A one-frame anti-starvation deadline still gives the
+	# far tiers at least 30 opportunities/s at a 60 Hz render rate.
+	var far_waiting := not _horizon_queue.is_empty() or not _stratos_queue.is_empty() \
+		or not _skyline_queue.is_empty()
+	var can_build_far := not built_near \
+		or Time.get_ticks_usec() - started < STREAM_SHELL_BUDGET_USEC \
+		or _far_shell_defer_frames >= 1
+	if far_waiting and can_build_far and ops < STREAM_SHELL_MAX_OPS:
+		if _build_one_far_shell(hc, sc, stc, ring):
+			ops += 1
+			_far_shell_defer_frames = 0
+	elif far_waiting:
+		_far_shell_defer_frames += 1
+	else:
+		_far_shell_defer_frames = 0
+	# Drain one additional prefetch shell when the measured lane has headroom.
+	# This is what absorbs the nine-tile corner of a diagonal chunk crossing while
+	# keeping the common frame bounded to one near plus one far-tier operation.
+	if ops < STREAM_SHELL_MAX_OPS and not _queue.is_empty() \
+			and Time.get_ticks_usec() - started < STREAM_SHELL_BUDGET_USEC:
+		if _build_one_near_shell(cc):
+			ops += 1
+	_stream_shell_ops_last = ops
+	_stream_shell_usec_last = Time.get_ticks_usec() - started
+
+
+func _build_one_near_shell(_cc: Vector2i) -> bool:
+	while not _queue.is_empty():
+		var k: Vector2i = _queue.pop_front()
+		_near_pending.erase(k)
+		_near_enqueued_at.erase(k)
+		if not _near_targets.has(k) or chunks.has(k):
+			_stream_cancelled_jobs += 1
+			continue
+		_build_chunk(k, true)
+		_stream_shells_built += 1
+		return true
+	return false
+
+
+func _build_one_far_shell(hc: Vector2i, sc: Vector2i, stc: Vector2i,
+		ring: int) -> bool:
+	# Establish the current full far plane before spending work on predictive or
+	# decorative bands. This priority is temporary (mainly initial warmup); once
+	# complete, the 2 s predictive stratos row is served by the fair cycle below.
+	if _has_missing_required_stratos() \
+			and _build_one_stratos_shell(stc, ring):
+		return true
+	# A 192 m horizon row arrives much more often than the 768 m skyline or
+	# 6144 m stratos rows at aircraft speed. Three weighted horizon turns followed
+	# by one ultra-far turn meet that measured demand. Stratos consumes that fourth
+	# turn only while predictive work exists; skyline receives every idle one.
+	for attempt in range(4):
+		var lane := _far_shell_lane % 4
+		_far_shell_lane += 1
+		if lane < 3:
+			if _build_one_horizon_shell(hc):
+				return true
+		else:
+			if _build_one_stratos_shell(stc, ring):
+				return true
+			if _build_one_skyline_shell(sc):
+				return true
+	return false
+
+
+func _has_missing_required_stratos() -> bool:
+	for k in _stratos_required_targets:
+		if not stratos_chunks.has(k):
+			return true
+	return false
+
+
+func _build_one_horizon_shell(_hc: Vector2i) -> bool:
+	while not _horizon_queue.is_empty():
+		var k: Vector2i = _horizon_queue.pop_front()
+		_horizon_pending.erase(k)
+		_horizon_enqueued_at.erase(k)
+		if not _horizon_targets.has(k) or horizon_chunks.has(k):
+			_stream_cancelled_jobs += 1
+			continue
+		_build_horizon_chunk(k, true)
+		_stream_shells_built += 1
+		return true
+	return false
+
+
+func _build_one_stratos_shell(_stc: Vector2i, _ring: int) -> bool:
+	while not _stratos_queue.is_empty():
+		var k: Vector2i = _stratos_queue.pop_front()
+		_stratos_enqueued_at.erase(k)
+		if not _stratos_targets.has(k) or stratos_chunks.has(k):
+			_stream_cancelled_jobs += 1
+			continue
+		var sector: Node3D = StratosChunkScript.new()
+		add_child(sector)
+		sector.setup(k)
+		stratos_chunks[k] = sector
+		_stream_shells_built += 1
+		return true
+	return false
+
+
+func _build_one_skyline_shell(sc: Vector2i) -> bool:
+	while not _skyline_queue.is_empty():
+		var k: Vector2i = _skyline_queue.pop_front()
+		_skyline_pending.erase(k)
+		_skyline_enqueued_at.erase(k)
+		var delta := (k - sc).abs()
+		if maxi(delta.x, delta.y) > Gen.SKYLINE_VIEW_R \
+				or skyline_chunks.has(k):
+			_stream_cancelled_jobs += 1
+			continue
+		_build_skyline_chunk(k)
+		_stream_shells_built += 1
+		return true
+	return false
+
+
+func _sync_collision_queue() -> void:
 	for k in chunks:
-		var collision_delta: Vector2i = (k - cc).abs()
-		var wants_collision := maxi(collision_delta.x, collision_delta.y) <= 1
 		var chunk: Chunk = chunks[k]
-		if wants_collision and not chunk.has_collisions() \
-				and not chunk.is_deferred_build_pending():
-			if not _collision_queue.has(chunk):
+		var wants_collision := _ground_collision_required \
+			and _collision_targets.has(k)
+		if wants_collision:
+			if chunk.has_collisions():
+				chunk.set_collision_active(true)
+				_collision_queue.erase(chunk)
+			elif not _collision_queue.has(chunk):
 				_collision_queue.append(chunk)
 		else:
-			if not wants_collision:
-				_collision_queue.erase(chunk)
-			chunk.set_collision_active(wants_collision)
+			_collision_queue.erase(chunk)
+			chunk.set_collision_active(false)
 
-	# Spend at most one heavy streaming token per frame. Gameplay collision wins
-	# over decorative completion and horizon work once the terrain shell is safe.
-	if not did_heavy_work and not _collision_queue.is_empty():
-		_collision_queue.sort_custom(func(a: Chunk, b: Chunk):
-			return Vector2(a.key - cc).length_squared() < Vector2(b.key - cc).length_squared())
-		var collision_chunk: Chunk = _collision_queue.pop_front()
-		if is_instance_valid(collision_chunk):
-			collision_chunk.set_collision_active(true)
-			did_heavy_work = true
 
-	# Publish coarse horizon shells before decorative near-chunk stages. This keeps
-	# the backdrop independent and bounded while center-chunk collision already
-	# protects the newly joined player.
-	if not did_heavy_work and not _horizon_queue.is_empty():
-		var n := mini(HORIZON_BUILD_BUDGET, _horizon_queue.size())
-		for i in range(n):
-			var k: Vector2i = _horizon_queue.pop_front()
-			_horizon_pending.erase(k)
-			var delta := (k - hc).abs()
-			if maxi(delta.x, delta.y) <= Gen.HORIZON_VIEW_R \
-					and not horizon_chunks.has(k):
-				_build_horizon_chunk(k, true)
-				did_heavy_work = true
-
-	if not did_heavy_work:
-		while not _chunk_detail_queue.is_empty():
-			var detail_chunk: Chunk = _chunk_detail_queue.pop_front()
-			if not is_instance_valid(detail_chunk) \
-					or not detail_chunk.is_deferred_build_pending():
-				continue
-			var finished := detail_chunk.finish_deferred_build_step()
+func _run_safety_work(cc: Vector2i, predicted: Vector2i) -> void:
+	var started := Time.get_ticks_usec()
+	var ops := 0
+	_collision_queue.sort_custom(func(a: Chunk, b: Chunk):
+		var a_current := Vector2(a.key - cc).length_squared()
+		var b_current := Vector2(b.key - cc).length_squared()
+		if is_equal_approx(a_current, b_current):
+			return Vector2(a.key - predicted).length_squared() \
+				< Vector2(b.key - predicted).length_squared()
+		return a_current < b_current)
+	while not _collision_queue.is_empty() and ops < STREAM_SAFETY_MAX_OPS:
+		var chunk: Chunk = _collision_queue.pop_front()
+		if not is_instance_valid(chunk) or not _ground_collision_required \
+				or not _collision_targets.has(chunk.key):
+			continue
+		if chunk.has_collisions():
+			chunk.set_collision_active(true)
+		elif chunk.is_deferred_build_pending():
+			var finished := chunk.finish_deferred_build_step()
 			if finished:
-				_register_chunk_bananas(detail_chunk)
+				_register_chunk_bananas(chunk)
+				chunk.remove_meta(STREAM_DETAIL_ENQUEUED_META)
+			if chunk.has_collisions():
+				chunk.set_collision_active(true)
 			else:
-				_chunk_detail_queue.append(detail_chunk)
-			did_heavy_work = true
+				_collision_queue.append(chunk)
+		else:
+			# Chunks first prefetched outside the safety corridor intentionally skip
+			# collision at setup. Build it now, after every authored prop exists.
+			chunk.set_collision_active(true)
+		ops += 1
+		if Time.get_ticks_usec() - started >= STREAM_SAFETY_BUDGET_USEC:
 			break
+	_stream_safety_ops_last = ops
+	_stream_safety_usec_last = Time.get_ticks_usec() - started
 
-	# Stratos altitude sectors: only queued while elevation demands them;
-	# each is one mesh, so a single build token per frame fills the ring fast.
-	if not did_heavy_work and not _stratos_queue.is_empty():
-		var stk: Vector2i = _stratos_queue.pop_front()
-		if not stratos_chunks.has(stk):
-			var sector: Node3D = StratosChunkScript.new()
-			add_child(sector)
-			sector.setup(stk)
-			stratos_chunks[stk] = sector
-			did_heavy_work = true
 
-	# Skyline mountain sectors: huge, rare, and purely scenic. They outrank the
-	# horizon's decorative tree silhouettes so distant ranges appear promptly,
-	# but never displace near-field streaming or collision work.
-	if not did_heavy_work and not _skyline_queue.is_empty():
-		var sk: Vector2i = _skyline_queue.pop_front()
-		_skyline_pending.erase(sk)
-		var sd := (sk - sc).abs()
-		if maxi(sd.x, sd.y) <= Gen.SKYLINE_VIEW_R \
-				and not skyline_chunks.has(sk):
-			_build_skyline_chunk(sk)
-			did_heavy_work = true
-
-	# Tree silhouettes and other visual detail use only otherwise-idle frames.
-	if not did_heavy_work:
-		while not _horizon_detail_queue.is_empty():
-			var detail_sector: HorizonChunk = _horizon_detail_queue.front()
-			if not is_instance_valid(detail_sector) \
-					or detail_sector.is_queued_for_deletion():
-				_horizon_detail_queue.pop_front()
-				continue
-			if detail_sector.build_tree_step(HORIZON_TREE_SOURCE_BUDGET):
-				_horizon_detail_queue.pop_front()
-			did_heavy_work = true
+func _run_decorative_work() -> void:
+	var started := Time.get_ticks_usec()
+	var ops := 0
+	# Reserve the first decorative slice for a far-tree lane. It advances even
+	# while near shells/collisions are continuously arriving at aircraft speed.
+	if _build_one_far_tree_step():
+		ops += 1
+	while ops < STREAM_DECORATION_MAX_OPS \
+			and Time.get_ticks_usec() - started < STREAM_DECORATION_BUDGET_USEC:
+		var prefer_near := (_decoration_lane % 2) == 0
+		_decoration_lane += 1
+		var built := _build_one_near_detail_step() if prefer_near \
+			else _build_one_far_tree_step()
+		if not built:
+			built = _build_one_far_tree_step() if prefer_near \
+				else _build_one_near_detail_step()
+		if not built:
 			break
+		ops += 1
+	_stream_decoration_ops_last = ops
+	_stream_decoration_usec_last = Time.get_ticks_usec() - started
 
-	# Skyline tree silhouettes fill last: they cover 256 source chunks per
-	# sector, so they only ever consume frames nothing else wanted.
-	if not did_heavy_work:
-		while not _skyline_detail_queue.is_empty():
-			var skyline_detail: SkylineChunk = _skyline_detail_queue.front()
-			if not is_instance_valid(skyline_detail) \
-					or skyline_detail.is_queued_for_deletion():
-				_skyline_detail_queue.pop_front()
-				continue
-			if skyline_detail.build_tree_step(SKYLINE_TREE_SOURCE_BUDGET):
-				_skyline_detail_queue.pop_front()
-			did_heavy_work = true
-			break
+
+func _build_one_near_detail_step() -> bool:
+	while not _chunk_detail_queue.is_empty():
+		var chunk: Chunk = _chunk_detail_queue.pop_front()
+		if not is_instance_valid(chunk) or not chunk.is_deferred_build_pending():
+			continue
+		var finished := chunk.finish_deferred_build_step()
+		if finished:
+			_register_chunk_bananas(chunk)
+			chunk.remove_meta(STREAM_DETAIL_ENQUEUED_META)
+		else:
+			_chunk_detail_queue.append(chunk)
+		return true
+	return false
+
+
+func _build_one_far_tree_step() -> bool:
+	for attempt in range(2):
+		var lane := _far_tree_lane % 2
+		_far_tree_lane += 1
+		if lane == 0:
+			while not _horizon_detail_queue.is_empty():
+				var sector: HorizonChunk = _horizon_detail_queue.front()
+				if not is_instance_valid(sector) or sector.is_queued_for_deletion():
+					_horizon_detail_queue.pop_front()
+					continue
+				var source_budget := HORIZON_TREE_SOURCE_BUDGET_FAST \
+					if _stream_speed_mps >= STREAM_FAST_SPEED \
+					else HORIZON_TREE_SOURCE_BUDGET
+				if sector.build_tree_step(source_budget):
+					_horizon_detail_queue.pop_front()
+					sector.remove_meta(STREAM_DETAIL_ENQUEUED_META)
+				return true
+		else:
+			while not _skyline_detail_queue.is_empty():
+				var sector: SkylineChunk = _skyline_detail_queue.front()
+				if not is_instance_valid(sector) or sector.is_queued_for_deletion():
+					_skyline_detail_queue.pop_front()
+					continue
+				var source_budget := SKYLINE_TREE_SOURCE_BUDGET_FAST \
+					if _stream_speed_mps >= STREAM_FAST_SPEED \
+					else SKYLINE_TREE_SOURCE_BUDGET
+				if sector.build_tree_step(source_budget):
+					_skyline_detail_queue.pop_front()
+					sector.remove_meta(STREAM_DETAIL_ENQUEUED_META)
+				return true
+	return false
 
 
 func center_horizon_sector() -> Vector2i:
@@ -1354,8 +1726,10 @@ func _predicted_near_center(cc: Vector2i) -> Vector2i:
 		+ local_player.velocity * NEAR_PREDICTION_TIME
 	var raw := Vector2i(floori(lead.x / Gen.CHUNK),
 		floori(lead.z / Gen.CHUNK))
-	var offset := raw - cc
-	return cc + Vector2i(clampi(offset.x, -1, 1), clampi(offset.y, -1, 1))
+	var offset := Vector2(raw - cc)
+	if offset.length() > NEAR_PREDICTION_MAX_CHUNKS:
+		offset = offset.normalized() * NEAR_PREDICTION_MAX_CHUNKS
+	return cc + Vector2i(roundi(offset.x), roundi(offset.y))
 
 
 func _chunk_in_window(k: Vector2i, center: Vector2i, radius: int) -> bool:
@@ -1363,39 +1737,116 @@ func _chunk_in_window(k: Vector2i, center: Vector2i, radius: int) -> bool:
 	return maxi(delta.x, delta.y) <= radius
 
 
-func _append_near_window(target_center: Vector2i) -> void:
-	for dx in range(-Gen.VIEW_R, Gen.VIEW_R + 1):
-		for dz in range(-Gen.VIEW_R, Gen.VIEW_R + 1):
-			var k := target_center + Vector2i(dx, dz)
-			if not chunks.has(k) and not _near_pending.has(k):
-				_queue.append(k)
-				_near_pending[k] = true
+func _swept_near_centers(cc: Vector2i, predicted: Vector2i) -> Array[Vector2i]:
+	var centers: Array[Vector2i] = []
+	var delta := predicted - cc
+	var steps := maxi(absi(delta.x), absi(delta.y))
+	if steps <= 0:
+		centers.append(cc)
+		return centers
+	for i in range(steps + 1):
+		var alpha := float(i) / float(steps)
+		var center := Vector2i(roundi(lerpf(float(cc.x), float(predicted.x), alpha)),
+			roundi(lerpf(float(cc.y), float(predicted.y), alpha)))
+		if centers.is_empty() or centers[-1] != center:
+			centers.append(center)
+	return centers
+
+
+func _add_target_window(targets: Dictionary, target_center: Vector2i,
+		radius: int) -> void:
+	for dx in range(-radius, radius + 1):
+		for dz in range(-radius, radius + 1):
+			targets[target_center + Vector2i(dx, dz)] = true
+
+
+func _refresh_collision_targets(cc: Vector2i, predicted: Vector2i) -> bool:
+	var next_targets: Dictionary = {}
+	if _local_collision_required:
+		# Full room to manoeuvre around the player, then a narrow swept centerline
+		# farther ahead. Descending aircraft receive this corridor before impact.
+		_add_target_window(next_targets, cc, 1)
+		for center in _swept_near_centers(cc, predicted):
+			next_targets[center] = true
+	# Keep floors beneath nearby AI/remote monkeys even while the local pilot is
+	# high enough that its own collision corridor can safely sleep. The spatial
+	# range gate makes this dictionary finite; the explicit cap is a final guard if
+	# future actor sources bypass that gate.
+	var actor_targets: Dictionary = {}
+	for actor_center in _ground_actor_collision_centers:
+		_add_target_window(actor_targets, actor_center,
+			GROUND_ACTOR_COLLISION_PATCH_RADIUS)
+	var actor_keys: Array = actor_targets.keys()
+	if actor_keys.size() > GROUND_ACTOR_COLLISION_SHELL_TARGET_LIMIT:
+		actor_keys.sort_custom(func(a, b):
+			var distance_a := Vector2(a - cc).length_squared()
+			var distance_b := Vector2(b - cc).length_squared()
+			if is_equal_approx(distance_a, distance_b):
+				return a.x < b.x if a.x != b.x else a.y < b.y
+			return distance_a < distance_b)
+		actor_keys.resize(GROUND_ACTOR_COLLISION_SHELL_TARGET_LIMIT)
+	_actor_collision_targets.clear()
+	for key in actor_keys:
+		_actor_collision_targets[key] = true
+		next_targets[key] = true
+	var changed := next_targets != _collision_targets
+	_collision_targets = next_targets
+	return changed
 
 
 func _refresh_near_targets(cc: Vector2i, predicted: Vector2i) -> void:
 	_stream_center = cc
 	_prefetch_center = predicted
+	var previous_times := _near_enqueued_at.duplicate()
+	_near_targets.clear()
+	# At vehicle speeds retain one shell-first guard ring outside the visible 5x5.
+	# It covers a sudden steering reversal before the predicted corridor rotates;
+	# walking keeps the original bounded 5x5 footprint.
+	var current_guard_radius := Gen.VIEW_R + 1 \
+		if _stream_speed_mps >= STREAM_FAST_SPEED else Gen.VIEW_R
+	_add_target_window(_near_targets, cc, current_guard_radius)
+	# Ahead of the guard, stream a 5-chunk-wide swept corridor rather than another
+	# full 5x5 square at only the endpoint. At 1000 mph it keeps every lateral tile
+	# ready along the ~0.85 s / eight-chunk path.
+	var swept := _swept_near_centers(cc, predicted)
+	for i in range(1, swept.size()):
+		_add_target_window(_near_targets, swept[i], NEAR_CORRIDOR_RADIUS)
+	# Collision work cannot build a floor without a near terrain shell. Actor
+	# patches are capped above, so merging them preserves the bounded scheduler and
+	# its existing per-frame operation/time ceilings.
+	for k in _collision_targets:
+		_near_targets[k] = true
 	_queue.clear()
 	_near_pending.clear()
-	_append_near_window(cc)
-	if predicted != cc:
-		_append_near_window(predicted)
+	_near_enqueued_at.clear()
+	var now := Time.get_ticks_usec()
+	for k in _near_targets:
+		if not chunks.has(k):
+			_queue.append(k)
+			_near_pending[k] = true
+			_near_enqueued_at[k] = int(previous_times.get(k, now))
+	for old_k in previous_times:
+		if not _near_enqueued_at.has(old_k):
+			_stream_cancelled_jobs += 1
 	_queue.sort_custom(func(a, b):
 		var actual_a := _chunk_in_window(a, cc, Gen.VIEW_R)
 		var actual_b := _chunk_in_window(b, cc, Gen.VIEW_R)
 		if actual_a != actual_b:
 			return actual_a
-		var lead_a := Vector2(a - predicted).length_squared()
-		var lead_b := Vector2(b - predicted).length_squared()
-		if is_equal_approx(lead_a, lead_b):
-			return Vector2(a - cc).length_squared() \
-				< Vector2(b - cc).length_squared()
-		return lead_a < lead_b)
+		var guard_a := _chunk_in_window(a, cc, current_guard_radius)
+		var guard_b := _chunk_in_window(b, cc, current_guard_radius)
+		if guard_a != guard_b:
+			return guard_a
+		var distance_a := Vector2(a - cc).length_squared()
+		var distance_b := Vector2(b - cc).length_squared()
+		if is_equal_approx(distance_a, distance_b):
+			return Vector2(a - predicted).length_squared() \
+				< Vector2(b - predicted).length_squared()
+		return distance_a < distance_b)
 
 	var dead: Array = []
 	for k in chunks:
-		if not _chunk_in_window(k, cc, Gen.DROP_R) \
-				and not _chunk_in_window(k, predicted, Gen.VIEW_R):
+		if not _near_targets.has(k):
 			dead.append(k)
 	for k in dead:
 		var chunk: Chunk = chunks[k]
@@ -1408,25 +1859,45 @@ func _refresh_near_targets(cc: Vector2i, predicted: Vector2i) -> void:
 				unregister_supply_hut(child)
 		chunk.queue_free()
 		chunks.erase(k)
+	_retire_streamed_wilderness_vehicles()
 
 
-func _refresh_horizon_targets(hc: Vector2i) -> void:
+func _refresh_horizon_targets(hc: Vector2i, predicted_hc: Vector2i) -> void:
 	_horizon_center = hc
+	_horizon_prefetch_center = predicted_hc
+	var previous_times := _horizon_enqueued_at.duplicate()
+	_horizon_targets.clear()
+	_add_target_window(_horizon_targets, hc, Gen.HORIZON_VIEW_R)
+	if predicted_hc != hc:
+		_add_target_window(_horizon_targets, predicted_hc, Gen.HORIZON_VIEW_R)
 	_horizon_queue.clear()
 	_horizon_pending.clear()
-	for dx in range(-Gen.HORIZON_VIEW_R, Gen.HORIZON_VIEW_R + 1):
-		for dz in range(-Gen.HORIZON_VIEW_R, Gen.HORIZON_VIEW_R + 1):
-			var k := hc + Vector2i(dx, dz)
-			if not horizon_chunks.has(k):
-				_horizon_queue.append(k)
-				_horizon_pending[k] = true
+	_horizon_enqueued_at.clear()
+	var now := Time.get_ticks_usec()
+	for k in _horizon_targets:
+		if not horizon_chunks.has(k):
+			_horizon_queue.append(k)
+			_horizon_pending[k] = true
+			_horizon_enqueued_at[k] = int(previous_times.get(k, now))
+	for old_k in previous_times:
+		if not _horizon_enqueued_at.has(old_k):
+			_stream_cancelled_jobs += 1
 	_horizon_queue.sort_custom(func(a, b):
-		return Vector2(a - hc).length_squared() \
-			< Vector2(b - hc).length_squared())
+		var inner_a := _chunk_in_window(a, hc,
+			maxi(Gen.HORIZON_VIEW_R - 1, 0))
+		var inner_b := _chunk_in_window(b, hc,
+			maxi(Gen.HORIZON_VIEW_R - 1, 0))
+		if inner_a != inner_b:
+			return inner_a
+		var current_a := _chunk_in_window(a, hc, Gen.HORIZON_VIEW_R)
+		var current_b := _chunk_in_window(b, hc, Gen.HORIZON_VIEW_R)
+		if current_a != current_b:
+			return current_a
+		return Vector2(a - predicted_hc).length_squared() \
+			< Vector2(b - predicted_hc).length_squared())
 	var dead: Array = []
 	for k in horizon_chunks:
-		var d: Vector2i = (k - hc).abs()
-		if maxi(d.x, d.y) > Gen.HORIZON_DROP_R:
+		if not _horizon_targets.has(k):
 			dead.append(k)
 	for k in dead:
 		var sector: HorizonChunk = horizon_chunks[k]
@@ -1435,22 +1906,39 @@ func _refresh_horizon_targets(hc: Vector2i) -> void:
 		horizon_chunks.erase(k)
 
 
-func _refresh_stratos_targets(stc: Vector2i, ring: int) -> void:
+func _refresh_stratos_targets(stc: Vector2i, predicted_stc: Vector2i,
+		ring: int) -> void:
 	_stratos_center = stc
+	_stratos_prefetch_center = predicted_stc
 	_stratos_ring = ring
+	var previous_times := _stratos_enqueued_at.duplicate()
+	_stratos_required_targets.clear()
+	_stratos_targets.clear()
+	_add_target_window(_stratos_required_targets, stc, ring)
+	for k in _stratos_required_targets:
+		_stratos_targets[k] = true
+	if predicted_stc != stc:
+		_add_target_window(_stratos_targets, predicted_stc, ring)
 	_stratos_queue.clear()
-	for dx in range(-ring, ring + 1):
-		for dz in range(-ring, ring + 1):
-			var k := stc + Vector2i(dx, dz)
-			if not stratos_chunks.has(k):
-				_stratos_queue.append(k)
+	_stratos_enqueued_at.clear()
+	var now := Time.get_ticks_usec()
+	for k in _stratos_targets:
+		if not stratos_chunks.has(k):
+			_stratos_queue.append(k)
+			_stratos_enqueued_at[k] = int(previous_times.get(k, now))
+	for old_k in previous_times:
+		if not _stratos_enqueued_at.has(old_k):
+			_stream_cancelled_jobs += 1
 	_stratos_queue.sort_custom(func(a, b):
-		return Vector2(a - stc).length_squared() \
-			< Vector2(b - stc).length_squared())
+		var required_a := _stratos_required_targets.has(a)
+		var required_b := _stratos_required_targets.has(b)
+		if required_a != required_b:
+			return required_a
+		return Vector2(a - predicted_stc).length_squared() \
+			< Vector2(b - predicted_stc).length_squared())
 	var dead: Array = []
 	for k in stratos_chunks:
-		var d: Vector2i = (k - stc).abs()
-		if maxi(d.x, d.y) > ring + 1:
+		if not _stratos_targets.has(k):
 			dead.append(k)
 	for k in dead:
 		stratos_chunks[k].queue_free()
@@ -1459,14 +1947,21 @@ func _refresh_stratos_targets(stc: Vector2i, ring: int) -> void:
 
 func _refresh_skyline_targets(sc: Vector2i) -> void:
 	_skyline_center = sc
+	var previous_times := _skyline_enqueued_at.duplicate()
 	_skyline_queue.clear()
 	_skyline_pending.clear()
+	_skyline_enqueued_at.clear()
+	var now := Time.get_ticks_usec()
 	for dx in range(-Gen.SKYLINE_VIEW_R, Gen.SKYLINE_VIEW_R + 1):
 		for dz in range(-Gen.SKYLINE_VIEW_R, Gen.SKYLINE_VIEW_R + 1):
 			var k := sc + Vector2i(dx, dz)
 			if not skyline_chunks.has(k):
 				_skyline_queue.append(k)
 				_skyline_pending[k] = true
+				_skyline_enqueued_at[k] = int(previous_times.get(k, now))
+	for old_k in previous_times:
+		if not _skyline_enqueued_at.has(old_k):
+			_stream_cancelled_jobs += 1
 	_skyline_queue.sort_custom(func(a, b):
 		return Vector2(a - sc).length_squared() \
 			< Vector2(b - sc).length_squared())
@@ -1486,14 +1981,14 @@ func _build_skyline_chunk(k: Vector2i) -> void:
 	add_child(sector)
 	sector.setup(k, true)
 	skyline_chunks[k] = sector
+	sector.set_meta(STREAM_DETAIL_ENQUEUED_META, Time.get_ticks_usec())
 	_skyline_detail_queue.append(sector)
 
 
 func _build_chunk(k: Vector2i, defer_outer_details := true) -> void:
 	var c := Chunk.new()
 	add_child(c)
-	var d := (k - center_chunk()).abs()
-	var needs_collision := maxi(d.x, d.y) <= 1
+	var needs_collision := _collision_targets.has(k)
 	# Runtime streaming publishes terrain shells first even in the safety ring.
 	# Detail and collision construction then use bounded per-frame stages; the
 	# player cannot traverse the 48 m center chunk before that ring is completed.
@@ -1501,6 +1996,7 @@ func _build_chunk(k: Vector2i, defer_outer_details := true) -> void:
 	c.setup(k, Net.collected, needs_collision, defer_details)
 	chunks[k] = c
 	if defer_details:
+		c.set_meta(STREAM_DETAIL_ENQUEUED_META, Time.get_ticks_usec())
 		_chunk_detail_queue.append(c)
 	else:
 		_register_chunk_bananas(c)
@@ -1514,12 +2010,32 @@ func _register_chunk_bananas(chunk: Chunk) -> void:
 			register_banana(child)
 
 
+## Synchronous startup is the one path allowed to finish a shell outside the
+## per-frame lanes. Collision is explicit because no local player exists yet to
+## populate `_collision_targets`; runtime/high-altitude shells keep using that
+## bounded target set exclusively.
+func _warm_chunk(k: Vector2i, require_collision: bool) -> void:
+	var chunk := chunks.get(k) as Chunk
+	if chunk == null:
+		_build_chunk(k, false)
+		chunk = chunks.get(k) as Chunk
+	elif chunk.is_deferred_build_pending():
+		chunk.finish_deferred_build()
+		_chunk_detail_queue.erase(chunk)
+		chunk.remove_meta(STREAM_DETAIL_ENQUEUED_META)
+		_register_chunk_bananas(chunk)
+	if chunk != null and require_collision:
+		chunk.set_collision_active(true)
+		_collision_queue.erase(chunk)
+
+
 func _build_horizon_chunk(k: Vector2i, defer_trees := true) -> void:
 	var sector = HorizonChunkScript.new()
 	add_child(sector)
 	sector.setup(k, defer_trees)
 	horizon_chunks[k] = sector
 	if defer_trees:
+		sector.set_meta(STREAM_DETAIL_ENQUEUED_META, Time.get_ticks_usec())
 		_horizon_detail_queue.append(sector)
 
 
@@ -1528,8 +2044,9 @@ func warm(radius: int) -> void:
 	for dx in range(-radius, radius + 1):
 		for dz in range(-radius, radius + 1):
 			var k := cc + Vector2i(dx, dz)
-			if not chunks.has(k):
-				_build_chunk(k, false)
+			# Match the original startup floor: the central 3x3 is immediately
+			# playable while an outer warm ring remains visual-only.
+			_warm_chunk(k, maxi(absi(dx), absi(dz)) <= 1)
 	# Nine coarse sectors provide an immediate 288 m+ backdrop. The remaining
 	# sectors stream over subsequent frames without blocking world entry.
 	var hc := center_horizon_sector()
@@ -1550,14 +2067,163 @@ func warm(radius: int) -> void:
 
 ## Fast online entry: publish one fully playable chunk — the one under the
 ## joining peer's jittered spawn spot, which the ID jitter can push outside
-## the origin chunk — and let the normal one-token streaming budget fill the
+## the origin chunk — and let the elapsed-time streaming lanes fill the
 ## surrounding jungle after the player is visible. Solo/test warm() keeps its
 ## deterministic full-radius semantics.
 func warm_online_entry(peer_id := 1) -> void:
 	var pos := spawn_position(peer_id)
 	var cc := Vector2i(floori(pos.x / Gen.CHUNK), floori(pos.z / Gen.CHUNK))
-	if not chunks.has(cc):
-		_build_chunk(cc, false)
+	_warm_chunk(cc, true)
+
+
+func _missing_square(loaded: Dictionary, center: Vector2i, radius: int) -> int:
+	var missing := 0
+	for dx in range(-radius, radius + 1):
+		for dz in range(-radius, radius + 1):
+			if not loaded.has(center + Vector2i(dx, dz)):
+				missing += 1
+	return missing
+
+
+func _oldest_key_queue_ms(queue: Array, enqueued_at: Dictionary,
+		now_usec: int) -> float:
+	var oldest := now_usec
+	var found := false
+	for key in queue:
+		if not enqueued_at.has(key):
+			continue
+		oldest = mini(oldest, int(enqueued_at[key]))
+		found = true
+	return float(now_usec - oldest) / 1000.0 if found else 0.0
+
+
+func _oldest_node_queue_ms(queue: Array, now_usec: int) -> float:
+	var oldest := now_usec
+	var found := false
+	for node in queue:
+		if not is_instance_valid(node) or not node.has_meta(STREAM_DETAIL_ENQUEUED_META):
+			continue
+		oldest = mini(oldest, int(node.get_meta(STREAM_DETAIL_ENQUEUED_META)))
+		found = true
+	return float(now_usec - oldest) / 1000.0 if found else 0.0
+
+
+## Stable public diagnostics for rendered traversal benchmarks. The metrics are
+## intentionally hardware-independent: they expose coverage holes, work age,
+## prediction lead, and bounded queue sizes rather than inferring health from FPS.
+func streaming_snapshot() -> Dictionary:
+	var now := Time.get_ticks_usec()
+	var cc := center_chunk()
+	var hc := center_horizon_sector()
+	var sc := center_skyline_sector()
+	var collision_missing := 0
+	if _ground_collision_required:
+		for k in _collision_targets:
+			if not chunks.has(k) or not (chunks[k] as Chunk).has_collisions():
+				collision_missing += 1
+	var stratos_required_missing := 0
+	var stratos_required_loaded := 0
+	var stratos_canopy_vertices := 0
+	var stratos_canopy_sectors := 0
+	for k in _stratos_required_targets:
+		var sector_value = stratos_chunks.get(k)
+		if not is_instance_valid(sector_value):
+			stratos_required_missing += 1
+			continue
+		stratos_required_loaded += 1
+		var canopy_vertices := int(sector_value.canopy_vertex_count)
+		stratos_canopy_vertices += canopy_vertices
+		if canopy_vertices > 0:
+			stratos_canopy_sectors += 1
+	var stratos_sector_size := Gen.CHUNK * Gen.STRATOS_SECTOR_CHUNKS
+	var focus := local_player.global_position if local_player else Vector3.ZERO
+	var x_min := float(_stratos_center.x - _stratos_ring) * stratos_sector_size
+	var x_max := float(_stratos_center.x + _stratos_ring + 1) * stratos_sector_size
+	var z_min := float(_stratos_center.y - _stratos_ring) * stratos_sector_size
+	var z_max := float(_stratos_center.y + _stratos_ring + 1) * stratos_sector_size
+	var stratos_cardinal_coverage := minf(minf(focus.x - x_min, x_max - focus.x),
+		minf(focus.z - z_min, z_max - focus.z))
+	var streamed_unprotected_vehicles := 0
+	for vid_value in _streamed_vehicle_sources.keys():
+		var vid := str(vid_value)
+		var candidate = vehicles.get(vid)
+		if is_instance_valid(candidate) \
+				and not _streamed_vehicle_is_protected(vid, candidate as Vehicle):
+			streamed_unprotected_vehicles += 1
+	var vehicle_node_count := 0
+	for child in get_children():
+		if child is Vehicle:
+			vehicle_node_count += 1
+	var near_detail_age := _oldest_node_queue_ms(_chunk_detail_queue, now)
+	var horizon_tree_age := _oldest_node_queue_ms(_horizon_detail_queue, now)
+	var skyline_tree_age := _oldest_node_queue_ms(_skyline_detail_queue, now)
+	var shell_age := maxf(
+		_oldest_key_queue_ms(_queue, _near_enqueued_at, now),
+		maxf(_oldest_key_queue_ms(_horizon_queue, _horizon_enqueued_at, now),
+		maxf(_oldest_key_queue_ms(_skyline_queue, _skyline_enqueued_at, now),
+			_oldest_key_queue_ms(_stratos_queue, _stratos_enqueued_at, now))))
+	var total_pending := _queue.size() + _horizon_queue.size() \
+		+ _skyline_queue.size() + _stratos_queue.size() \
+		+ _chunk_detail_queue.size() + _horizon_detail_queue.size() \
+		+ _skyline_detail_queue.size() + _collision_queue.size()
+	var prediction_lead := Vector2(_prefetch_center - _stream_center).length() \
+		* Gen.CHUNK
+	return {
+		"speed_mps": _stream_speed_mps,
+		"prediction_lead_m": prediction_lead,
+		"prediction_lead_s": prediction_lead / maxf(_stream_speed_mps, 0.001),
+		"ground_collision_required": _ground_collision_required,
+		"local_collision_required": _local_collision_required,
+		"tracked_ground_vehicles": _tracked_ground_vehicle_count,
+		"actor_collision_targets": _actor_collision_targets.size(),
+		"actor_collision_target_limit": GROUND_ACTOR_COLLISION_SHELL_TARGET_LIMIT,
+		"collision_targets": _collision_targets.size(),
+		"near_targets": _near_targets.size(),
+		"near_queue": _queue.size(),
+		"horizon_queue": _horizon_queue.size(),
+		"skyline_queue": _skyline_queue.size(),
+		"stratos_queue": _stratos_queue.size(),
+		"collision_queue": _collision_queue.size(),
+		"near_detail_queue": _chunk_detail_queue.size(),
+		"horizon_tree_queue": _horizon_detail_queue.size(),
+		"skyline_tree_queue": _skyline_detail_queue.size(),
+		"total_pending": total_pending,
+		"shell_oldest_ms": shell_age,
+		"near_detail_oldest_ms": near_detail_age,
+		"far_tree_oldest_ms": maxf(horizon_tree_age, skyline_tree_age),
+		"near_path_missing": _missing_square(chunks, cc, 1),
+		"near_current_missing": _missing_square(chunks, cc, Gen.VIEW_R),
+		"horizon_inner_missing": _missing_square(horizon_chunks, hc,
+			maxi(Gen.HORIZON_VIEW_R - 1, 0)),
+		"skyline_inner_missing": _missing_square(skyline_chunks, sc,
+			maxi(Gen.SKYLINE_VIEW_R - 1, 0)),
+		"stratos_required": _stratos_required_targets.size(),
+		"stratos_required_loaded": stratos_required_loaded,
+		"stratos_required_missing": stratos_required_missing,
+		"stratos_cardinal_coverage_m": stratos_cardinal_coverage,
+		"collision_corridor_missing": collision_missing,
+		"stratos_canopy_sectors": stratos_canopy_sectors,
+		"stratos_canopy_vertices": stratos_canopy_vertices,
+		"streamed_wilderness_vehicles": _streamed_vehicle_sources.size(),
+		"streamed_unprotected_vehicles": streamed_unprotected_vehicles,
+		"retained_wilderness_vehicles": _retained_wilderness_vehicle_ids.size(),
+		"spawned_vehicle_ids": _spawned_vehicle_ids.size(),
+		"vehicle_nodes": vehicle_node_count,
+		"vehicle_registry": vehicles.size(),
+		"shell_usec": _stream_shell_usec_last,
+		"safety_usec": _stream_safety_usec_last,
+		"decoration_usec": _stream_decoration_usec_last,
+		"shell_ops": _stream_shell_ops_last,
+		"safety_ops": _stream_safety_ops_last,
+		"decoration_ops": _stream_decoration_ops_last,
+		"shells_built": _stream_shells_built,
+		"cancelled_jobs": _stream_cancelled_jobs,
+	}
+
+
+func reset_streaming_metrics() -> void:
+	_stream_shells_built = 0
+	_stream_cancelled_jobs = 0
 
 
 # ---- test scaffolding ------------------------------------------------------
