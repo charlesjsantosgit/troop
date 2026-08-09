@@ -2,7 +2,7 @@
   "godot_compatibility": "4.7",
   "minimum_bootstrap": 1,
   "network_protocol": 9,
-  "release_title": "TROOP 0.4.2 — MOON WALK FIX",
-  "notes": "TROOP 0.4.2 fixes the Moon touchdown movement lock. The lunar landing pad now has reliable capsule contact, the Moon runs in a precision-safe coordinate band, and low-gravity ground recovery uses an appropriate collision margin. Touchdown also reapplies the on-foot collider after the final teleport and restores captured gameplay input, so W/A/S/D works as soon as the voyage camera returns. The regression gate now drives a real monkey from the rocket across the pad and onto generated lunar terrain. Protocol v9 keeps the revised Moon coordinates authoritative in multiplayer. Because the multiplayer protocol and project settings changed, Windows players must run the 0.4.2 installer once.",
-  "requires_installer": true
+  "release_title": "TROOP 0.4.3 — SATELLITE MAP",
+  "notes": "TROOP 0.4.3 replaces the pixelated close world map with smooth 320 px satellite tiles, a photoreal natural-detail layer, and higher-quality mipmapped 4K Earth and Moon imagery. Shared-edge terrain reconstruction removes square block seams while staged texture uploads and a 1,500-sample-per-tile ceiling make zoom refinement much faster and keep it frame-bounded. This is a protocol-9-compatible signed content update: TROOP 0.4.2 downloads it automatically in the background and activates it on a safe restart, with no installer required.",
+  "requires_installer": false
 }
