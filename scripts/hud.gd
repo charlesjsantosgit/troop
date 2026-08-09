@@ -618,7 +618,7 @@ func _process(dt: float) -> void:
 	if player.vehicle != null:
 		camera_badge.text = "◉ MONKEY-HEAD CAMERA" \
 			if player.cam and player.cam.first_person \
-			else "◉ CENTERED CHASE CAMERA"
+			else "◉ CHASE CAMERA · MOUSE LOOK"
 	else:
 		camera_badge.text = "◉ FRONT VIEW" if front_camera \
 			else ("◉ FIRST PERSON" if player.cam and player.cam.first_person \
@@ -756,15 +756,15 @@ func _update_vehicle_cluster() -> void:
 func _vehicle_hint(v: Vehicle) -> String:
 	match v.kind:
 		Vehicle.Kind.JET:
-			return "%s NOSE UP · %s NOSE DOWN · W/S THROTTLE · A/D ROLL · MOUSE DOT AIM\nSHIFT BURNER · G/F GEAR/FLAPS · SPACE AIRBRAKE · CTRL BRAKES · C CHASE/HEAD · E EXIT" % [
+			return "%s NOSE UP · %s NOSE DOWN · W/S THROTTLE · A/D ROLL · MOUSE DOT AIM + CAMERA\nSHIFT BURNER · G/F GEAR/FLAPS · SPACE AIRBRAKE · CTRL BRAKES · C CHASE/HEAD · E EXIT" % [
 				Settings.binding_text(&"vehicle_pitch_up"),
 				Settings.binding_text(&"vehicle_pitch_down")]
 		Vehicle.Kind.BOAT:
-			return "W fan · S fast idle/coast · A/D rudders · no reverse · C chase/head · E step off"
+			return "W fan · S fast idle/coast · A/D rudders · MOUSE look · no reverse · C chase/head · E step off"
 		Vehicle.Kind.BIKE:
-			return "W THROTTLE · S BRAKES · A/D TURN · %s WHEELIE · SPACE REAR BRAKE · SHIFT TUCK · C CHASE/HEAD · E DISMOUNT" % Settings.binding_text(&"crouch")
+			return "W THROTTLE · S BRAKES · A/D TURN · MOUSE LOOK · %s WHEELIE · SPACE REAR BRAKE · SHIFT TUCK · C CHASE/HEAD · E DISMOUNT" % Settings.binding_text(&"crouch")
 		_:
-			return "W drive · S brake/reverse · A/D steer · SPACE handbrake · SHIFT low range · C chase/head · E exit"
+			return "W drive · S brake/reverse · A/D steer · MOUSE look · SPACE handbrake · SHIFT low range · C chase/head · E exit"
 
 
 func _aim_distance(maximum: float) -> float:

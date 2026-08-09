@@ -92,7 +92,12 @@ var rider_targets: Dictionary = {}
 var exit_offsets: Array[Vector3] = [Vector3(1.4, 0.4, 0), Vector3(-1.4, 0.4, 0),
 	Vector3(0, 0.6, 2.4), Vector3(0, 0.6, -2.4)]
 var camera_distance := 6.0
-var camera_height := 2.1
+## World-up chase pivot. The spring arm adds more height as it tilts down, so
+## this is intentionally separate from the monkey-head cockpit anchor below.
+var camera_height := 2.4
+## Relative chase pitch in radians. Negative looks down and raises the arm end,
+## keeping the machine low in frame while showing the road ahead.
+var camera_chase_pitch := -0.20
 var camera_bank_factor := 0.12
 var speed_for_max_fov := 38.0
 var fp_camera_offset := Vector3(0, 1.25, 0)

@@ -41,7 +41,8 @@ func _init() -> void:
 	exit_offsets = [Vector3(1.6, 0.4, 0.3), Vector3(-1.6, 0.4, 0.3),
 		Vector3(0, 0.6, -3.0)]
 	camera_distance = 6.4
-	camera_height = 2.25
+	camera_height = 2.65
+	camera_chase_pitch = -0.24
 	speed_for_max_fov = 34.0
 	engine_stream = "engine_i6"
 	engine_pitch_base = 0.5

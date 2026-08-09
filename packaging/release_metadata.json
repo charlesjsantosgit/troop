@@ -3,6 +3,6 @@
   "minimum_bootstrap": 1,
   "network_protocol": 6,
   "release_title": "TROOP 0.3",
-  "notes": "TROOP 0.3.8 adds a dedicated four-lane suspension proving ground to the debug world. Clearly signed packed-dirt lanes progress from speed-tuned washboard ripples through offset bumps and cross-axle potholes to a low-range rock crawl with a marked bike line and 10 m distance markers. Every rounded surface uses matching deterministic visual and physics geometry, preserves the existing vehicle speed-test corridor, and is covered by a real Jeep traversal regression.",
+  "notes": "TROOP 0.3.9 makes every vehicle open in a higher collision-safe chase camera pitched toward the road. The Jeep, motorcycle, and airboat gain vehicle-relative mouse orbit; bike wheelies keep a stable horizon and visible landing path; and jet mouse aim adds a small chase-view lead while preserving the exact bounded flight dot and pursuit controls.",
   "requires_installer": true
 }
