@@ -44,6 +44,7 @@ var _state_flying := false
 var _vehicle_kind := -1
 var _vehicle_id := ""
 var _vehicle_aux := Vector3.ZERO
+var _externally_driven := false
 var _last_swim_fx_cycle := -1.0
 var _last_swim_kick_bucket := -1
 var _was_swimming_fx := false
@@ -52,6 +53,47 @@ var _was_swimming_fx := false
 func setup(id: int, pname: String) -> void:
 	peer_id = id
 	display_name = pname
+
+
+## Temporarily gives a deterministic presentation system (for example, a
+## rocket seat) sole ownership of this replica's root transform. Network state
+## continues updating its animation/weapon presentation, but cannot move it.
+func set_externally_driven(driven: bool) -> void:
+	if _externally_driven == driven:
+		return
+	_externally_driven = driven
+	_age = 0.0
+	_vel = Vector3.ZERO
+	_vehicle_kind = -1
+	_vehicle_id = ""
+	_vehicle_aux = Vector3.ZERO
+	_swinging = false
+	var current_position := global_position
+	_target = current_position
+	if not driven:
+		# Ordinary Puppet presentation keeps attitude on the rig rather than the
+		# root. Drop the cabin's full basis before network interpolation resumes.
+		global_transform = Transform3D(Basis.IDENTITY, current_position)
+	if rig:
+		if rig.top_level \
+				or rig.physics_interpolation_mode \
+					== Node.PHYSICS_INTERPOLATION_MODE_OFF:
+			rig.top_level = false
+			rig.physics_interpolation_mode = \
+				Node.PHYSICS_INTERPOLATION_MODE_INHERIT
+			rig.transform = Transform3D.IDENTITY
+		rig.set_yaw(0.0)
+		rig.set_vehicle_pose(null)
+		rig.set_ride_lean(0.0)
+		rig.set_rope(false, Vector3.ZERO, Vector3.ZERO)
+		rig.set_sniper_rope_pose(false)
+		rig.set_angel_wings(_state_flying and not driven)
+		rig.reset_physics_interpolation()
+	reset_physics_interpolation()
+
+
+func is_externally_driven() -> bool:
+	return _externally_driven
 
 
 func _ready() -> void:
@@ -152,25 +194,27 @@ func apply_state(pos: Vector3, yaw: float, vel: Vector3, anim: int,
 			return
 		_end_defeat()
 	if not _got_state:
-		global_position = pos
+		if not _externally_driven:
+			global_position = pos
 		first_pos = pos
 		_got_state = true
-	_target = pos
-	_vel = vel
-	_yaw = yaw
+	if not _externally_driven:
+		_target = pos
+		_vel = vel
+		_yaw = yaw
+		_vehicle_kind = vehicle_kind
+		_vehicle_id = vehicle_id
+		_vehicle_aux = vehicle_aux
+		if vehicle_kind >= 0 and not vehicle_id.is_empty():
+			var world := get_parent()
+			if world and world.has_method("apply_remote_vehicle_state"):
+				world.call("apply_remote_vehicle_state", peer_id, vehicle_kind,
+					vehicle_id, pos, yaw, vehicle_aux, vel)
 	_anim = anim
 	_swinging = swinging
 	_anchor = anchor
 	_tail = tail
 	_wraps = wraps
-	_vehicle_kind = vehicle_kind
-	_vehicle_id = vehicle_id
-	_vehicle_aux = vehicle_aux
-	if vehicle_kind >= 0 and not vehicle_id.is_empty():
-		var world := get_parent()
-		if world and world.has_method("apply_remote_vehicle_state"):
-			world.call("apply_remote_vehicle_state", peer_id, vehicle_kind,
-				vehicle_id, pos, yaw, vehicle_aux, vel)
 	if weapon_kind != _active_weapon_kind:
 		var previous_weapon := _visible_weapon()
 		if previous_weapon and previous_weapon.reload_remaining > 0.0:
@@ -186,7 +230,7 @@ func apply_state(pos: Vector3, yaw: float, vel: Vector3, anim: int,
 	_state_healing_progress = clampf(healing_progress, 0.0, 1.0)
 	_state_flying = flying
 	if rig:
-		rig.set_angel_wings(flying)
+		rig.set_angel_wings(flying and not _externally_driven)
 	_sync_remote_reload(weapon_reloading, weapon_ammo)
 	_age = 0.0
 	state_count += 1
@@ -204,15 +248,17 @@ func _process(dt: float) -> void:
 	sniper.tick(dt)
 	_gun_aim_t = maxf(_gun_aim_t - dt, 0.0)
 	_melee_remaining = maxf(_melee_remaining - dt, 0.0)
-	var should_stow := _state_weapon_stowed or _melee_remaining > 0.0
+	var should_stow := _externally_driven or _state_weapon_stowed \
+		or _melee_remaining > 0.0
 	_sync_remote_weapon_mount(should_stow)
-	var sniper_rope_active := _swinging \
+	var sniper_rope_active := _swinging and not _externally_driven \
 		and _active_weapon_kind == Net.WEAPON_SNIPER and not should_stow
 	rig.set_sniper_rope_pose(sniper_rope_active,
 		sniper.support_grip if sniper_rope_active else null)
 	_age += dt
 	var riding_vehicle: Vehicle = null
-	if _vehicle_kind >= 0 and not _vehicle_id.is_empty():
+	if not _externally_driven and _vehicle_kind >= 0 \
+			and not _vehicle_id.is_empty():
 		var world := get_parent()
 		if world and world.has_method("vehicle_by_id"):
 			riding_vehicle = world.call("vehicle_by_id", _vehicle_id)
@@ -245,14 +291,19 @@ func _process(dt: float) -> void:
 		rig.set_ride_lean(0.0)
 	if rig.position != Vector3.ZERO:
 		rig.position = rig.position.lerp(Vector3.ZERO, 1.0 - exp(-12.0 * dt))
-	var pred := _target + _vel * minf(_age, 0.25)
-	global_position = global_position.lerp(pred, 1.0 - exp(-14.0 * dt))
-	rig.set_yaw(lerp_angle(rig.yaw_angle(), _yaw, 1.0 - exp(-10.0 * dt)))
+	if _externally_driven:
+		rig.set_yaw(0.0)
+	else:
+		var pred := _target + _vel * minf(_age, 0.25)
+		global_position = global_position.lerp(pred,
+			1.0 - exp(-14.0 * dt))
+		rig.set_yaw(lerp_angle(rig.yaw_angle(), _yaw,
+			1.0 - exp(-10.0 * dt)))
 	# rope before update_motion so the swing IK sees this frame's grip point
 	var pivot := _anchor
 	if _wraps.size() > 0:
 		pivot = _wraps[_wraps.size() - 1]
-	if _swinging:
+	if _swinging and not _externally_driven:
 		rig.set_rope(true, _anchor, global_position + Vector3.UP * 1.05, _tail, _vel, _wraps, dt)
 	else:
 		rig.set_rope(false, Vector3.ZERO, Vector3.ZERO)
@@ -269,7 +320,7 @@ func _process(dt: float) -> void:
 	if _gun_aim_t <= 0.0:
 		held_direction = rig.yaw_node.global_transform.basis * Vector3.FORWARD
 	var melee_active := _melee_remaining > 0.0
-	rig.set_gun_aim(held_weapon and not should_stow,
+	rig.set_gun_aim(held_weapon and not should_stow and not _externally_driven,
 		held_direction, weapon_recoil)
 	var reload_weapon := _visible_weapon()
 	var reload_hand_active: bool = reload_weapon != null \

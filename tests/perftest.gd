@@ -17,6 +17,8 @@ const MAX_P95_MS := 25.0
 const HARD_FRAME_LIMIT_MS := 100.0
 const HIGHSPEED_METERS_PER_SECOND := 447.04 # exactly 1000 mph
 const HIGHSPEED_ALTITUDE := 120.0
+const HIGHSPEED_CRUISE_Y := Gen.PLANET_SUMMIT_ELEVATION + HIGHSPEED_ALTITUDE
+const HIGHSPEED_PREFLIGHT_SETTLE_SECONDS := 12.0
 const HIGHSPEED_WARMUP_SECONDS := 8.0
 const HIGHSPEED_SAMPLE_SECONDS := 20.0
 const HIGHSPEED_TARGET_FPS := 100.0
@@ -220,7 +222,11 @@ func _advance_highspeed_player(player: MonkeyPlayer, elapsed: float,
 	var velocity_2d := direction * HIGHSPEED_METERS_PER_SECOND
 	player.velocity = Vector3(velocity_2d.x, 0.0, velocity_2d.y)
 	player.global_position += player.velocity * dt
-	player.global_position.y = HIGHSPEED_ALTITUDE
+	# Keep the synthetic stratos cruise on one stable flight level 120 m above the
+	# planet's exact 6,000 m summit. Following the terrain vertically at 1000 mph
+	# would add an unrealistic teleport axis; the separate descent leg below still
+	# proves that terrain and collision wake before an actual approach.
+	player.global_position.y = HIGHSPEED_CRUISE_Y
 
 
 func _advance_collision_probe(player: MonkeyPlayer, elapsed: float,
@@ -247,13 +253,33 @@ func _run_highspeed(main) -> void:
 	world.set_time_of_day_override(12.0)
 	world.current_view_distance = Gen.VIEW_PEAK_DISTANCE
 	player.set_fly_mode(true)
-	player.admin_teleport(Vector3(0.0, HIGHSPEED_ALTITUDE, 0.0))
+	player.admin_teleport(Vector3(0.0, HIGHSPEED_CRUISE_Y, 0.0))
 	player.test_mode = true
 	# The benchmark owns a synthetic transform/velocity. Disabling player physics
 	# prevents movement caps or input fixtures from contaminating the stream rate.
 	player.set_physics_process(false)
 	player.velocity = Vector3(HIGHSPEED_METERS_PER_SECOND, 0.0, 0.0)
 	player.reset_physics_interpolation()
+
+	# An actual jet climbs through the lower LOD tiers before reaching its cruise
+	# flight level. The synthetic fixture teleports there instantly, so give the
+	# bounded scheduler a stationary preflight phase to establish that initial
+	# 15-mile ring. The measured moving warmup and 20-second cruise below still
+	# prove sustained generation at exactly 1000 mph.
+	player.velocity = Vector3.ZERO
+	var preflight_time := 0.0
+	var preflight_ready := false
+	while preflight_time < HIGHSPEED_PREFLIGHT_SETTLE_SECONDS:
+		await get_tree().process_frame
+		preflight_time += maxf(get_process_delta_time(), 1.0 / 240.0)
+		var preflight_snapshot := world.streaming_snapshot()
+		preflight_ready = int(preflight_snapshot.near_current_missing) == 0 \
+			and int(preflight_snapshot.horizon_inner_missing) == 0 \
+			and int(preflight_snapshot.skyline_inner_missing) == 0 \
+			and int(preflight_snapshot.stratos_required_missing) == 0
+		if preflight_ready:
+			break
+	player.velocity = Vector3(HIGHSPEED_METERS_PER_SECOND, 0.0, 0.0)
 
 	var elapsed := 0.0
 	while elapsed < HIGHSPEED_WARMUP_SECONDS:
@@ -273,6 +299,7 @@ func _run_highspeed(main) -> void:
 	var center_hole_frames := 0
 	var max_near_missing := 0
 	var max_near_visible_missing := 0
+	var max_near_detail_missing := 0
 	var max_horizon_missing := 0
 	var max_skyline_missing := 0
 	var max_stratos_missing := 0
@@ -307,6 +334,8 @@ func _run_highspeed(main) -> void:
 		max_near_missing = maxi(max_near_missing, near_missing)
 		max_near_visible_missing = maxi(max_near_visible_missing,
 			near_visible_missing)
+		max_near_detail_missing = maxi(max_near_detail_missing,
+			int(snapshot.near_detail_missing))
 		max_horizon_missing = maxi(max_horizon_missing,
 			int(snapshot.horizon_inner_missing))
 		max_skyline_missing = maxi(max_skyline_missing,
@@ -474,7 +503,7 @@ func _run_highspeed(main) -> void:
 		and int(final_snapshot.spawned_vehicle_ids) \
 		<= HIGHSPEED_MAX_SPAWNED_VEHICLE_IDS \
 		and int(final_snapshot.vehicle_nodes) <= HIGHSPEED_MAX_VEHICLE_NODES
-	var correctness_pass := coverage_pass and queue_pass \
+	var correctness_pass := preflight_ready and coverage_pass and queue_pass \
 		and prediction_pass and canopy_pass and collision_pass and vehicle_pass
 	var performance_status := "PASS" if performance_pass else "FAIL"
 	if not can_measure_100:
@@ -501,6 +530,7 @@ func _run_highspeed(main) -> void:
 		str(can_measure_100), average_fps, p95_ms, p99_ms, max_ms, over_100,
 	])
 	print(("HIGHSPEED_STREAM path_missing=%d visible_edge_missing=%d " \
+		+ "near_detail_handoff=%d " \
 		+ "hole_frames=%d horizon_missing=%d " \
 		+ "skyline_missing=%d stratos_missing=%d stratos_margin_m=%.0f " \
 		+ "canopy_sector_missing=%d cruise_collision_missing=%d " \
@@ -508,7 +538,8 @@ func _run_highspeed(main) -> void:
 		+ "pending_cruise_final=%d pending_probe_final=%d " \
 		+ "shell_age_ms=%.0f tree_age_ms=%.0f canopy_vertices=%d " \
 		+ "lane_max_usec=%d/%d/%d shells=%d cancelled=%d") % [
-		max_near_missing, max_near_visible_missing, center_hole_frames,
+		max_near_missing, max_near_visible_missing, max_near_detail_missing,
+		center_hole_frames,
 		max_horizon_missing,
 		max_skyline_missing, max_stratos_missing, min_stratos_coverage_margin,
 		max_canopy_sector_missing, max_cruise_collision_missing,
@@ -536,11 +567,12 @@ func _run_highspeed(main) -> void:
 		int(final_snapshot.streamed_unprotected_vehicles),
 		int(final_snapshot.spawned_vehicle_ids), int(final_snapshot.vehicle_nodes),
 	])
-	print(("HIGHSPEED_CORRECTNESS_GATE %s coverage=%s queues=%s " \
+	print(("HIGHSPEED_CORRECTNESS_GATE %s preflight=%s coverage=%s queues=%s " \
 		+ "prediction=%s canopy=%s collision=%s vehicles=%s thresholds=" \
 		+ "speed=447.04 lead>=%.0fm near_q<=%d shell_age<=%.0fms " \
 		+ "tree_age<=%.0fms streamed<=%d spawned_ids<=%d nodes<=%d") % [
 		"PASS" if correctness_pass else "FAIL",
+		"PASS" if preflight_ready else "FAIL",
 		"PASS" if coverage_pass else "FAIL",
 		"PASS" if queue_pass else "FAIL",
 		"PASS" if prediction_pass else "FAIL",

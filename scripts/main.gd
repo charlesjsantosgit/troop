@@ -24,6 +24,7 @@ var chat_box: ChatBox
 var admin_controller: AdminController
 var admin_panel: AdminPanel
 var trade_ui: TradeUI
+var expedition_manager: ExpeditionManager
 var _session_ui_layer: CanvasLayer
 var update_chip: Label
 var menu: Control
@@ -96,6 +97,18 @@ func _ready() -> void:
 			var gt = load("res://tests/generationtest.gd").new()
 			add_child(gt)
 			gt.call_deferred("run")
+		"planettest":
+			mode = "planettest"
+			Gen.setup(1337)
+			var planet_test = load("res://tests/planettest.gd").new()
+			add_child(planet_test)
+			planet_test.call_deferred("run")
+		"planetwraptest":
+			mode = "planetwraptest"
+			_start_solo("Circumnavigator", 1337, 1)
+			var wrap_test = load("res://tests/planetwraptest.gd").new()
+			add_child(wrap_test)
+			wrap_test.call_deferred("run", self)
 		"entrytest":
 			mode = "entrytest"
 			var entry_test = load("res://tests/entrytest.gd").new()
@@ -210,6 +223,12 @@ func _ready() -> void:
 			var wing_test = load("res://tests/wingtest.gd").new()
 			add_child(wing_test)
 			wing_test.call_deferred("run")
+		"worldmaptest":
+			mode = "worldmaptest"
+			_start_solo("AtlasTester", 2026, 1)
+			var world_map_test = load("res://tests/worldmaptest.gd").new()
+			add_child(world_map_test)
+			world_map_test.call_deferred("run", self)
 		"vehicleworldtest":
 			mode = "vehicleworldtest"
 			_start_solo("WorldTester", 1337, 2)
@@ -255,6 +274,7 @@ func _register_inputs() -> void:
 	_add_key("camera_mode", KEY_C)
 	_add_key("chat", KEY_ENTER)
 	_add_key("admin_panel", KEY_F8)
+	_add_key("world_map", KEY_X)
 	_add_key("minimap", KEY_M)
 	_add_key("minimap_zoom_out", KEY_BRACKETLEFT)
 	_add_key("minimap_zoom_in", KEY_BRACKETRIGHT)
@@ -324,6 +344,10 @@ func _finish_world_entry(pname: String) -> void:
 	hud = HUD.new()
 	hud.player = world.local_player
 	add_child(hud)
+	expedition_manager = ExpeditionManager.new()
+	add_child(expedition_manager)
+	expedition_manager.configure(self, world)
+	world.expedition_manager = expedition_manager
 	Voice.attach_world(world)
 	_build_session_ui()
 	_sync_puppets()
@@ -365,6 +389,9 @@ func _build_session_ui() -> void:
 
 
 func _teardown_session_ui() -> void:
+	if expedition_manager and is_instance_valid(expedition_manager):
+		expedition_manager.queue_free()
+	expedition_manager = null
 	for node in [_session_ui_layer, admin_controller]:
 		if node and is_instance_valid(node):
 			node.queue_free()
@@ -617,10 +644,39 @@ func _on_peer_state(id: int, pos: Vector3, yaw: float, vel: Vector3,
 		healing_progress: float, flying := false, vehicle_kind := -1,
 		vehicle_id := "", vehicle_aux := Vector3.ZERO) -> void:
 	if world and world.puppets.has(id):
+		# Use the closest equivalent chart image so players remain beside each
+		# other across the longitude seam and poles. A mirrored pole image also
+		# rotates heading and planar momentum by 180 degrees.
+		if world.local_player and Net.player_realm() == Net.PlayerRealm.EARTH \
+				and Net.player_realm(id) == Net.PlayerRealm.EARTH:
+			var reference := Vector2(world.local_player.global_position.x,
+				world.local_player.global_position.z)
+			var image: Dictionary = Gen.nearest_world_image_sample(
+				Vector2(pos.x, pos.z), reference)
+			var image_xz: Vector2 = image.xz
+			pos = Vector3(image_xz.x, pos.y, image_xz.y)
+			var image_yaw := float(image.yaw_delta)
+			if absf(image_yaw) > 0.000001:
+				var turn := Basis(Vector3.UP, image_yaw)
+				yaw = wrapf(yaw + image_yaw, -PI, PI)
+				vel = turn * vel
+			if swinging:
+				anchor = _nearest_planetary_point(anchor, image_xz)
+				var remapped_wraps := PackedVector3Array()
+				for wrap_point in wraps:
+					remapped_wraps.append(_nearest_planetary_point(
+						wrap_point, image_xz))
+				wraps = remapped_wraps
 		world.puppets[id].apply_state(pos, yaw, vel, anim, swinging, anchor,
 			rope_tail, wraps, weapon_kind, weapon_stowed, melee_mode,
 			weapon_ammo, weapon_reloading, healing_progress, flying,
 			vehicle_kind, vehicle_id, vehicle_aux)
+
+
+func _nearest_planetary_point(point: Vector3, reference_xz: Vector2) -> Vector3:
+	var image := Gen.nearest_world_image(Vector2(point.x, point.z),
+		reference_xz)
+	return Vector3(image.x, point.y, image.y)
 
 
 func _on_peer_left(id: int) -> void:
@@ -1271,6 +1327,29 @@ func _unhandled_input(e: InputEvent) -> void:
 		DisplayServer.window_set_mode(next_mode)
 		get_viewport().set_input_as_handled()
 		return
+	if expedition_manager and expedition_manager.is_ui_open() \
+			and e.is_action_pressed("menu"):
+		expedition_manager.close_ui()
+		get_viewport().set_input_as_handled()
+		return
+	# The atlas owns keyboard focus while open. Escape and X both close it, and
+	# every other gameplay shortcut stays inert while Player's visible-cursor
+	# guard supplies neutral movement input.
+	if hud and hud.world_map_is_open():
+		if e.is_action_pressed("world_map") or e.is_action_pressed("menu"):
+			hud.close_world_map()
+		get_viewport().set_input_as_handled()
+		return
+	if not pause_menu and e.is_action_pressed("world_map") and world \
+			and menu == null and hud \
+			and (not chat_box or not chat_box.is_open()) \
+			and (not admin_panel or not admin_panel.visible) \
+			and (not trade_ui or not trade_ui.visible):
+		hud.toggle_world_map()
+		if world.local_player and world.local_player.cam:
+			world.local_player.cam.set_aiming(false)
+		get_viewport().set_input_as_handled()
+		return
 	if not pause_menu and e.is_action_pressed("camera_mode") and world and world.local_player \
 			and world.local_player.cam:
 		_camera_mode_preference = world.local_player.cam.toggle_view()
@@ -1762,6 +1841,137 @@ func _do_debug_shot(what: String, out: String) -> void:
 
 
 
+func _do_lunar_shot(what: String, out: String) -> void:
+	# These fixtures drive the same session-owned rocket, MoonWorld, suit, monkey,
+	# and shop used in play. Only the mission clock and camera are pinned so image
+	# diffs remain stable instead of depending on a three-minute real-time voyage.
+	await get_tree().process_frame
+	if hud:
+		hud.visible = false
+	if _session_ui_layer:
+		_session_ui_layer.visible = false
+	if expedition_manager and expedition_manager._ui_layer:
+		expedition_manager._ui_layer.visible = false
+	if not expedition_manager or not expedition_manager.rocket \
+			or not expedition_manager.moon_world or not world.local_player:
+		push_error("Lunar shot fixture could not find the production expedition nodes")
+		get_tree().quit(1)
+		return
+	expedition_manager.process_mode = Node.PROCESS_MODE_DISABLED
+	var rocket := expedition_manager.rocket
+	var moon := expedition_manager.moon_world
+	var player := world.local_player
+	var camera := Camera3D.new()
+	camera.name = "LunarRegressionCamera"
+	camera.near = 0.08
+	camera.far = 5000.0
+	add_child(camera)
+	player.test_mode = true
+	player.set_physics_process(false)
+	player.set_process(false)
+	if player.cam:
+		player.cam.process_mode = Node.PROCESS_MODE_DISABLED
+	for weapon in [player.gun, player.shotgun, player.smg, player.sniper]:
+		if weapon:
+			weapon.visible = false
+	player.rig.set_gun_aim(false, Vector3.FORWARD, 0.0)
+	world.set_expensive_effects(true)
+	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
+
+	var settle_frames := 18
+	match what:
+		"lunar-launch":
+			world.set_time_of_day_override(10.25)
+			# Build the real analytic launch-pad terrain even when the seed places the
+			# airfield beyond the normal spawn warm ring.
+			player.admin_teleport(rocket.earth_launch_transform.origin
+				+ rocket.earth_launch_transform.basis * Vector3(4.0, 0.2, 7.0))
+			world.warm(2)
+			rocket.board_crew(Net.local_id(), player,
+				expedition_manager.local_suit, expedition_manager.local_inventory)
+			rocket.launch_to_moon()
+			rocket.set_physics_process(false)
+			# Pin the craft at the first readable liftoff beat: the feet have cleared
+			# the pad and the complete production flame reaches back to the ground.
+			rocket.global_transform = rocket.earth_launch_transform
+			rocket.global_position += Vector3.UP * 5.20
+			player.global_transform = rocket.seat_global_transform(0)
+			rocket.voyage_visuals.end_voyage()
+			camera.fov = 52.0
+			camera.global_position = rocket.to_global(Vector3(13.2, 4.8, 19.8))
+			camera.look_at(rocket.to_global(Vector3(0.0, -1.25, 0.0)), Vector3.UP)
+			settle_frames = 64
+		"lunar-voyage":
+			world.set_earth_streaming_enabled(false)
+			moon.visible = false
+			rocket.board_crew(Net.local_id(), player,
+				expedition_manager.local_suit, expedition_manager.local_inventory)
+			rocket.apply_authoritative_clock(LunarRocket.State.SPACE_CRUISE,
+				true, 82.0)
+			rocket.set_physics_process(false)
+			player.set_expedition_locked(true)
+			player.global_transform = rocket.seat_global_transform(0)
+			camera.fov = 55.0
+			camera.far = 1200.0
+			camera.global_position = rocket.to_global(Vector3(13.0, 4.8, 22.0))
+			camera.look_at(rocket.to_global(Vector3(0.0, 0.10, -0.8)), Vector3.UP)
+			settle_frames = 24
+		"lunar-surface":
+			world.set_time_of_day_override(11.0)
+			expedition_manager._apply_local_realm(Net.PlayerRealm.MOON)
+			rocket.apply_authoritative_clock(LunarRocket.State.LANDED_MOON,
+				true, LunarRocket.OUTBOUND_DURATION_SECONDS)
+			rocket.set_physics_process(false)
+			rocket.voyage_visuals.end_voyage()
+			# A close/medium composition keeps the suited monkey and shop readable,
+			# with the crater, Earth, and lander layered behind them.
+			var player_xz := Vector2(68.0, -10.0)
+			player.global_position = moon.to_global(Vector3(player_xz.x,
+				moon.height_at(player_xz.x, player_xz.y) + 0.04, player_xz.y))
+			player.velocity = Vector3.ZERO
+			player.reset_physics_interpolation()
+			if expedition_manager.local_suit:
+				expedition_manager.local_suit.set_physics_process(false)
+			# Move only the regression lander pose into the same scenic basin. The
+			# production model/state remain untouched; this avoids a thumbnail-sized
+			# interactive scene while retaining the rocket as a background landmark.
+			var scenic_rocket_xz := Vector2(-3.0, -22.0)
+			rocket.global_position = moon.to_global(Vector3(scenic_rocket_xz.x,
+				moon.height_at(scenic_rocket_xz.x, scenic_rocket_xz.y)
+					+ LunarRocket.ORIGIN_ABOVE_LANDING_SURFACE,
+				scenic_rocket_xz.y))
+			var camera_local := Vector3(78.0, 8.0, 2.0)
+			camera.fov = 64.0
+			camera.global_position = moon.to_global(camera_local)
+			camera.look_at(moon.to_global(Vector3(54.0, 3.0, -28.0)), Vector3.UP)
+			# Turn the kiosk frontage toward this regression view so its sign and
+			# cheese-hatted villager prove the actual interactive model is present.
+			if moon.cheese_shop:
+				moon.cheese_shop.look_at(camera.global_position, Vector3.UP)
+			var facing := camera.global_position - player.global_position
+			facing.y = 0.0
+			player.rig.face(facing.normalized(), 1.0)
+			player.rig.update_motion(1.0, MonkeyRig.Anim.IDLE, Vector3.ZERO,
+				true, Vector3.ZERO)
+			settle_frames = 28
+	camera.make_current()
+	for i in range(settle_frames):
+		await get_tree().process_frame
+	for i in range(8):
+		await RenderingServer.frame_post_draw
+	var image := get_viewport().get_texture().get_image()
+	var save_error := image.save_png(out)
+	if save_error != OK:
+		push_error("Could not save lunar shot %s (error %d)" % [out, save_error])
+		get_tree().quit(1)
+		return
+	print("LUNAR_SHOT_STATE name=%s rocket=%s crew=%d moon_visible=%s suit=%s" % [
+		what, LunarRocket.STATE_NAMES[rocket.state], rocket.crew_count(),
+		str(moon.visible), str(expedition_manager.local_suit != null)])
+	print("SHOT_SAVED " + out)
+	get_tree().quit(0)
+
+
 func _do_shot(args: Array) -> void:
 	mode = "shot"
 	var what: String = args[1] if args.size() > 1 else "vista"
@@ -1800,6 +2010,9 @@ func _do_shot(args: Array) -> void:
 		await _do_debug_shot(what, out)
 		return
 	_start_solo("Bongo", 2026, 1 if seasonal_diagnostic else 3)
+	if what in ["lunar-launch", "lunar-voyage", "lunar-surface"]:
+		await _do_lunar_shot(what, out)
+		return
 	match what:
 		"season-spring":
 			world.set_season_override(SeasonalCycle.Season.SPRING)
@@ -1846,6 +2059,33 @@ func _do_shot(args: Array) -> void:
 			await RenderingServer.frame_post_draw
 		var pause_image := get_viewport().get_texture().get_image()
 		pause_image.save_png(out)
+		print("SHOT_SAVED " + out)
+		get_tree().quit(0)
+		return
+	if what in ["world-map", "world-map-globe", "world-map-moon"]:
+		await get_tree().process_frame
+		hud.world_map.open_map()
+		if what == "world-map-globe":
+			hud.world_map._target_span_m = Gen.PLANET_CIRCUMFERENCE * 0.24
+			hud.world_map._view_span_m = hud.world_map._target_span_m
+		elif what == "world-map-moon":
+			hud.world_map.focus_moon()
+			hud.world_map._target_span_m = Gen.PLANET_CIRCUMFERENCE * 0.24
+			hud.world_map._view_span_m = hud.world_map._target_span_m
+		else:
+			hud.world_map._target_span_m = 8000.0
+			hud.world_map._view_span_m = 8000.0
+		# Let the production per-frame baker fill the compact globe atlas. The Moon
+		# uses a deliberately finer progressive atlas than Earth, so its deterministic
+		# fixture gets enough frames to reach the fully refined crater pass. Local
+		# view intentionally retains progressive tile loading in this fixture.
+		var atlas_settle_frames := 360 if what == "world-map-moon" else 160
+		for i in range(atlas_settle_frames):
+			await RenderingServer.frame_post_draw
+		var world_map_image := get_viewport().get_texture().get_image()
+		world_map_image.save_png(out)
+		print("WORLD_MAP_DIAGNOSTICS " + str(
+			hud.world_map.cache_diagnostics()))
 		print("SHOT_SAVED " + out)
 		get_tree().quit(0)
 		return

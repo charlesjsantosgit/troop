@@ -110,6 +110,7 @@ var _stream_decoration_ops_last := 0
 var _stream_shells_built := 0
 var _stream_cancelled_jobs := 0
 var local_player: MonkeyPlayer
+var expedition_manager: ExpeditionManager
 var puppets: Dictionary = {}         # peer id -> Puppet
 var vehicles: Dictionary = {}        # stable vehicle id -> Vehicle node
 var _pending_vehicle_entry := ""     # vid awaiting the host's seat claim
@@ -156,6 +157,7 @@ var _biome_sample_timer := 0.0
 var _biome_fog_target := Color(0.43, 0.61, 0.43)
 var _biome_density_target := 0.0017
 var _biome_saturation_target := 1.08
+var _earth_streaming_enabled := true
 
 
 func build() -> void:
@@ -526,10 +528,14 @@ func try_open_supply_chest(player: Node3D) -> bool:
 		return false
 	opened_supply_huts[hut.hut_id] = true
 	hut.open_chest(true)
-	if player.has_method("receive_supply_loot"):
-		player.call("receive_supply_loot", hut.ammo_kind, hut.ammo_amount,
-			hut.bandage_count)
+	_deliver_supply_payload(player, hut.loot_payload())
 	return true
+
+
+func try_expedition_interact(player: MonkeyPlayer) -> bool:
+	return expedition_manager != null \
+		and is_instance_valid(expedition_manager) \
+		and expedition_manager.try_interact(player)
 
 
 func _on_supply_chest_claimed(hut_id: String, claimant_id: int) -> void:
@@ -547,10 +553,18 @@ func _on_supply_chest_claimed(hut_id: String, claimant_id: int) -> void:
 			or _rewarded_supply_huts.has(hut_id):
 		return
 	_rewarded_supply_huts[hut_id] = true
-	if local_player and is_instance_valid(local_player) \
-			and local_player.has_method("receive_supply_loot"):
-		local_player.call("receive_supply_loot", int(payload.get("ammo_kind", 0)),
+	_deliver_supply_payload(local_player, payload)
+
+
+func _deliver_supply_payload(player: Node3D, payload: Dictionary) -> void:
+	if not is_instance_valid(player) or payload.is_empty():
+		return
+	if player.has_method("receive_supply_loot"):
+		player.call("receive_supply_loot", int(payload.get("ammo_kind", 0)),
 			int(payload.get("ammo_amount", 0)), int(payload.get("bandages", 0)))
+	if player == local_player and bool(payload.get("normal_backpack", false)) \
+			and expedition_manager and is_instance_valid(expedition_manager):
+		expedition_manager.grant_normal_backpack()
 
 
 # ---- vehicles --------------------------------------------------------------
@@ -928,10 +942,21 @@ func spawn_position(peer_id: int) -> Vector3:
 func respawn(p: MonkeyPlayer) -> void:
 	if p.state == p.S.SWING:
 		p._release(false)
+	if p == local_player and expedition_manager \
+			and is_instance_valid(expedition_manager) \
+			and expedition_manager.rescue_local_player_from_lunar_void(p):
+		return
 	var pos := p.global_position
 	p.global_position = Vector3(pos.x, Gen.height(pos.x, pos.z) + 3.0, pos.z)
 	p.reset_physics_interpolation()
 	p.velocity = Vector3.ZERO
+
+
+func void_rescue_height(p: MonkeyPlayer) -> float:
+	if p == local_player and expedition_manager \
+			and is_instance_valid(expedition_manager):
+		return expedition_manager.lunar_void_rescue_height(p)
+	return -25.0
 
 
 # ---- banana revolver combat ------------------------------------------------
@@ -1107,6 +1132,10 @@ func actor_defeated(actor: MonkeyPlayer, source: Node3D, hit_zone := "body",
 	if not is_instance_valid(actor) or not actor.defeated \
 			or actor.defeat_sequence != defeat_sequence:
 		return
+	if actor == local_player and expedition_manager \
+			and is_instance_valid(expedition_manager) \
+			and expedition_manager.respawn_local_player_after_defeat(actor):
+		return
 	var x := -4.0 if actor == local_player else 12.0
 	var z := 4.0 if actor == local_player else -14.0
 	actor.revive_at(Vector3(x, Gen.height(x, z) + 2.2, z))
@@ -1190,10 +1219,13 @@ static func gameplay_camera_far_distance(streamed_distance: float,
 func _process(dt: float) -> void:
 	_t += dt
 	_update_day_night(dt)
-	_stream()
+	if _earth_streaming_enabled:
+		_wrap_local_planet_actor()
+		_stream()
 	if local_player:
 		Visuals.set_far_focus(local_player.global_position)
-		_update_biome_ambience(dt)
+		if _earth_streaming_enabled:
+			_update_biome_ambience(dt)
 		_particles.global_position = local_player.global_position
 		var tgt: Dictionary = local_player.last_target
 		if not tgt.is_empty():
@@ -1212,6 +1244,81 @@ func _process(dt: float) -> void:
 			_marker.global_transform = Transform3D(Basis(xv * s, yv * s, zv * s), pt)
 		else:
 			_marker.visible = false
+
+
+## Lunar terrain is a separate bounded world. Pausing only the Earth streaming
+## scheduler avoids spending chunk work around the Moon's elevated coordinates;
+## the retained shell is reused immediately after return or splashdown.
+func set_earth_streaming_enabled(enabled: bool) -> void:
+	_earth_streaming_enabled = enabled
+	if _particles and not enabled:
+		_particles.emitting = false
+	if seasonal_weather:
+		seasonal_weather.set_atmosphere_enabled(enabled)
+	if enabled:
+		_reset_planet_stream_focus()
+
+
+func earth_streaming_enabled() -> bool:
+	return _earth_streaming_enabled
+
+
+func _wrap_local_planet_actor() -> void:
+	if not local_player or local_player.expedition_locked:
+		return
+	var source := local_player.global_position
+	var driven_vehicle: Vehicle = local_player.vehicle
+	if driven_vehicle and is_instance_valid(driven_vehicle):
+		source = driven_vehicle.global_position
+	var source_xz := Vector2(source.x, source.z)
+	var canonical: Dictionary = Gen.canonical_world_sample(source_xz)
+	var destination: Vector2 = canonical.xz
+	if destination.distance_squared_to(source_xz) <= 0.000001:
+		return
+	var yaw_delta := float(canonical.yaw_delta)
+	if driven_vehicle and is_instance_valid(driven_vehicle):
+		driven_vehicle.apply_planet_wrap(destination, yaw_delta)
+		local_player.global_position = driven_vehicle.seat_global()
+		local_player.velocity = driven_vehicle.linear_velocity
+		local_player.reset_physics_interpolation()
+		if local_player.cam:
+			local_player.cam.apply_planet_heading_delta(yaw_delta)
+	else:
+		local_player.apply_planet_wrap(destination, yaw_delta)
+	_reset_planet_stream_focus()
+
+
+func _reset_planet_stream_focus() -> void:
+	_stream_center = Vector2i(0x3fffffff, 0x3fffffff)
+	_prefetch_center = _stream_center
+	_horizon_center = _stream_center
+	_horizon_prefetch_center = _stream_center
+	_skyline_center = _stream_center
+	_stratos_center = _stream_center
+	_stratos_prefetch_center = _stream_center
+	# A wrap or Moon round-trip invalidates queued coordinate priorities. Rebuild
+	# shell queues against the canonical destination on the next _stream() call
+	# instead of preserving timestamps from the old side of the planet. Detail
+	# nodes remain valid Earth content, so keep them but restart their wait clocks;
+	# otherwise time intentionally spent with Earth streaming paused is reported as
+	# scheduler starvation immediately after return.
+	_queue.clear()
+	_near_pending.clear()
+	_near_enqueued_at.clear()
+	_horizon_queue.clear()
+	_horizon_pending.clear()
+	_horizon_enqueued_at.clear()
+	_skyline_queue.clear()
+	_skyline_pending.clear()
+	_skyline_enqueued_at.clear()
+	_stratos_queue.clear()
+	_stratos_enqueued_at.clear()
+	var now := Time.get_ticks_usec()
+	for detail_queue in [_chunk_detail_queue, _horizon_detail_queue,
+			_skyline_detail_queue]:
+		for node in detail_queue:
+			if is_instance_valid(node):
+				node.set_meta(STREAM_DETAIL_ENQUEUED_META, now)
 
 
 func _update_biome_ambience(dt: float) -> void:
@@ -1233,6 +1340,38 @@ func _update_biome_ambience(dt: float) -> void:
 			Gen.Biome.HIGHLAND:
 				_biome_fog_target = Color(0.56, 0.67, 0.62)
 				_biome_density_target = 0.00137
+				_biome_saturation_target = 0.96
+			Gen.Biome.PLAINS:
+				_biome_fog_target = Color(0.61, 0.70, 0.53)
+				_biome_density_target = 0.00072
+				_biome_saturation_target = 1.02
+			Gen.Biome.GRASSLAND:
+				_biome_fog_target = Color(0.52, 0.69, 0.43)
+				_biome_density_target = 0.00076
+				_biome_saturation_target = 1.08
+			Gen.Biome.ROCKY_MOUNTAINS:
+				_biome_fog_target = Color(0.69, 0.74, 0.78)
+				_biome_density_target = 0.00058
+				_biome_saturation_target = 0.88
+			Gen.Biome.DESERT:
+				_biome_fog_target = Color(0.77, 0.63, 0.43)
+				_biome_density_target = 0.00068
+				_biome_saturation_target = 0.94
+			Gen.Biome.TUNDRA:
+				_biome_fog_target = Color(0.65, 0.70, 0.69)
+				_biome_density_target = 0.00093
+				_biome_saturation_target = 0.82
+			Gen.Biome.ICE:
+				_biome_fog_target = Color(0.77, 0.85, 0.92)
+				_biome_density_target = 0.00108
+				_biome_saturation_target = 0.76
+			Gen.Biome.OCEAN:
+				_biome_fog_target = Color(0.38, 0.57, 0.68)
+				_biome_density_target = 0.00082
+				_biome_saturation_target = 0.92
+			Gen.Biome.LAKE:
+				_biome_fog_target = Color(0.43, 0.62, 0.60)
+				_biome_density_target = 0.00094
 				_biome_saturation_target = 0.96
 			_:
 				_biome_fog_target = Color(0.43, 0.61, 0.43)
@@ -1356,7 +1495,7 @@ func _apply_day_night(update_sky: bool) -> void:
 	_environment.adjustment_brightness = lerpf(0.91, 0.98, daylight_amount)
 	if _particles:
 		_particles.emitting = season == SeasonalCycle.Season.SUMMER \
-			and daylight_amount < 0.52
+			and daylight_amount < 0.52 and _earth_streaming_enabled
 
 	if not update_sky or not _sky_material or not _celestial_sky:
 		return
@@ -1455,11 +1594,13 @@ func _run_shell_work(cc: Vector2i, hc: Vector2i, sc: Vector2i,
 	if built_near:
 		ops += 1
 	# The predictive guard normally makes this zero. If a 1000 mph diagonal or
-	# abrupt turn still exposes a current 5x5 shell, complete that shell before
-	# discretionary far work. This uses the existing three-op hard ceiling and
-	# does not relax the elapsed-time budget for ordinary prefetch work.
+	# abrupt turn still exposes the current fine shell, complete that shell before
+	# discretionary far work. Coarse flight intentionally owns only a 3x3 fine
+	# shell, so use the same adaptive radius as target generation instead of
+	# treating its absent outer ring as a permanent emergency.
+	var current_guard_radius := _near_guard_radius()
 	while ops < STREAM_SHELL_MAX_OPS \
-			and _missing_square(chunks, cc, Gen.VIEW_R) > 0:
+			and _missing_square(chunks, cc, current_guard_radius) > 0:
 		if not _build_one_near_shell(cc):
 			break
 		ops += 1
@@ -1506,6 +1647,13 @@ func _build_one_near_shell(_cc: Vector2i) -> bool:
 
 func _build_one_far_shell(hc: Vector2i, sc: Vector2i, stc: Vector2i,
 		ring: int) -> bool:
+	# A current inner-horizon hole is already player-visible and must not wait
+	# behind a partially prefetched stratos row. The horizon queue is sorted with
+	# this inner window first, so one build restores the most urgent missing tile.
+	if _missing_square(horizon_chunks, hc,
+			maxi(Gen.HORIZON_VIEW_R - 1, 0)) > 0 \
+			and _build_one_horizon_shell(hc):
+		return true
 	# Establish the current full far plane before spending work on predictive or
 	# decorative bands. This priority is temporary (mainly initial warmup); once
 	# complete, the 2 s predictive stratos row is served by the fair cycle below.
@@ -1737,6 +1885,11 @@ func _chunk_in_window(k: Vector2i, center: Vector2i, radius: int) -> bool:
 	return maxi(delta.x, delta.y) <= radius
 
 
+func _near_guard_radius() -> int:
+	return 1 if _stream_speed_mps >= STREAM_FAST_SPEED \
+		and not _ground_collision_required else Gen.VIEW_R
+
+
 func _swept_near_centers(cc: Vector2i, predicted: Vector2i) -> Array[Vector2i]:
 	var centers: Array[Vector2i] = []
 	var delta := predicted - cc
@@ -1799,18 +1952,25 @@ func _refresh_near_targets(cc: Vector2i, predicted: Vector2i) -> void:
 	_prefetch_center = predicted
 	var previous_times := _near_enqueued_at.duplicate()
 	_near_targets.clear()
-	# At vehicle speeds retain one shell-first guard ring outside the visible 5x5.
-	# It covers a sudden steering reversal before the predicted corridor rotates;
-	# walking keeps the original bounded 5x5 footprint.
-	var current_guard_radius := Gen.VIEW_R + 1 \
-		if _stream_speed_mps >= STREAM_FAST_SPEED else Gen.VIEW_R
+	# The swept corridor already carries a full 5-chunk-wide shell ahead of a fast
+	# vehicle. Retaining a second all-direction 7x7 guard duplicated that work and
+	# created seven to thirteen new jobs at every boundary—more than the bounded
+	# shell lane can sustain at 1000 mph. An abrupt turn remains covered by the
+	# resident horizon terrain while the current 5x5 gameplay shell rotates.
+	# At aircraft speed and altitude the resident horizon terrain is the visible
+	# handoff beneath the player. Keep only the directly tested 3x3 fine shell and
+	# its 3-wide predictive corridor until a local or remote ground actor needs
+	# collision; that immediately restores the normal 5x5 gameplay footprint.
+	var current_guard_radius := _near_guard_radius()
+	var coarse_flight := current_guard_radius < Gen.VIEW_R
 	_add_target_window(_near_targets, cc, current_guard_radius)
-	# Ahead of the guard, stream a 5-chunk-wide swept corridor rather than another
-	# full 5x5 square at only the endpoint. At 1000 mph it keeps every lateral tile
-	# ready along the ~0.85 s / eight-chunk path.
+	# Ahead of the guard, stream a swept corridor rather than another full square
+	# only at the endpoint. It is five chunks wide near gameplay/collision and three
+	# wide during coarse flight, covering the ~0.85 s / eight-chunk path.
 	var swept := _swept_near_centers(cc, predicted)
+	var corridor_radius := 1 if coarse_flight else NEAR_CORRIDOR_RADIUS
 	for i in range(1, swept.size()):
-		_add_target_window(_near_targets, swept[i], NEAR_CORRIDOR_RADIUS)
+		_add_target_window(_near_targets, swept[i], corridor_radius)
 	# Collision work cannot build a floor without a near terrain shell. Actor
 	# patches are capped above, so merging them preserves the bounded scheduler and
 	# its existing per-frame operation/time ceilings.
@@ -1833,16 +1993,23 @@ func _refresh_near_targets(cc: Vector2i, predicted: Vector2i) -> void:
 		var actual_b := _chunk_in_window(b, cc, Gen.VIEW_R)
 		if actual_a != actual_b:
 			return actual_a
-		var guard_a := _chunk_in_window(a, cc, current_guard_radius)
-		var guard_b := _chunk_in_window(b, cc, current_guard_radius)
-		if guard_a != guard_b:
-			return guard_a
+		var collision_a := _collision_targets.has(a)
+		var collision_b := _collision_targets.has(b)
+		if collision_a != collision_b:
+			return collision_a
+		var enqueued_a := int(_near_enqueued_at.get(a, now))
+		var enqueued_b := int(_near_enqueued_at.get(b, now))
+		if enqueued_a != enqueued_b:
+			return enqueued_a < enqueued_b
 		var distance_a := Vector2(a - cc).length_squared()
 		var distance_b := Vector2(b - cc).length_squared()
-		if is_equal_approx(distance_a, distance_b):
-			return Vector2(a - predicted).length_squared() \
-				< Vector2(b - predicted).length_squared()
-		return distance_a < distance_b)
+		if not is_equal_approx(distance_a, distance_b):
+			return distance_a < distance_b
+		var predicted_distance_a := Vector2(a - predicted).length_squared()
+		var predicted_distance_b := Vector2(b - predicted).length_squared()
+		if not is_equal_approx(predicted_distance_a, predicted_distance_b):
+			return predicted_distance_a < predicted_distance_b
+		return a.x < b.x if a.x != b.x else a.y < b.y)
 
 	var dead: Array = []
 	for k in chunks:
@@ -1893,8 +2060,15 @@ func _refresh_horizon_targets(hc: Vector2i, predicted_hc: Vector2i) -> void:
 		var current_b := _chunk_in_window(b, hc, Gen.HORIZON_VIEW_R)
 		if current_a != current_b:
 			return current_a
-		return Vector2(a - predicted_hc).length_squared() \
-			< Vector2(b - predicted_hc).length_squared())
+		var distance_a := Vector2(a - predicted_hc).length_squared()
+		var distance_b := Vector2(b - predicted_hc).length_squared()
+		if not is_equal_approx(distance_a, distance_b):
+			return distance_a < distance_b
+		var enqueued_a := int(_horizon_enqueued_at.get(a, now))
+		var enqueued_b := int(_horizon_enqueued_at.get(b, now))
+		if enqueued_a != enqueued_b:
+			return enqueued_a < enqueued_b
+		return a.x < b.x if a.x != b.x else a.y < b.y)
 	var dead: Array = []
 	for k in horizon_chunks:
 		if not _horizon_targets.has(k):
@@ -1934,8 +2108,15 @@ func _refresh_stratos_targets(stc: Vector2i, predicted_stc: Vector2i,
 		var required_b := _stratos_required_targets.has(b)
 		if required_a != required_b:
 			return required_a
-		return Vector2(a - predicted_stc).length_squared() \
-			< Vector2(b - predicted_stc).length_squared())
+		var distance_a := Vector2(a - predicted_stc).length_squared()
+		var distance_b := Vector2(b - predicted_stc).length_squared()
+		if not is_equal_approx(distance_a, distance_b):
+			return distance_a < distance_b
+		var enqueued_a := int(_stratos_enqueued_at.get(a, now))
+		var enqueued_b := int(_stratos_enqueued_at.get(b, now))
+		if enqueued_a != enqueued_b:
+			return enqueued_a < enqueued_b
+		return a.x < b.x if a.x != b.x else a.y < b.y)
 	var dead: Array = []
 	for k in stratos_chunks:
 		if not _stratos_targets.has(k):
@@ -1963,8 +2144,15 @@ func _refresh_skyline_targets(sc: Vector2i) -> void:
 		if not _skyline_enqueued_at.has(old_k):
 			_stream_cancelled_jobs += 1
 	_skyline_queue.sort_custom(func(a, b):
-		return Vector2(a - sc).length_squared() \
-			< Vector2(b - sc).length_squared())
+		var distance_a := Vector2(a - sc).length_squared()
+		var distance_b := Vector2(b - sc).length_squared()
+		if not is_equal_approx(distance_a, distance_b):
+			return distance_a < distance_b
+		var enqueued_a := int(_skyline_enqueued_at.get(a, now))
+		var enqueued_b := int(_skyline_enqueued_at.get(b, now))
+		if enqueued_a != enqueued_b:
+			return enqueued_a < enqueued_b
+		return a.x < b.x if a.x != b.x else a.y < b.y)
 	var dead: Array = []
 	for k in skyline_chunks:
 		var d: Vector2i = (k - sc).abs()
@@ -2085,6 +2273,29 @@ func _missing_square(loaded: Dictionary, center: Vector2i, radius: int) -> int:
 	return missing
 
 
+## At aircraft altitude the 12 m horizon lattice is intentionally resident
+## beneath the 3 m gameplay tiles. A detailed tile can therefore hand off for a
+## frame without revealing empty space. Report both facts: this function is the
+## player-visible terrain-coverage gate, while `near_detail_missing` below keeps
+## the fine-shell transition measurable.
+func _missing_visible_near_terrain(center: Vector2i, radius: int) -> int:
+	var missing := 0
+	for dx in range(-radius, radius + 1):
+		for dz in range(-radius, radius + 1):
+			var chunk_key := center + Vector2i(dx, dz)
+			if chunks.has(chunk_key):
+				continue
+			var horizon_key := Vector2i(
+				floori(float(chunk_key.x) / float(Gen.HORIZON_SECTOR_CHUNKS)),
+				floori(float(chunk_key.y) / float(Gen.HORIZON_SECTOR_CHUNKS)))
+			var horizon = horizon_chunks.get(horizon_key)
+			if is_instance_valid(horizon) \
+					and horizon.get_node_or_null("CoarseTerrain") != null:
+				continue
+			missing += 1
+	return missing
+
+
 func _oldest_key_queue_ms(queue: Array, enqueued_at: Dictionary,
 		now_usec: int) -> float:
 	var oldest := now_usec
@@ -2125,6 +2336,8 @@ func streaming_snapshot() -> Dictionary:
 	var stratos_required_loaded := 0
 	var stratos_canopy_vertices := 0
 	var stratos_canopy_sectors := 0
+	var stratos_canopy_geometry_sectors := 0
+	var stratos_canopy_not_applicable_sectors := 0
 	for k in _stratos_required_targets:
 		var sector_value = stratos_chunks.get(k)
 		if not is_instance_valid(sector_value):
@@ -2134,6 +2347,16 @@ func streaming_snapshot() -> Dictionary:
 		var canopy_vertices := int(sector_value.canopy_vertex_count)
 		stratos_canopy_vertices += canopy_vertices
 		if canopy_vertices > 0:
+			stratos_canopy_geometry_sectors += 1
+			stratos_canopy_sectors += 1
+		# Planet biomes legitimately contain ocean, ice and arid stratos sectors
+		# with no forest-cover vertices. setup() builds StratosTerrain synchronously,
+		# so a completed terrain mesh makes canopy coverage not applicable rather
+		# than missing. Keep actual geometry separate and require it elsewhere via
+		# stratos_canopy_vertices; required-sector loading remains an independent
+		# full-coverage metric.
+		elif sector_value.get_node_or_null("StratosTerrain") != null:
+			stratos_canopy_not_applicable_sectors += 1
 			stratos_canopy_sectors += 1
 	var stratos_sector_size := Gen.CHUNK * Gen.STRATOS_SECTOR_CHUNKS
 	var focus := local_player.global_position if local_player else Vector3.ZERO
@@ -2192,7 +2415,8 @@ func streaming_snapshot() -> Dictionary:
 		"near_detail_oldest_ms": near_detail_age,
 		"far_tree_oldest_ms": maxf(horizon_tree_age, skyline_tree_age),
 		"near_path_missing": _missing_square(chunks, cc, 1),
-		"near_current_missing": _missing_square(chunks, cc, Gen.VIEW_R),
+		"near_current_missing": _missing_visible_near_terrain(cc, Gen.VIEW_R),
+		"near_detail_missing": _missing_square(chunks, cc, Gen.VIEW_R),
 		"horizon_inner_missing": _missing_square(horizon_chunks, hc,
 			maxi(Gen.HORIZON_VIEW_R - 1, 0)),
 		"skyline_inner_missing": _missing_square(skyline_chunks, sc,
@@ -2203,6 +2427,9 @@ func streaming_snapshot() -> Dictionary:
 		"stratos_cardinal_coverage_m": stratos_cardinal_coverage,
 		"collision_corridor_missing": collision_missing,
 		"stratos_canopy_sectors": stratos_canopy_sectors,
+		"stratos_canopy_geometry_sectors": stratos_canopy_geometry_sectors,
+		"stratos_canopy_not_applicable_sectors": \
+			stratos_canopy_not_applicable_sectors,
 		"stratos_canopy_vertices": stratos_canopy_vertices,
 		"streamed_wilderness_vehicles": _streamed_vehicle_sources.size(),
 		"streamed_unprotected_vehicles": streamed_unprotected_vehicles,

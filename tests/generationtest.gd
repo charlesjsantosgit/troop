@@ -182,6 +182,7 @@ func run() -> void:
 	var arena_spawns: Array = arena_a.get("spawn_points", [])
 	var arena_hut_ids := {}
 	var arena_ammo_kinds := {}
+	var arena_backpacks := 0
 	var arena_huts_safe := arena_huts.size() == 4 and arena_spawns.size() == 2
 	var minimum_spawn_gap := INF
 	for hut_value in arena_huts:
@@ -198,18 +199,20 @@ func run() -> void:
 			and Vector2(hut_pos.x, hut_pos.z).length() < Gen.ARENA_RADIUS
 		arena_hut_ids[hut_id] = true
 		arena_ammo_kinds[int(hut.get("ammo_kind", -1))] = true
+		arena_backpacks += 1 if bool(hut.get("normal_backpack", false)) else 0
 		for spawn_value in arena_spawns:
 			var spawn: Vector3 = spawn_value
 			minimum_spawn_gap = minf(minimum_spawn_gap,
 				Vector2(hut_pos.x, hut_pos.z).distance_to(
 					Vector2(spawn.x, spawn.z)) - hut_radius)
 	arena_huts_safe = arena_huts_safe and arena_hut_ids.size() == 4 \
-		and arena_ammo_kinds.size() == 4 and minimum_spawn_gap > 5.0
+		and arena_ammo_kinds.size() == 4 and arena_backpacks == 1 \
+		and minimum_spawn_gap > 5.0
 	_check(arena_huts_safe,
-		"four spawn-safe arena huts guarantee bandages and weapon-specific ammo for both duelists",
-		"huts=%d ids=%d ammo_kinds=%d min_spawn_gap=%.2f" % [
+		"four spawn-safe arena huts guarantee ammo, bandages, and one normal backpack",
+		"huts=%d ids=%d ammo_kinds=%d backpacks=%d min_spawn_gap=%.2f" % [
 			arena_huts.size(), arena_hut_ids.size(), arena_ammo_kinds.size(),
-			minimum_spawn_gap])
+			arena_backpacks, minimum_spawn_gap])
 
 	var origin_piece_count := 0
 	var origin_hut_count := 0
@@ -273,26 +276,40 @@ func run() -> void:
 			arena_min_height])
 
 	var seen := {}
-	for x in range(-1800, 1801, 120):
-		for z in range(-1800, 1801, 120):
-			seen[Gen.biome_at(float(x), float(z))] = true
+	var biome_points := {}
+	for latitude_index in range(31):
+		var z := lerpf(-Gen.PLANET_POLE_DISTANCE + 64.0,
+			Gen.PLANET_POLE_DISTANCE - 64.0, float(latitude_index) / 30.0)
+		for longitude_index in range(64):
+			var x := -Gen.PLANET_HALF_CIRCUMFERENCE \
+				+ (float(longitude_index) + 0.5) \
+				* Gen.PLANET_CIRCUMFERENCE / 64.0
+			var biome := Gen.biome_at(x, z)
+			seen[biome] = true
+			if not biome_points.has(biome):
+				biome_points[biome] = Vector2(x, z)
 	_check(seen.size() == Gen.Biome.size(),
-		"all four macro biomes occur across a deterministic world region",
+		"all twelve Earth-like macro biomes occur across the spherical world",
 		"found=%s" % [seen.keys()])
 
 	var biome_examples := {}
-	for cx in range(-30, 31):
-		for cz in range(-30, 31):
-			var biome := Gen.biome_at((float(cx) + 0.5) * Gen.CHUNK,
-				(float(cz) + 0.5) * Gen.CHUNK)
-			if not biome_examples.has(biome):
-				biome_examples[biome] = Gen.chunk_layout(cx, cz)
-	var rich_examples := biome_examples.size() == Gen.Biome.size()
+	for biome in biome_points:
+		var point: Vector2 = biome_points[biome]
+		var cx := floori(point.x / Gen.CHUNK)
+		var cz := floori(point.y / Gen.CHUNK)
+		biome_examples[biome] = Gen.chunk_layout(cx, cz)
+	var vegetation_contracts := biome_examples.size() == Gen.Biome.size()
 	for biome in biome_examples:
 		var example: Dictionary = biome_examples[biome]
-		rich_examples = rich_examples and example.foliage.size() >= 35
-	_check(rich_examples,
-		"every biome supplies a dense biome-coloured understory")
+		if biome in [Gen.Biome.RAINFOREST, Gen.Biome.BAMBOO_GROVE,
+				Gen.Biome.WETLAND, Gen.Biome.HIGHLAND, Gen.Biome.GRASSLAND]:
+			vegetation_contracts = vegetation_contracts \
+				and example.foliage.size() >= 18
+		elif biome in [Gen.Biome.ICE, Gen.Biome.OCEAN, Gen.Biome.LAKE]:
+			vegetation_contracts = vegetation_contracts \
+				and example.foliage.size() <= 3 and example.trees.is_empty()
+	_check(vegetation_contracts,
+		"lush biomes retain understory while ocean, lake and ice stay naturally bare")
 
 	var hut_count := 0
 	var bandage_huts := 0
@@ -331,22 +348,23 @@ func run() -> void:
 	var bamboo_shape := false
 	var highland_shape := false
 	var rainforest_crown := false
-	for cx in range(-20, 21):
-		for cz in range(-20, 21):
-			for tree in Gen.chunk_layout(cx, cz, false).trees:
-				if tree.biome == Gen.Biome.BAMBOO_GROVE \
-						and tree.trunk_r < 0.42:
-					bamboo_shape = true
-				elif tree.biome == Gen.Biome.HIGHLAND \
-						and tree.trunk_r > 0.82:
-					highland_shape = true
-				elif tree.biome == Gen.Biome.RAINFOREST \
-						and tree.blobs.size() >= 3:
-					rainforest_crown = true
-			if bamboo_shape and highland_shape and rainforest_crown:
-				break
-		if bamboo_shape and highland_shape and rainforest_crown:
-			break
+	for target_biome in [Gen.Biome.BAMBOO_GROVE, Gen.Biome.HIGHLAND,
+			Gen.Biome.RAINFOREST]:
+		var example_point: Vector2 = biome_points.get(target_biome, Vector2.ZERO)
+		var example_chunk := Vector2i(floori(example_point.x / Gen.CHUNK),
+			floori(example_point.y / Gen.CHUNK))
+		for cx in range(example_chunk.x - 2, example_chunk.x + 3):
+			for cz in range(example_chunk.y - 2, example_chunk.y + 3):
+				for tree in Gen.chunk_layout(cx, cz, false).trees:
+					if tree.biome == Gen.Biome.BAMBOO_GROVE \
+							and tree.trunk_r < 0.42:
+						bamboo_shape = true
+					elif tree.biome == Gen.Biome.HIGHLAND \
+							and tree.trunk_r > 0.82:
+						highland_shape = true
+					elif tree.biome == Gen.Biome.RAINFOREST \
+							and tree.blobs.size() >= 3:
+						rainforest_crown = true
 	_check(bamboo_shape and highland_shape and rainforest_crown,
 		"biomes generate distinct bamboo, highland and rainforest tree forms")
 

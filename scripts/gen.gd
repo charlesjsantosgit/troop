@@ -5,6 +5,9 @@ extends Node
 
 signal vine_visual_changed(chunk_key: Vector2i)
 
+const PlanetTerrainScript = preload("res://scripts/planet_terrain.gd")
+const PlanetRoadNetworkScript = preload("res://scripts/planet_road_network.gd")
+
 const CHUNK := 48.0
 const CELLS := 16                # terrain quads per chunk side
 const WATER_Y := 0.55
@@ -30,10 +33,16 @@ const STRATOS_CANOPY_RELIEF_MAX := 7.2
 const VIEW_BASE_DISTANCE := 2200.0  # ground-level far plane (m)
 const VIEW_PEAK_DISTANCE := 24140.0 # 15 miles from the tallest peaks
 const VIEW_PER_METER := 300.0       # extra view metres per metre of altitude
-const MOUNTAIN_HEIGHT := 66.0    # ridge crest amplitude above the jungle floor
-const TREE_LINE := 27.0          # jungle canopy stops growing above this height
-const SNOW_LINE_START := 26.0    # rock band begins fading into permanent snow
-const SNOW_LINE_FULL := 40.0     # full snowpack on peaks (shaders + tint agree)
+const PLANET_CIRCUMFERENCE := PlanetTerrainScript.CIRCUMFERENCE
+const PLANET_RADIUS := PlanetTerrainScript.RADIUS
+const PLANET_HALF_CIRCUMFERENCE := PlanetTerrainScript.HALF_CIRCUMFERENCE
+const PLANET_POLE_DISTANCE := PlanetTerrainScript.QUARTER_CIRCUMFERENCE
+const PLANET_SUMMIT_ELEVATION := PlanetTerrainScript.SUMMIT_ELEVATION
+const PLANET_CHUNKS_AROUND := int(PLANET_CIRCUMFERENCE / CHUNK)
+const MOUNTAIN_HEIGHT := 1900.0 # natural major ranges; one summit reaches 6 km
+const TREE_LINE := 2400.0       # Earth-like alpine timberline
+const SNOW_LINE_START := 3000.0 # exposed rock begins retaining permanent snow
+const SNOW_LINE_FULL := 4300.0  # full snowpack on the highest slopes
 const REACH := 2.2               # blind arm's-reach fallback grab distance
 const TARGET_DIST := 3.0         # realistic grab reach from the hand (1-3m)
 const TARGET_COS := 0.82         # ~35° aim cone around the crosshair
@@ -55,13 +64,34 @@ const ARENA_ID := "origin_duel_arena_v2"
 const ARENA_RADIUS := 31.5
 const ARENA_SOFT_BOUNDARY_RADIUS := 28.0
 
-enum Biome { RAINFOREST, BAMBOO_GROVE, WETLAND, HIGHLAND }
+enum Biome {
+	RAINFOREST,
+	BAMBOO_GROVE,
+	WETLAND,
+	HIGHLAND,
+	PLAINS,
+	GRASSLAND,
+	ROCKY_MOUNTAINS,
+	DESERT,
+	TUNDRA,
+	ICE,
+	OCEAN,
+	LAKE,
+}
 
 const BIOME_NAMES := {
 	Biome.RAINFOREST: "Emerald Rainforest",
 	Biome.BAMBOO_GROVE: "Bamboo Grove",
 	Biome.WETLAND: "Flooded Wetland",
 	Biome.HIGHLAND: "Cloud Highland",
+	Biome.PLAINS: "Temperate Plains",
+	Biome.GRASSLAND: "Open Grassland",
+	Biome.ROCKY_MOUNTAINS: "Rocky Mountains",
+	Biome.DESERT: "Desert",
+	Biome.TUNDRA: "Arctic Tundra",
+	Biome.ICE: "Polar Ice",
+	Biome.OCEAN: "Open Ocean",
+	Biome.LAKE: "Freshwater Lake",
 }
 
 const AIRSTRIP_ORIGINAL_LENGTH := 420.0
@@ -78,14 +108,17 @@ const AIRSTRIP_HANGAR_SPACING := 25.0
 const AIRSTRIP_HANGAR_CLEARANCE := 15.5
 const AIRSTRIP_HANGAR_TAXI_GAP := 8.0
 const AIRSTRIP_HANGAR_PAD_MARGIN := 6.0
+const ROCKET_PAD_RADIUS := 14.0
+const ROCKET_PAD_BLEND := 10.0
 
 # Seeded packed-dirt roads are part of the analytic height/color field rather
 # than separate meshes. That keeps collision, every visual LOD, the minimap,
 # and all network peers on exactly the same surface without replication.
-const ROAD_HALF_WIDTH := 4.8
-const ROAD_BLEND := 6.0
+const ROAD_HALF_WIDTH := PlanetRoadNetworkScript.REGIONAL_HALF_WIDTH
+const ROAD_BLEND := PlanetRoadNetworkScript.SHOULDER
 const ROAD_POINT_SPACING := 18.0
 const ROAD_MAX_GRADE := 0.085
+const ROAD_AUDIT_SPACING := 48.0
 const BASE_RELIEF_AMPLITUDE := 10.5
 const ROLLING_HILL_AMPLITUDE := 8.0
 
@@ -120,6 +153,20 @@ var _n_moisture := FastNoiseLite.new()
 var _n_hill := FastNoiseLite.new()
 var _n_mountain := FastNoiseLite.new()
 var _n_mountain_mask := FastNoiseLite.new()
+var _planet := PlanetTerrainScript.new()
+var _planet_roads := PlanetRoadNetworkScript.new()
+var _last_planet_sample_xz := Vector2(INF, INF)
+var _last_planet_sample: Dictionary = {}
+const PLANET_LATTICE_CACHE_LIMIT := 32768
+var _planet_lattice_cache: Dictionary = {}
+var _planet_lattice_cache_order := PackedVector2Array()
+var _planet_lattice_cache_cursor := 0
+var _road_context_cache: Dictionary = {}
+var _road_audit_cache: Dictionary = {}
+var _last_road_sample_xz := Vector2(INF, INF)
+var _last_road_sample: Dictionary = {}
+var _stratos_no_road_sample := {"grade": 0.0, "distance": INF,
+	"elevation": 0.0, "route_id": ""}
 var _road_routes: Array = []
 var _roads_ready := false
 
@@ -138,6 +185,17 @@ func setup(seed_v: int) -> void:
 	_debug_count = 0
 	_roads_ready = false
 	_road_routes.clear()
+	_planet.setup(seed_v)
+	_planet_roads.setup(seed_v)
+	_last_planet_sample_xz = Vector2(INF, INF)
+	_last_planet_sample.clear()
+	_planet_lattice_cache.clear()
+	_planet_lattice_cache_order.clear()
+	_planet_lattice_cache_cursor = 0
+	_road_context_cache.clear()
+	_road_audit_cache.clear()
+	_last_road_sample_xz = Vector2(INF, INF)
+	_last_road_sample.clear()
 	_n_base.seed = seed_v
 	_n_base.noise_type = FastNoiseLite.TYPE_SIMPLEX_SMOOTH
 	_n_base.frequency = 0.007
@@ -178,6 +236,69 @@ func setup(seed_v: int) -> void:
 	_build_road_network()
 
 
+## Public planetary topology contract. World streaming can keep a locally-flat
+## tangent chart, then canonicalise only when an actor crosses the longitude
+## seam or a pole. A pole reflection returns PI yaw so forward travel remains
+## geographically straight.
+func canonical_world_sample(world_xz: Vector2) -> Dictionary:
+	return _planet.canonical_world_sample(world_xz)
+
+
+func canonical_planet_xz(world_xz: Vector2) -> Vector2:
+	return _planet.canonical_planet_xz(world_xz)
+
+
+func canonical_world_xz(world_xz: Vector2) -> Vector2:
+	return canonical_planet_xz(world_xz)
+
+
+func nearest_world_image(world_xz: Vector2, reference_xz: Vector2) -> Vector2:
+	return _planet.nearest_world_image(world_xz, reference_xz)
+
+
+func nearest_world_image_sample(world_xz: Vector2,
+		reference_xz: Vector2) -> Dictionary:
+	return _planet.nearest_world_image_sample(world_xz, reference_xz)
+
+
+func planet_longitude_latitude(world_xz: Vector2) -> Vector2:
+	return _planet.longitude_latitude(world_xz)
+
+
+func world_xz_to_lon_lat(world_xz: Vector2) -> Vector2:
+	return planet_longitude_latitude(world_xz)
+
+
+func planet_xz_from_longitude_latitude(longitude_degrees: float,
+		latitude_degrees: float) -> Vector2:
+	return _planet.xz_from_longitude_latitude(longitude_degrees,
+		latitude_degrees)
+
+
+func planet_sphere_direction(world_xz: Vector2) -> Vector3:
+	return _planet.sphere_direction(world_xz)
+
+
+func planet_surface_distance(a: Vector2, b: Vector2) -> float:
+	return _planet.great_circle_distance(a, b)
+
+
+func planet_summit_position() -> Vector2:
+	return _planet.summit_position()
+
+
+func planet_home_lake_center() -> Vector2:
+	return _planet.home_lake_center()
+
+
+func canonical_chunk_key(cx: int, cz: int) -> Vector2i:
+	var center := Vector2((float(cx) + 0.5) * CHUNK,
+		(float(cz) + 0.5) * CHUNK)
+	var canonical := canonical_planet_xz(center)
+	return Vector2i(floori(canonical.x / CHUNK),
+		floori(canonical.y / CHUNK))
+
+
 ## Score candidate runway corridors around the origin and keep the driest,
 ## flattest, least mountainous one. Pure noise-field math: every peer lands on
 ## the same strip for a given seed. airstrip_valid stays false during the
@@ -194,16 +315,12 @@ func _locate_airstrip() -> void:
 		var angle := TAU * float(angle_index) / 20.0
 		for radius_option in [205.0, 245.0, 290.0]:
 			var radius := float(radius_option)
-			# Search from the original 420 m strip's centre, then push the new
-			# centre outward by half the added length. This keeps the accessible
-			# apron end in its established near-origin neighbourhood while the
-			# extra 840 m extends away from the duel arena.
+			# Search along a tangent to the spawn ring, then push the new centre by
+			# half the added length. The original 420 m strip stays accessible near
+			# the origin while the longer runway can never cut through the duel arena.
 			var original_center := Vector2(cos(angle), sin(angle)) * radius
-			var heading := angle + PI * 0.5
-			var direction := Vector2(sin(heading), cos(heading))
-			if original_center.dot(direction) < 0.0:
-				direction = -direction
-				heading += PI
+			var direction := Vector2(-sin(angle), cos(angle))
+			var heading := atan2(direction.x, direction.y)
 			var center := original_center + direction \
 				* ((AIRSTRIP_LENGTH - AIRSTRIP_ORIGINAL_LENGTH) * 0.5)
 			var perpendicular := Vector2(direction.y, -direction.x)
@@ -444,13 +561,25 @@ func road_routes() -> Array:
 ## through a six-metre shoulder; `distance` lets the color field draw two
 ## darker wheel ruts while elevation remains evenly crowned.
 func road_surface_sample(x: float, z: float) -> Dictionary:
+	var canonical := canonical_planet_xz(Vector2(x, z))
+	return _road_surface_sample(canonical.x, canonical.y)
+
+
+func _road_surface_sample(x: float, z: float,
+		planet_sample: Dictionary = {}) -> Dictionary:
 	if not _roads_ready:
 		return {"grade": 0.0, "distance": INF, "elevation": 0.0,
 			"route_id": ""}
 	var point := Vector2(x, z)
+	# height, ground tint and canopy gates consume the exact same road result for
+	# every streamed vertex. A one-entry cache removes two duplicate analytic
+	# lattice/dictionary queries without retaining any world-sized state.
+	if point == _last_road_sample_xz and not _last_road_sample.is_empty():
+		return _last_road_sample
 	var best_distance := INF
 	var best_elevation := 0.0
 	var best_route := ""
+	var best_half_width := ROAD_HALF_WIDTH
 	for route_value in _road_routes:
 		var route: Dictionary = route_value
 		var bounds: Rect2 = route.bounds
@@ -471,15 +600,148 @@ func road_surface_sample(x: float, z: float) -> Dictionary:
 				best_distance = distance
 				best_elevation = lerpf(elevations[i], elevations[i + 1], t)
 				best_route = str(route.id)
-	if best_distance > ROAD_HALF_WIDTH + ROAD_BLEND:
-		return {"grade": 0.0, "distance": best_distance,
-			"elevation": best_elevation, "route_id": best_route}
-	return {
-		"grade": 1.0 - smoothstep(ROAD_HALF_WIDTH,
-			ROAD_HALF_WIDTH + ROAD_BLEND, best_distance),
+	# Regional and highway lines cover the entire dry, non-alpine landmass. The
+	# geometric query is constant-time; a continuous eligibility fade prevents a
+	# hard road end where a route meets a coast, lake or severe mountain face.
+	var global := _planet_roads.surface_sample(point)
+	var global_distance := float(global.distance)
+	var global_half_width := float(global.half_width)
+	var global_edge_distance := global_distance - global_half_width
+	var best_edge_distance := best_distance - best_half_width
+	var global_candidate := global_edge_distance < best_edge_distance
+	if global_candidate and global_distance <= global_half_width + ROAD_BLEND:
+		var context := _global_road_context(point, planet_sample, global)
+		var eligibility := float(context.eligibility)
+		if eligibility > 0.015:
+			best_distance = global_distance
+			best_half_width = global_half_width
+			best_elevation = float(context.elevation)
+			best_route = str(global.route_id)
+			var lateral := 1.0 - smoothstep(best_half_width,
+				best_half_width + ROAD_BLEND, best_distance)
+			return _remember_road_sample(point, {
+				"grade": lateral * eligibility,
+				"distance": best_distance,
+				"elevation": best_elevation,
+				"route_id": best_route,
+				"tier": global.tier,
+				"axis": global.axis,
+				"eligibility": eligibility,
+			})
+	if best_distance > best_half_width + ROAD_BLEND:
+		return _remember_road_sample(point, {"grade": 0.0,
+			"distance": best_distance, "elevation": best_elevation,
+			"route_id": best_route})
+	return _remember_road_sample(point, {
+		"grade": 1.0 - smoothstep(best_half_width,
+			best_half_width + ROAD_BLEND, best_distance),
 		"distance": best_distance,
 		"elevation": best_elevation,
 		"route_id": best_route,
+	})
+
+
+func _remember_road_sample(point: Vector2, sample: Dictionary) -> Dictionary:
+	_last_road_sample_xz = point
+	_last_road_sample = sample
+	return sample
+
+
+func _global_road_context(point: Vector2, planet_sample: Dictionary,
+		global: Dictionary) -> Dictionary:
+	var center: Vector2 = global.get("center_point", point)
+	var axis_name := str(global.axis)
+	var axis_code := 0.0 if axis_name == "longitude" else 1.0
+	var context_key := Vector3(center.x, center.y, axis_code)
+	if _road_context_cache.has(context_key):
+		return _road_context_cache[context_key]
+	var macro: Dictionary = planet_sample if center.distance_squared_to(point) \
+		< 0.0001 else {}
+	if macro.is_empty():
+		macro = planet_terrain_sample(center.x, center.y)
+	var eligibility := smoothstep(0.58, 0.76, float(macro.land)) \
+		* (1.0 - smoothstep(0.12, 0.48, float(macro.ocean))) \
+		* (1.0 - smoothstep(0.16, 0.48, float(macro.lake))) \
+		* (1.0 - smoothstep(0.34, 0.64, float(macro.mountain)))
+	eligibility *= smoothstep(86.0, 138.0, center.length())
+	eligibility *= 1.0 - smoothstep(0.08, 0.52,
+		airstrip_grade(center.x, center.y))
+	# The four-neighbour slope audit measures kilometre-scale fields. Share it
+	# over one 48 m chunk along the centreline instead of recomputing four
+	# spherical terrain samples for every 3 m near-mesh vertex. Exact local
+	# elevation and land/water/mountain eligibility above remain unquantized.
+	var audit_center := center
+	if axis_name == "longitude":
+		audit_center.y = snappedf(audit_center.y, ROAD_AUDIT_SPACING)
+	else:
+		audit_center.x = snappedf(audit_center.x, ROAD_AUDIT_SPACING)
+	var audit_key := Vector3(audit_center.x, audit_center.y, axis_code)
+	var audit: Dictionary = _road_audit_cache.get(audit_key, {})
+	if audit.is_empty():
+		var audit_macro := planet_terrain_sample(audit_center.x,
+			audit_center.y)
+		var audit_here := float(audit_macro.elevation)
+		var along := Vector2(0.0, 96.0) if axis_name == "longitude" \
+			else Vector2(96.0, 0.0)
+		var before := planet_terrain_sample(audit_center.x - along.x,
+			audit_center.y - along.y)
+		var after := planet_terrain_sample(audit_center.x + along.x,
+			audit_center.y + along.y)
+		var natural_longitudinal_grade := maxf(
+			absf(audit_here - float(before.elevation)),
+			absf(float(after.elevation) - audit_here)) / along.length()
+		var across := Vector2(24.0, 0.0) if axis_name == "longitude" \
+			else Vector2(0.0, 24.0)
+		var across_before := planet_terrain_sample(audit_center.x - across.x,
+			audit_center.y - across.y)
+		var across_after := planet_terrain_sample(audit_center.x + across.x,
+			audit_center.y + across.y)
+		var natural_cross_grade := maxf(
+			absf(audit_here - float(across_before.elevation)),
+			absf(float(across_after.elevation) - audit_here)) / across.length()
+		audit = {
+			"slope_factor": (1.0 - smoothstep(ROAD_MAX_GRADE * 0.76,
+				ROAD_MAX_GRADE * 1.06, natural_longitudinal_grade)) \
+				* (1.0 - smoothstep(0.055, 0.095, natural_cross_grade)),
+			"natural_longitudinal_grade": natural_longitudinal_grade,
+			"natural_cross_grade": natural_cross_grade,
+		}
+		if _road_audit_cache.size() >= 4096:
+			_road_audit_cache.clear()
+		_road_audit_cache[audit_key] = audit
+	var broad_here := float(macro.elevation)
+	eligibility *= float(audit.slope_factor)
+	var context := {
+		"eligibility": eligibility,
+		# Exact terrain-following elevation: the grade audit determines whether a
+		# road exists here, while the road itself adds no artificial vertical step.
+		"elevation": maxf(broad_here, WATER_Y + 0.92),
+		"natural_longitudinal_grade": audit.natural_longitudinal_grade,
+		"natural_cross_grade": audit.natural_cross_grade,
+	}
+	# The same centreline point is queried by every terrain vertex across a road
+	# shoulder and often by two adjacent LODs. Keep that deterministic audit
+	# bounded without turning the complete planet road graph into stored state.
+	if _road_context_cache.size() >= 8192:
+		_road_context_cache.clear()
+	_road_context_cache[context_key] = context
+	return context
+
+
+## Bounded streaming/map query. The analytic network never needs to allocate a
+## planet-sized graph: only lines crossing this local rectangle are returned.
+func road_segments_in_rect(rect: Rect2, max_segments := 128) -> Array:
+	return _planet_roads.segments_in_rect(rect, max_segments)
+
+
+func road_network_summary() -> Dictionary:
+	return {
+		"kind": "analytic_planet_grid",
+		"highway_spacing": PlanetRoadNetworkScript.HIGHWAY_SPACING,
+		"regional_spacing": PlanetRoadNetworkScript.REGIONAL_SPACING,
+		"maximum_query_segments": PlanetRoadNetworkScript.MAX_SEGMENTS_PER_QUERY,
+		"circumference": PLANET_CIRCUMFERENCE,
+		"max_grade": ROAD_MAX_GRADE,
 	}
 
 
@@ -500,7 +762,13 @@ func point_in_road_clearance(x: float, z: float, extra := 0.0) -> bool:
 func airstrip_grade(x: float, z: float) -> float:
 	if not airstrip_valid:
 		return 0.0
-	var p := Vector2(x, z)
+	var p := canonical_planet_xz(Vector2(x, z))
+	# The runway approach may point toward the origin for some seeds. Keep its
+	# soft shoulder out of the authored duel bowl even when the 1,260 m strip's
+	# bounding corridor crosses that neighbourhood.
+	var arena_exclusion := smoothstep(46.0, 76.0, p.length())
+	if arena_exclusion <= 0.0:
+		return 0.0
 	if not _strip_bounds.has_point(p):
 		return 0.0
 	var rel := p - airstrip_center
@@ -523,7 +791,7 @@ func airstrip_grade(x: float, z: float) -> float:
 	var hangar_dv := maxf(absf(v - hangar_pad_center.y)
 		- hangar_pad.size.y * 0.5, 0.0)
 	d = minf(d, Vector2(hangar_du, hangar_dv).length())
-	return 1.0 - smoothstep(0.0, AIRSTRIP_BLEND, d)
+	return (1.0 - smoothstep(0.0, AIRSTRIP_BLEND, d)) * arena_exclusion
 
 
 func airstrip_apron_local() -> Vector2:
@@ -534,6 +802,35 @@ func airstrip_apron_local() -> Vector2:
 func airstrip_apron_world() -> Vector2:
 	var apron := airstrip_apron_local()
 	return airstrip_center + _strip_dir * apron.x + _strip_perp * apron.y
+
+
+## Dry, level four-seat rocket pad beside the near end of the runway, on the
+## side opposite the hangars. It is analytic so all peers, collision LODs and
+## future moon-expedition systems agree without replicating a transform.
+func rocket_launch_position() -> Vector3:
+	if not airstrip_valid:
+		return Vector3(96.0, 3.3, -48.0)
+	var local := Vector2(-AIRSTRIP_LENGTH * 0.5 + 205.0,
+		-(AIRSTRIP_WIDTH * 0.5 + ROCKET_PAD_RADIUS + 12.0))
+	var world := airstrip_center + _strip_dir * local.x + _strip_perp * local.y
+	return Vector3(world.x, airstrip_elevation + 0.06, world.y)
+
+
+func rocket_launch_grade(x: float, z: float) -> float:
+	if not airstrip_valid:
+		return 0.0
+	var canonical := canonical_planet_xz(Vector2(x, z))
+	var pad := rocket_launch_position()
+	var distance := canonical.distance_to(Vector2(pad.x, pad.z))
+	return 1.0 - smoothstep(ROCKET_PAD_RADIUS,
+		ROCKET_PAD_RADIUS + ROCKET_PAD_BLEND, distance)
+
+
+func point_in_rocket_launch_clearance(x: float, z: float,
+		extra := 0.0) -> bool:
+	var pad := rocket_launch_position()
+	return canonical_planet_xz(Vector2(x, z)).distance_to(
+		Vector2(pad.x, pad.z)) <= ROCKET_PAD_RADIUS + extra
 
 
 ## Six deterministic open-front hangars run parallel to the near end of the
@@ -613,7 +910,9 @@ func view_distance_for_altitude(altitude: float) -> float:
 func height(x: float, z: float) -> float:
 	if debug_world:
 		return 2.0
-	return _height_with_lake(x, z, lake_influence(x, z))
+	var macro := planet_terrain_sample(x, z)
+	var canonical: Vector2 = macro.xz
+	return _height_with_planet_sample(canonical.x, canonical.y, macro)
 
 
 ## 0..1 strength of the mountain ranges at a point. Suppressed near the world
@@ -622,43 +921,29 @@ func height(x: float, z: float) -> float:
 func mountain_influence(x: float, z: float) -> float:
 	if debug_world:
 		return 0.0
-	var mask: float = smoothstep(0.30, 0.62, _n_mountain_mask.get_noise_2d(x, z))
-	if mask < 0.002:
-		return 0.0
-	mask *= smoothstep(120.0, 280.0, Vector2(x, z).length())
-	if mask < 0.002:
-		return 0.0
-	# Ridged crests: fold the signed noise so zero-crossings become sharp
-	# spines, plus a finer octave for jagged shoulders. Both samples only run
-	# inside the range mask, so ordinary jungle pays one mask lookup.
-	var ridge := 1.0 - absf(_n_mountain.get_noise_2d(x, z))
-	var jag := 1.0 - absf(_n_mountain.get_noise_2d(x * 2.7 + 511.0, z * 2.7))
-	return mask * (pow(ridge, 2.3) + pow(jag, 2.6) * 0.22)
+	return float(planet_terrain_sample(x, z).mountain)
 
 
-func _height_with_lake(x: float, z: float, lake: float) -> float:
-	var h := _n_base.get_noise_2d(x, z) * BASE_RELIEF_AMPLITUDE \
-		+ _n_detail.get_noise_2d(x, z) * 1.3 + 3.2 \
-		+ _n_hill.get_noise_2d(x, z) * ROLLING_HILL_AMPLITUDE
-	# Mountains rise before the lake blend so basins carve fjord-like shores
-	# through the foothills; scaling by (1 - lake) keeps peaks off lake beds.
-	var mountain := mountain_influence(x, z)
-	if mountain > 0.0:
-		h += mountain * MOUNTAIN_HEIGHT * (1.0 - lake)
-	# Blend terrain into a deep, gently uneven lake floor. The warped 600 m-ish
-	# field produces 120–350 m connected water bodies: roughly an order of
-	# magnitude wider than the old noise pockets, without hard circular shores.
-	var lake_floor := WATER_Y - 2.4 - lake * 3.8 \
-		+ _n_detail.get_noise_2d(x * 0.55, z * 0.55) * 0.32
-	h = lerpf(h, lake_floor, lake)
-	# spawn meadow: smoothly guarantee dry, gentle ground near the world origin
-	var blend := exp(-(x * x + z * z) / 650.0)
-	h = lerpf(h, maxf(h, 2.4), blend)
+func _height_with_planet_sample(x: float, z: float,
+		macro: Dictionary, road_override: Dictionary = {}) -> float:
+	var h := float(macro.elevation)
+	# The broad home continent may sit hundreds of metres above sea level, but
+	# the legacy spawn neighbourhood remains a gently graded, accessible coast.
+	var home_distance := Vector2(x, z).length()
+	var home_grade := 1.0 - smoothstep(115.0, 265.0, home_distance)
+	# Keep the spawn meadow graded, but do not lift the deliberately nearby lake
+	# back into dry ground after PlanetTerrain has carved its swim-safe basin.
+	home_grade *= 1.0 - smoothstep(0.22, 0.62, float(macro.lake))
+	if home_grade > 0.0:
+		var home_floor := 3.25 + _n_detail.get_noise_2d(
+			x * 0.20, z * 0.20) * 0.16
+		h = lerpf(h, home_floor, home_grade)
 	# Connected packed-dirt routes flatten only their driveable crown and blend
-	# through soft shoulders. The profile was cached from the same seed fields at
-	# setup and capped at a realistic 8.5% grade, so cars remain useful even as
-	# the surrounding jungle gains substantially stronger rolling relief.
-	var road := road_surface_sample(x, z)
+	# through soft shoulders. Local destination routes and the planet-wide
+	# analytic lattice share this exact height/color query.
+	var road: Dictionary = road_override
+	if road.is_empty():
+		road = _road_surface_sample(x, z, macro)
 	var road_strength := float(road.grade)
 	if road_strength > 0.0:
 		var road_floor := float(road.elevation) \
@@ -682,44 +967,141 @@ func _height_with_lake(x: float, z: float, lake: float) -> float:
 		var strip_floor := airstrip_elevation \
 			+ _n_detail.get_noise_2d(x * 0.44, z * 0.44) * 0.05
 		h = lerpf(h, strip_floor, strip_grade)
+	var rocket_grade := rocket_launch_grade(x, z)
+	if rocket_grade > 0.0:
+		var rocket_floor := airstrip_elevation \
+			+ _n_detail.get_noise_2d(x * 0.33, z * 0.33) * 0.025
+		h = lerpf(h, rocket_floor, rocket_grade)
+	# Road slope audits sample four neighbouring points. Restore the caller's
+	# macro sample so the immediately following ground-color/biome query for this
+	# same terrain vertex remains a one-entry cache hit.
+	_last_planet_sample_xz = macro.xz
+	_last_planet_sample = macro
 	return h
 
 
 func lake_influence(x: float, z: float) -> float:
 	if debug_world:
 		return 0.0
-	var warp := _n_lake_warp.get_noise_2d(x, z) * 92.0
-	var basin := _n_lake.get_noise_2d(x + warp, z - warp * 0.72)
-	return smoothstep(0.16, 0.46, basin)
+	return float(planet_terrain_sample(x, z).lake)
+
+
+func ocean_influence(x: float, z: float) -> float:
+	if debug_world:
+		return 0.0
+	return float(planet_terrain_sample(x, z).ocean)
+
+
+func land_influence(x: float, z: float) -> float:
+	if debug_world:
+		return 1.0
+	return float(planet_terrain_sample(x, z).land)
+
+
+func planet_terrain_sample(x: float, z: float) -> Dictionary:
+	if debug_world:
+		return {"xz": Vector2(x, z), "elevation": 2.0, "land": 1.0,
+			"ocean": 0.0, "lake": 0.0, "upland": 0.0,
+			"mountain": 0.0, "temperature": 0.72, "moisture": 0.68,
+			"detail": 0.0, "latitude_fraction": 0.0,
+			"summit_weight": 0.0}
+	var canonical := canonical_planet_xz(Vector2(x, z))
+	if canonical == _last_planet_sample_xz and not _last_planet_sample.is_empty():
+		return _last_planet_sample
+	# All four streamed terrain LODs share a 3 m base lattice. Retain only those
+	# exact reusable samples in a bounded FIFO; arbitrary tree/map probes do not
+	# pollute it. This lets a horizon/skyline/stratos handoff reuse the same 3D
+	# spherical noise work instead of evaluating every shared vertex again.
+	var x_mod := fposmod(canonical.x, 3.0)
+	var z_mod := fposmod(canonical.y, 3.0)
+	var lattice_sample := (x_mod < 0.0001 or x_mod > 2.9999) \
+		and (z_mod < 0.0001 or z_mod > 2.9999)
+	if lattice_sample and _planet_lattice_cache.has(canonical):
+		_last_planet_sample_xz = canonical
+		_last_planet_sample = _planet_lattice_cache[canonical]
+		return _last_planet_sample
+	_last_planet_sample_xz = canonical
+	_last_planet_sample = _planet.sample(canonical)
+	if lattice_sample:
+		if _planet_lattice_cache_order.size() < PLANET_LATTICE_CACHE_LIMIT:
+			_planet_lattice_cache_order.append(canonical)
+		else:
+			var oldest := _planet_lattice_cache_order[
+				_planet_lattice_cache_cursor]
+			_planet_lattice_cache.erase(oldest)
+			_planet_lattice_cache_order[_planet_lattice_cache_cursor] = canonical
+			_planet_lattice_cache_cursor = (_planet_lattice_cache_cursor + 1) \
+				% PLANET_LATTICE_CACHE_LIMIT
+		_planet_lattice_cache[canonical] = _last_planet_sample
+	return _last_planet_sample
+
+
+## Allocation-free-at-the-call-site companions for world-map tile baking and
+## quantitative tests that already hold a macro sample.
+func planet_height_from_sample(macro: Dictionary) -> float:
+	var canonical: Vector2 = macro.get("xz", Vector2.ZERO)
+	return _height_with_planet_sample(canonical.x, canonical.y, macro)
+
+
+func planet_biome_from_sample(macro: Dictionary, elevation: float) -> int:
+	var canonical: Vector2 = macro.get("xz", Vector2.ZERO)
+	return _biome_from_planet_sample(canonical.x, canonical.y,
+		elevation, macro)
 
 
 func biome_at(x: float, z: float) -> int:
-	var lake := lake_influence(x, z)
-	return _biome_from_samples(x, z, lake, _height_with_lake(x, z, lake))
+	var macro := planet_terrain_sample(x, z)
+	var canonical: Vector2 = macro.xz
+	var elevation := _height_with_planet_sample(canonical.x, canonical.y, macro)
+	return _biome_from_planet_sample(canonical.x, canonical.y, elevation, macro)
 
 
 ## Terrain and decoration builders already have the exact elevation sample.
 ## Reusing it avoids a full duplicate terrain/noise evaluation per vertex while
 ## preserving the same deterministic biome thresholds.
 func biome_at_height(x: float, z: float, elevation: float) -> int:
-	return _biome_from_samples(x, z, lake_influence(x, z), elevation)
+	var macro := planet_terrain_sample(x, z)
+	var canonical: Vector2 = macro.xz
+	return _biome_from_planet_sample(canonical.x, canonical.y,
+		elevation, macro)
 
 
-func _biome_from_samples(x: float, z: float, lake: float,
-		elevation: float) -> int:
+func _biome_from_planet_sample(x: float, z: float, elevation: float,
+		macro: Dictionary) -> int:
 	# The graded origin is an authored rainforest arena even if the macro lake
 	# field happens to pass beneath it for a particular match seed.
 	if Vector2(x, z).length() <= 35.0:
 		return Biome.RAINFOREST
-	if lake > 0.22 or elevation < WATER_Y + 1.15:
+	var ocean := float(macro.ocean)
+	var lake := float(macro.lake)
+	var mountain := float(macro.mountain)
+	var upland := float(macro.upland)
+	var temperature := float(macro.temperature)
+	var moisture := float(macro.moisture)
+	var latitude := float(macro.latitude_fraction)
+	if ocean > 0.34 and elevation < WATER_Y + 0.8:
+		return Biome.OCEAN
+	if lake > 0.34 and elevation < WATER_Y + 0.8:
+		return Biome.LAKE
+	if temperature < 0.115 or latitude > 0.90:
+		return Biome.ICE
+	if temperature < 0.275 or latitude > 0.72:
+		return Biome.TUNDRA
+	if mountain > 0.34 or elevation > 920.0:
+		return Biome.ROCKY_MOUNTAINS
+	if lake > 0.07 or (elevation < WATER_Y + 2.2 and moisture > 0.54):
 		return Biome.WETLAND
-	var climate := _n_biome.get_noise_2d(x, z)
-	var moisture := _n_moisture.get_noise_2d(x, z)
-	if elevation > 8.7 or climate > 0.34:
+	if moisture < 0.335 and temperature > 0.52:
+		return Biome.DESERT
+	if upland > 0.47 or elevation > 330.0:
 		return Biome.HIGHLAND
-	if climate < -0.16 and moisture < 0.34:
+	if moisture > 0.69 and temperature > 0.58:
+		return Biome.RAINFOREST
+	if moisture > 0.59 and temperature > 0.45:
 		return Biome.BAMBOO_GROVE
-	return Biome.RAINFOREST
+	if moisture > 0.46:
+		return Biome.GRASSLAND
+	return Biome.PLAINS
 
 
 func biome_name(biome: int) -> String:
@@ -727,11 +1109,21 @@ func biome_name(biome: int) -> String:
 
 
 func ground_color(h: float, x: float, z: float) -> Color:
-	var jit := _n_color.get_noise_2d(x, z)
+	var macro := planet_terrain_sample(x, z)
+	var canonical: Vector2 = macro.xz
+	var road := _road_surface_sample(canonical.x, canonical.y, macro)
+	return _ground_color_from_sample(h, canonical.x, canonical.y, macro, road)
+
+
+func _ground_color_from_sample(h: float, x: float, z: float,
+		macro: Dictionary, road: Dictionary) -> Color:
+	var jit := float(macro.detail) * 0.42
 	if h < WATER_Y + 0.4:
-		return Color(0.55 + jit * 0.04, 0.47, 0.27)
-	var t := clampf((h - 1.0) / 11.0, 0.0, 1.0)
-	var biome := biome_at_height(x, z, h)
+		if float(macro.ocean) > float(macro.lake):
+			return Color(0.055 + jit * 0.02, 0.105, 0.16)
+		return Color(0.31 + jit * 0.03, 0.285, 0.19)
+	var t := clampf((h - 5.0) / 850.0, 0.0, 1.0)
+	var biome := _biome_from_planet_sample(x, z, h, macro)
 	# Deep, sunlight-starved forest-floor greens rather than lawn tones.
 	var low := Color(0.085, 0.26, 0.08)
 	var high := Color(0.035, 0.155, 0.06)
@@ -745,6 +1137,30 @@ func ground_color(h: float, x: float, z: float) -> Color:
 		Biome.HIGHLAND:
 			low = Color(0.075, 0.215, 0.10)
 			high = Color(0.035, 0.13, 0.085)
+		Biome.PLAINS:
+			low = Color(0.34, 0.43, 0.13)
+			high = Color(0.21, 0.31, 0.105)
+		Biome.GRASSLAND:
+			low = Color(0.23, 0.42, 0.10)
+			high = Color(0.12, 0.29, 0.075)
+		Biome.ROCKY_MOUNTAINS:
+			low = Color(0.30, 0.285, 0.25)
+			high = Color(0.42, 0.405, 0.38)
+		Biome.DESERT:
+			low = Color(0.67, 0.46, 0.22)
+			high = Color(0.53, 0.34, 0.17)
+		Biome.TUNDRA:
+			low = Color(0.37, 0.40, 0.29)
+			high = Color(0.27, 0.31, 0.27)
+		Biome.ICE:
+			low = Color(0.73, 0.81, 0.85)
+			high = Color(0.88, 0.92, 0.94)
+		Biome.OCEAN:
+			low = Color(0.065, 0.12, 0.18)
+			high = low
+		Biome.LAKE:
+			low = Color(0.20, 0.25, 0.19)
+			high = low
 	var c := low.lerp(high, t)
 	# Above the canopy line the soil turns to bare rock, then permanent snow.
 	# Shaders add sparkle/roughness on top; the vertex tint carries the bands so
@@ -760,7 +1176,6 @@ func ground_color(h: float, x: float, z: float) -> Color:
 	# Warm compacted soil plus twin darker tyre ruts. Because this color is
 	# analytic, the same roads remain visible in near terrain, horizon/skyline/
 	# stratos tiers, and the CPU-baked minimap without additional draw calls.
-	var road := road_surface_sample(x, z)
 	var road_strength := float(road.grade)
 	if road_strength > 0.12:
 		var dirt := Color(0.39 + jit * 0.025, 0.285, 0.16)
@@ -773,12 +1188,195 @@ func ground_color(h: float, x: float, z: float) -> Color:
 	if strip > 0.3:
 		c = c.lerp(Color(0.44 + jit * 0.03, 0.385, 0.265),
 			smoothstep(0.3, 0.75, strip))
+	var rocket_pad := rocket_launch_grade(x, z)
+	if rocket_pad > 0.15:
+		c = c.lerp(Color(0.31, 0.325, 0.33),
+			smoothstep(0.15, 0.78, rocket_pad))
 	return Color(c.r + jit * 0.04, c.g + jit * 0.04, c.b)
+
+
+## Exact physical terrain vertex plus its matching tint in one call. Streaming
+## builders previously re-entered Gen for height and color, repeating cache,
+## canonical-coordinate and road dispatch even though both consume the same
+## macro and road samples.
+func terrain_vertex_sample(x: float, z: float) -> Dictionary:
+	# The suspension/debug playground deliberately replaces every terrain query
+	# with one flat two-metre plane. Keep this combined fast path on that same
+	# contract; bypassing height() here raises the rendered/collision mesh to the
+	# planet profile while actors and authored fixtures still spawn at y = 2.
+	if debug_world:
+		var debug_elevation := height(x, z)
+		return {
+			"elevation": debug_elevation,
+			"color": ground_color(debug_elevation, x, z),
+		}
+	var macro := planet_terrain_sample(x, z)
+	var canonical: Vector2 = macro.xz
+	var road := _road_surface_sample(canonical.x, canonical.y, macro)
+	var elevation := _height_with_planet_sample(canonical.x, canonical.y,
+		macro, road)
+	return {
+		"elevation": elevation,
+		"color": _ground_color_from_sample(elevation, canonical.x,
+			canonical.y, macro, road),
+	}
+
+
+## Skyline equivalent with its exact canopy tint folded into the same macro,
+## road and biome evaluation. Roads remain physical and visible at this tier.
+func skyline_visual_sample(x: float, z: float) -> Dictionary:
+	var macro := planet_terrain_sample(x, z)
+	var canonical: Vector2 = macro.xz
+	var road := _road_surface_sample(canonical.x, canonical.y, macro)
+	var elevation := _height_with_planet_sample(canonical.x, canonical.y,
+		macro, road)
+	var ground := _ground_color_from_sample(elevation, canonical.x,
+		canonical.y, macro, road)
+	var cover := 0.0
+	if float(road.grade) <= 0.16 \
+			and not point_on_airstrip(canonical.x, canonical.y) \
+			and not point_in_rocket_launch_clearance(canonical.x, canonical.y) \
+			and elevation >= WATER_Y + 0.5 and elevation <= TREE_LINE:
+		var shore := smoothstep(WATER_Y + 0.5, WATER_Y + 1.6, elevation)
+		var tree_line_fade := 1.0 - smoothstep(TREE_LINE - 5.0,
+			TREE_LINE, elevation)
+		var biome := _biome_from_planet_sample(canonical.x, canonical.y,
+			elevation, macro)
+		cover = shore * tree_line_fade * _tree_density(biome)
+		if cover > 0.0:
+			var shade := 0.32 + clampf(_n_color.get_noise_2d(
+				canonical.x * 0.5, canonical.y * 0.5) * 0.5 + 0.5,
+				0.0, 1.0) * 0.30
+			ground = ground.lerp(biome_foliage_color(biome, shade),
+				cover * 0.5)
+	return {"elevation": elevation, "color": ground, "cover": cover}
+
+
+## Combined satellite-LOD vertex sample. At 192 metres per lattice cell a
+## 10-14 m road is below one pixel; sampling its physical crown aliases almost
+## half of the vertices because the road grid and stratos grid share factors,
+## and used to trigger hundreds of unnecessary five-point slope audits per
+## sector. Near terrain, collision, horizon, skyline and the atlas retain exact
+## roads. Stratos deliberately filters that sub-pixel feature while sharing one
+## macro/biome/canopy evaluation for everything the vertex actually displays.
+func stratos_visual_sample(x: float, z: float) -> Dictionary:
+	var macro := planet_terrain_sample(x, z)
+	var canonical: Vector2 = macro.xz
+	var elevation := _height_with_planet_sample(canonical.x, canonical.y,
+		macro, _stratos_no_road_sample)
+	if elevation < WATER_Y:
+		return {"elevation": elevation, "cover": 0.0, "relief": 0.0,
+			"color": Color.BLACK}
+	var ground := _ground_color_from_sample(elevation, canonical.x,
+		canonical.y, macro, _stratos_no_road_sample)
+	var cover := 0.0
+	var authored_clear := false
+	# All authored flat zones live near the origin. Avoid repeating their
+	# coordinate/bounds work for satellite vertices elsewhere on the planet.
+	if canonical.length_squared() < 4000000.0:
+		authored_clear = point_on_airstrip(canonical.x, canonical.y) \
+			or point_in_rocket_launch_clearance(canonical.x, canonical.y)
+	if not authored_clear and elevation >= WATER_Y + 0.5 \
+			and elevation <= TREE_LINE:
+		var shore := smoothstep(WATER_Y + 0.5, WATER_Y + 1.6, elevation)
+		var tree_line_fade := 1.0 - smoothstep(TREE_LINE - 5.0,
+			TREE_LINE, elevation)
+		var biome := _biome_from_planet_sample(canonical.x, canonical.y,
+			elevation, macro)
+		cover = shore * tree_line_fade * _tree_density(biome)
+		if cover > 0.0:
+			var shade := 0.32 + clampf(_n_color.get_noise_2d(
+				canonical.x * 0.5, canonical.y * 0.5) * 0.5 + 0.5,
+				0.0, 1.0) * 0.30
+			ground = ground.lerp(biome_foliage_color(biome, shade),
+				cover * 0.74)
+	var relief := 0.0
+	if cover > 0.0:
+		var cluster := clampf(_n_color.get_noise_2d(canonical.x * 0.05,
+			canonical.y * 0.05) * 0.5 + 0.5, 0.0, 1.0)
+		relief = cover * lerpf(STRATOS_CANOPY_RELIEF_MIN,
+			STRATOS_CANOPY_RELIEF_MAX, cluster)
+	return {"elevation": elevation, "cover": cover, "relief": relief,
+		"color": ground}
+
+
+## Single-pass sample used by the zoomable world map. `meters_per_pixel` widens
+## only the color/coverage sample by a capped sub-pixel footprint, keeping roads
+## legible at 8-32 m/px while physical terrain and collision widths stay exact.
+func map_sample(x: float, z: float, meters_per_pixel := 1.0) -> Dictionary:
+	var macro := planet_terrain_sample(x, z)
+	var canonical: Vector2 = macro.xz
+	var road := _road_surface_sample(canonical.x, canonical.y, macro)
+	var elevation := _height_with_planet_sample(canonical.x, canonical.y,
+		macro, road)
+	var biome := _biome_from_planet_sample(canonical.x, canonical.y,
+		elevation, macro)
+	var water := elevation < WATER_Y or biome in [Biome.OCEAN, Biome.LAKE]
+	var road_strength := float(road.grade)
+	var map_road_sample: Dictionary = road.duplicate()
+	# A centre-point sample can skip a 9.6 m road completely once one map pixel
+	# covers 8-32 m. Expand only the map coverage footprint by a capped fraction
+	# of m/px; physical terrain/collision widths remain unchanged.
+	var raw_global := _planet_roads.surface_sample(canonical)
+	var pixel_dilation := minf(maxf(meters_per_pixel, 0.01) * 0.58, 72.0)
+	var global_half_width := float(raw_global.half_width)
+	if float(raw_global.distance) <= global_half_width + pixel_dilation \
+			+ maxf(meters_per_pixel * 0.28, 1.0):
+		var context := _global_road_context(canonical, macro, raw_global)
+		var map_global := (1.0 - smoothstep(global_half_width + pixel_dilation,
+			global_half_width + pixel_dilation
+				+ maxf(meters_per_pixel * 0.28, 1.0),
+			float(raw_global.distance))) * float(context.eligibility)
+		if map_global > road_strength:
+			road_strength = map_global
+			map_road_sample = raw_global.duplicate()
+			map_road_sample.grade = map_global
+	# Preserve the curated motor-pool/dock/airfield links at medium tile zooms.
+	if not str(road.get("route_id", "")).begins_with("regional:") \
+			and not str(road.get("route_id", "")).begins_with("highway:") \
+			and is_finite(float(road.get("distance", INF))):
+		var map_curated := 1.0 - smoothstep(ROAD_HALF_WIDTH + pixel_dilation,
+			ROAD_HALF_WIDTH + pixel_dilation
+				+ maxf(meters_per_pixel * 0.28, 1.0),
+			float(road.distance))
+		if map_curated > road_strength:
+			road_strength = map_curated
+			map_road_sample = road.duplicate()
+			map_road_sample.grade = map_curated
+	var color: Color
+	if water:
+		var depth := clampf((WATER_Y - elevation) / 360.0, 0.0, 1.0)
+		color = Color("247fa8").lerp(Color("082b58"), depth * 0.88)
+		if biome == Biome.LAKE:
+			color = color.lerp(Color("3191a8"), 0.30)
+	else:
+		color = _ground_color_from_sample(elevation, canonical.x,
+			canonical.y, macro, map_road_sample)
+	var tree_cover := 0.0
+	if not water and road_strength <= 0.12 \
+			and not point_on_airstrip(canonical.x, canonical.y) \
+			and not point_in_rocket_launch_clearance(canonical.x, canonical.y) \
+			and elevation >= WATER_Y + 0.5 and elevation <= TREE_LINE:
+		var shore := smoothstep(WATER_Y + 0.5, WATER_Y + 1.6, elevation)
+		var tree_line_fade := 1.0 - smoothstep(TREE_LINE - 5.0,
+			TREE_LINE, elevation)
+		tree_cover = shore * tree_line_fade * _tree_density(biome)
+	return {
+		"color": color,
+		"water": water,
+		"road": road_strength,
+		"tree_cover": tree_cover,
+		"elevation": elevation,
+		"biome": biome,
+		"meters_per_pixel": maxf(meters_per_pixel, 0.01),
+	}
 
 
 func _chunk_rng(cx: int, cz: int, salt: int = 0) -> RandomNumberGenerator:
 	var r := RandomNumberGenerator.new()
-	r.seed = world_seed * 73856093 + cx * 19349663 + cz * 83492791 + salt * 7919
+	var canonical := canonical_chunk_key(cx, cz)
+	r.seed = world_seed * 73856093 + canonical.x * 19349663 \
+		+ canonical.y * 83492791 + salt * 7919
 	return r
 
 
@@ -955,6 +1553,9 @@ func _arena_hut(label: String, x: float, z: float, ammo_kind: int,
 		"ammo_kind": ammo_kind,
 		"ammo_amount": ammo_amount,
 		"bandages": bandages,
+		# The northwest starter chest guarantees one discoverable normal pack;
+		# every other chest remains useful after somebody claims it first.
+		"normal_backpack": label == "northwest",
 		"biome": Biome.RAINFOREST,
 		"arena": true,
 	}
@@ -1041,7 +1642,8 @@ func chunk_layout(cx: int, cz: int, include_decorations := true) -> Dictionary:
 			continue
 		if local_height > TREE_LINE:
 			continue  # bare rock and snow above the canopy line
-		if point_on_airstrip(px, pz) or point_on_road(px, pz):
+		if point_on_airstrip(px, pz) or point_on_road(px, pz) \
+				or point_in_rocket_launch_clearance(px, pz, 1.5):
 			continue  # nothing grows through packed runway or road dirt
 		tree_points.append(point)
 		var generated_tree := _make_tree(rng, Vector3(px, 0, pz), 0.0,
@@ -1073,7 +1675,8 @@ func chunk_layout(cx: int, cz: int, include_decorations := true) -> Dictionary:
 			bananas.append(Vector3(mid.x, height(mid.x, mid.z) + rng.randf_range(7.0, 13.0), mid.z))
 
 	var rock_count := rng.randi_range(2, 5) \
-		if center_biome == Biome.HIGHLAND else rng.randi_range(0, 2)
+		if center_biome in [Biome.HIGHLAND, Biome.ROCKY_MOUNTAINS] \
+		else rng.randi_range(0, 2)
 	# Slopes above the tree line trade canopy for scree: extra boulders make the
 	# bare rock band read as mountainside instead of empty lawn.
 	if height(x0 + CHUNK * 0.5, z0 + CHUNK * 0.5) > TREE_LINE * 0.75:
@@ -1085,7 +1688,8 @@ func chunk_layout(cx: int, cz: int, include_decorations := true) -> Dictionary:
 			var rock_radius := rng.randf_range(0.8, 1.9)
 			if not _point_in_structure_clearance(Vector2(rx, rz),
 					occupied_clearances) and not point_on_airstrip(rx, rz) \
-					and not point_on_road(rx, rz):
+					and not point_on_road(rx, rz) \
+					and not point_in_rocket_launch_clearance(rx, rz, rock_radius):
 				rocks.append({"pos": Vector3(rx, height(rx, rz), rz), "r": rock_radius})
 
 	# Dense, collision-free understory is cheap to draw as three MultiMeshes.
@@ -1102,6 +1706,18 @@ func chunk_layout(cx: int, cz: int, include_decorations := true) -> Dictionary:
 			foliage_goal = 70
 		Biome.HIGHLAND:
 			foliage_goal = 82
+		Biome.PLAINS:
+			foliage_goal = 34
+		Biome.GRASSLAND:
+			foliage_goal = 68
+		Biome.ROCKY_MOUNTAINS:
+			foliage_goal = 18
+		Biome.DESERT:
+			foliage_goal = 10
+		Biome.TUNDRA:
+			foliage_goal = 22
+		Biome.ICE, Biome.OCEAN, Biome.LAKE:
+			foliage_goal = 0
 	for i in range(foliage_goal):
 		var fx := x0 + foliage_rng.randf() * CHUNK
 		var fz := z0 + foliage_rng.randf() * CHUNK
@@ -1116,13 +1732,16 @@ func chunk_layout(cx: int, cz: int, include_decorations := true) -> Dictionary:
 			continue
 		if fh > TREE_LINE:
 			continue  # no undergrowth on the bare rock and snow bands
-		if point_on_airstrip(fx, fz) or point_on_road(fx, fz):
+		if point_on_airstrip(fx, fz) or point_on_road(fx, fz) \
+				or point_in_rocket_launch_clearance(fx, fz, 0.8):
 			continue
 		var kind := 0
 		if fb == Biome.WETLAND:
 			kind = 2 if foliage_rng.randf() < 0.72 else 0
 		elif fb == Biome.BAMBOO_GROVE:
 			kind = 1 if foliage_rng.randf() < 0.68 else 0
+		elif fb in [Biome.PLAINS, Biome.GRASSLAND, Biome.TUNDRA]:
+			kind = 1
 		else:
 			kind = 0 if foliage_rng.randf() < 0.62 else 1
 		var size := foliage_rng.randf_range(0.72, 1.48)
@@ -1171,6 +1790,14 @@ func _supply_hut_layout(cx: int, cz: int) -> Dictionary:
 			chance = 0.23
 		Biome.HIGHLAND:
 			chance = 0.12
+		Biome.PLAINS:
+			chance = 0.10
+		Biome.GRASSLAND:
+			chance = 0.12
+		Biome.DESERT:
+			chance = 0.05
+		Biome.TUNDRA:
+			chance = 0.035
 		_:
 			return {}
 	if rng.randf() > chance:
@@ -1195,6 +1822,8 @@ func _supply_hut_layout(cx: int, cz: int) -> Dictionary:
 	if minimum_height < WATER_Y + 0.72 or maximum_height - minimum_height > 1.05:
 		return {}
 	if point_on_airstrip(px, pz) \
+			or point_in_rocket_launch_clearance(px, pz,
+				SUPPLY_HUT_CLEARANCE) \
 			or point_in_road_clearance(px, pz, SUPPLY_HUT_CLEARANCE):
 		return {}
 
@@ -1212,6 +1841,7 @@ func _supply_hut_layout(cx: int, cz: int) -> Dictionary:
 	var bandage_count := 0
 	if rng.randf() < 0.38:
 		bandage_count = 2 if rng.randf() < 0.16 else 1
+	var normal_backpack := rng.randf() < 0.12
 	return {
 		"kind": "supply_hut",
 		"id": "s:%d,%d#0" % [cx, cz],
@@ -1221,6 +1851,7 @@ func _supply_hut_layout(cx: int, cz: int) -> Dictionary:
 		"ammo_kind": ammo_kind,
 		"ammo_amount": ammo_amount,
 		"bandages": bandage_count,
+		"normal_backpack": normal_backpack,
 		"biome": local_biome,
 	}
 
@@ -1245,6 +1876,18 @@ func _tree_density(biome: int) -> float:
 			return 0.72
 		Biome.HIGHLAND:
 			return 0.82
+		Biome.PLAINS:
+			return 0.20
+		Biome.GRASSLAND:
+			return 0.32
+		Biome.ROCKY_MOUNTAINS:
+			return 0.10
+		Biome.DESERT:
+			return 0.025
+		Biome.TUNDRA:
+			return 0.08
+		Biome.ICE, Biome.OCEAN, Biome.LAKE:
+			return 0.0
 	return 0.8
 
 
@@ -1261,6 +1904,20 @@ func biome_foliage_color(biome: int, shade: float) -> Color:
 		Biome.HIGHLAND:
 			return Color.from_hsv(0.37 + shade * 0.055, 0.54,
 				0.185 + shade * 0.15)
+		Biome.PLAINS:
+			return Color.from_hsv(0.17 + shade * 0.025, 0.58,
+				0.30 + shade * 0.17)
+		Biome.GRASSLAND:
+			return Color.from_hsv(0.23 + shade * 0.035, 0.68,
+				0.26 + shade * 0.18)
+		Biome.ROCKY_MOUNTAINS:
+			return Color.from_hsv(0.31, 0.26, 0.24 + shade * 0.18)
+		Biome.DESERT:
+			return Color.from_hsv(0.12, 0.48, 0.40 + shade * 0.15)
+		Biome.TUNDRA:
+			return Color.from_hsv(0.24, 0.26, 0.29 + shade * 0.14)
+		Biome.ICE:
+			return Color(0.77, 0.85, 0.88)
 	return Color.from_hsv(0.27 + shade * 0.07, 0.70,
 		0.205 + shade * 0.175)
 
@@ -1314,6 +1971,7 @@ func vehicle_layout(cx: int, cz: int) -> Array:
 	var kind_roll := rng.randf()
 	var yaw := rng.randf() * TAU
 	if Vector2(px, pz).length() < 150.0 or point_on_airstrip(px, pz) \
+			or point_in_rocket_launch_clearance(px, pz, 4.0) \
 			or point_on_road(px, pz):
 		return defs
 	var h := height(px, pz)
@@ -1412,7 +2070,8 @@ func skyline_tree_layout(cx: int, cz: int) -> Array:
 		var h := height(px, pz)
 		if h < WATER_Y + 0.6 or h > TREE_LINE:
 			continue
-		if point_on_airstrip(px, pz) or point_on_road(px, pz):
+		if point_on_airstrip(px, pz) or point_on_road(px, pz) \
+				or point_in_rocket_launch_clearance(px, pz, 1.5):
 			continue
 		var biome := biome_at_height(px, pz, h)
 		if density_roll > _tree_density(biome) * 0.82:
@@ -1433,7 +2092,8 @@ func skyline_tree_layout(cx: int, cz: int) -> Array:
 func canopy_cover(h: float, x: float, z: float) -> float:
 	if debug_world:
 		return 0.0
-	if point_on_road(x, z) or point_on_airstrip(x, z):
+	if point_on_road(x, z) or point_on_airstrip(x, z) \
+			or point_in_rocket_launch_clearance(x, z):
 		return 0.0
 	if h < WATER_Y + 0.5 or h > TREE_LINE:
 		return 0.0
@@ -1509,6 +2169,33 @@ func _make_tree(rng: RandomNumberGenerator, p: Vector3, force_h: float,
 				branch_count = rng.randi_range(2, 3)
 				vine_min = 1
 				vine_max = 3
+			Biome.PLAINS, Biome.GRASSLAND:
+				trunk_h = rng.randf_range(7.0, 14.0)
+				trunk_r = rng.randf_range(0.38, 0.76)
+				blob_count = rng.randi_range(2, 3)
+				blob_min = 2.1
+				blob_max = 3.8
+				branch_count = rng.randi_range(1, 3)
+				vine_min = 0
+				vine_max = 1
+			Biome.ROCKY_MOUNTAINS, Biome.TUNDRA:
+				trunk_h = rng.randf_range(5.5, 11.0)
+				trunk_r = rng.randf_range(0.30, 0.62)
+				blob_count = rng.randi_range(1, 2)
+				blob_min = 1.3
+				blob_max = 2.7
+				branch_count = rng.randi_range(1, 2)
+				vine_min = 0
+				vine_max = 0
+			Biome.DESERT:
+				trunk_h = rng.randf_range(4.5, 8.0)
+				trunk_r = rng.randf_range(0.28, 0.52)
+				blob_count = 1
+				blob_min = 1.2
+				blob_max = 2.1
+				branch_count = rng.randi_range(1, 2)
+				vine_min = 0
+				vine_max = 0
 			_:
 				trunk_h = rng.randf_range(15.0, 27.0)
 				trunk_r = rng.randf_range(0.58, 1.08)

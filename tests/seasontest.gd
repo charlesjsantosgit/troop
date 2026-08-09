@@ -97,11 +97,11 @@ func run(main) -> void:
 		"recognizable constellations use bounded subtle linework")
 	_check(celestial.planet_count() >= 2 and celestial.planet_count() <= 4,
 		"the sky contains a small bounded set of planets")
-	_check(celestial.moon_angular_diameter_degrees() >= 0.85 \
-			and celestial.moon_angular_diameter_degrees() <= 1.20 \
+	_check(celestial.moon_angular_diameter_degrees() >= 1.35 \
+			and celestial.moon_angular_diameter_degrees() <= 1.55 \
 			and celestial.moon_crater_count() >= 4 \
 			and celestial.moon_crater_count() <= 8,
-		"the moon is moderately enlarged with bounded crater detail")
+		"the lunar-expedition moon is visibly larger with bounded crater detail")
 	var sun_radius_uniform := float(
 		celestial_material.get_shader_parameter("sun_radius_sine"))
 	var sun_edge_softness_uniform := float(
@@ -366,6 +366,16 @@ func run(main) -> void:
 			and _snow_parameters_match(1.0) \
 			and _runtime_weather_matches(world, SeasonalCycle.Weather.SNOW),
 		"winter applies snow to near/far world materials and emits snowfall")
+	world.set_earth_streaming_enabled(false)
+	_check(not weather_system.atmosphere_enabled() \
+			and not weather_system.visible \
+			and not weather_particles.emitting \
+			and not world._particles.emitting,
+		"transit and lunar realms suspend every Earth atmospheric particle field")
+	world.set_earth_streaming_enabled(true)
+	_check(weather_system.atmosphere_enabled() and weather_system.visible \
+			and weather_particles.emitting,
+		"returning to Earth restores the existing seasonal emitter")
 	var weather_process_ids := {}
 	var weather_mesh_ids := {}
 	for weather_kind in weather_system._process_materials:

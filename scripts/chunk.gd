@@ -36,6 +36,8 @@ var _details_pending := false
 var _detail_build_stage := 0
 var _pending_collected: Dictionary = {}
 var _pending_build_collisions := false
+var _layout_pending := false
+var _vines_registered := false
 
 const TREE_HIGH_END := 72.0
 const TREE_LOW_BEGIN := 60.0
@@ -146,8 +148,15 @@ func setup(k: Vector2i, collected: Dictionary, build_collisions := true,
 		defer_details := false) -> void:
 	key = k
 	_init_mats()
-	layout = Gen.chunk_layout(k.x, k.y)
-	Gen.register_chunk_vines(k, layout)
+	_layout_pending = defer_details
+	if defer_details:
+		# Publish the terrain shell first. The complete deterministic layout moves
+		# to the already bounded detail lane instead of blocking a 1000 mph shell.
+		layout = {"trees": [], "bananas": [], "rocks": [], "foliage": [],
+			"structures": [], "arena_pieces": [], "arena_id": "",
+			"airfield_hangars": []}
+	else:
+		_prepare_layout()
 	_build_terrain()
 	_build_water()
 	_pending_collected = collected
@@ -173,6 +182,9 @@ func finish_deferred_build() -> void:
 func finish_deferred_build_step() -> bool:
 	if not _details_pending:
 		return true
+	if _layout_pending:
+		_prepare_layout()
+		return false
 	match _detail_build_stage:
 		0:
 			_build_trees()
@@ -210,7 +222,15 @@ func is_deferred_build_pending() -> bool:
 
 
 func _exit_tree() -> void:
-	Gen.unregister_chunk_vines(key)
+	if _vines_registered:
+		Gen.unregister_chunk_vines(key)
+
+
+func _prepare_layout() -> void:
+	layout = Gen.chunk_layout(key.x, key.y)
+	Gen.register_chunk_vines(key, layout)
+	_vines_registered = true
+	_layout_pending = false
 
 
 func _on_vine_changed(k: Vector2i) -> void:
@@ -231,8 +251,9 @@ func _build_terrain() -> void:
 		for ix in range(Gen.CELLS + 1):
 			var x := x0 + float(ix) * cell
 			var z := z0 + float(iz) * cell
-			var h := Gen.height(x, z)
-			st.set_color(Gen.ground_color(h, x, z))
+			var visual := Gen.terrain_vertex_sample(x, z)
+			var h := float(visual.elevation)
+			st.set_color(visual.color)
 			st.add_vertex(Vector3(x, h, z))
 	for iz in range(Gen.CELLS):
 		for ix in range(Gen.CELLS):

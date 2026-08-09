@@ -40,6 +40,16 @@ jobs:
           RELEASE_TITLE="$(python3 -c 'import json; print(json.load(open("packaging/release_metadata.json", encoding="utf-8"))["release_title"])')"
           test -n "$RELEASE_TITLE"
           echo "title=$RELEASE_TITLE" >> "$GITHUB_OUTPUT"
+          NOTES_FILE="$RUNNER_TEMP/TROOP-$VERSION-release-notes.md"
+          awk -v version="$VERSION" '
+            index($0, "## " version " ") == 1 { found=1; printing=1 }
+            printing && /^## / && index($0, "## " version " ") != 1 { exit }
+            printing { print }
+            END { if (!found) exit 1 }
+          ' CHANGELOG.md > "$NOTES_FILE"
+          test -s "$NOTES_FILE"
+          grep -q '^### ' "$NOTES_FILE"
+          echo "notes_file=$NOTES_FILE" >> "$GITHUB_OUTPUT"
 
       - name: Install Godot 4.7 and export templates
         env:
@@ -100,6 +110,21 @@ jobs:
           "$GODOT_BIN" --headless --path . res://scenes/main.tscn \
             --quit-after 12000 -- pausetest
 
+      - name: Run planet, atlas, and lunar expedition regressions
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$GODOT_BIN" --headless --path . res://scenes/main.tscn \
+            --quit-after 30000 -- planettest
+          "$GODOT_BIN" --headless --path . res://scenes/main.tscn \
+            --quit-after 30000 -- planetwraptest
+          "$GODOT_BIN" --headless --path . res://scenes/main.tscn \
+            --quit-after 30000 -- worldmaptest
+          "$GODOT_BIN" --headless --path . --quit-after 30000 \
+            --script res://tests/lunarexpeditiontest.gd
+          "$GODOT_BIN" --headless --path . --quit-after 30000 \
+            --script res://tests/expeditionintegrationtest.gd
+
       - name: Run vehicle physics and world regressions
         shell: bash
         run: |
@@ -146,6 +171,6 @@ jobs:
             --draft \
             --verify-tag \
             --title "${{ steps.release.outputs.title }}" \
-            --generate-notes
+            --notes-file "${{ steps.release.outputs.notes_file }}"
           gh release upload "$GITHUB_REF_NAME" dist/TROOP-*
           gh release edit "$GITHUB_REF_NAME" --draft=false --latest

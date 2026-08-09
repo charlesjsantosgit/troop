@@ -140,6 +140,27 @@ func _ready() -> void:
 	_cam.current = true
 
 
+func make_current() -> void:
+	if _cam:
+		_cam.current = true
+
+
+## Keep the view continuous when the locally-flat planetary chart reflects at
+## a pole. Longitude seam wraps need no heading change; pole images need 180°.
+func apply_planet_heading_delta(delta_yaw: float) -> void:
+	if absf(delta_yaw) <= 0.000001:
+		snap_to_target()
+		return
+	var turn := Basis(Vector3.UP, delta_yaw)
+	yaw = wrapf(yaw + delta_yaw, -PI, PI)
+	_vehicle_chase_heading_yaw = wrapf(
+		_vehicle_chase_heading_yaw + delta_yaw, -PI, PI)
+	_aircraft_aim_world_direction = (turn
+		* _aircraft_aim_world_direction).normalized()
+	snap_to_target()
+	reset_physics_interpolation()
+
+
 func cam_basis() -> Basis:
 	return _cam.global_transform.basis
 

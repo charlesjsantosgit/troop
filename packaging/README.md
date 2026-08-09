@@ -64,11 +64,11 @@ personal access token.
    hostname, for example `your-fly-app.fly.dev` (no scheme or port). The release
    workflow validates and embeds it so **PLAY ONLINE** works in player builds.
 
-The workflow injects GitHub's trusted `GITHUB_REPOSITORY` value into
-`application/config/update_repository` immediately before export. Source and
-editor builds keep that setting empty, so they do not phone home. Automatic
-checks also stay disabled in the editor and in headless test runs. Exported
-games check shortly after startup and every six hours while they remain open.
+The source project names the canonical update repository, and the workflow
+revalidates and injects GitHub's trusted `GITHUB_REPOSITORY` value immediately
+before export. Automatic checks stay disabled in the editor and in headless test
+runs. Exported games check shortly after startup and every six hours while they
+remain open.
 The workflow checks the Godot editor and template downloads against the
 SHA-256 digests in Godot's official GitHub release metadata before running
 either one.
@@ -114,7 +114,7 @@ exist:
 
 ```bash
 python3 packaging/make_update_manifest.py \
-  --version 0.2.0 \
+  --version 0.4.0 \
   --repository OWNER/REPOSITORY \
   --private-key /Users/charlessantos/.config/troop/update-signing-private.pem
 

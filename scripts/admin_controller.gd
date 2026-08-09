@@ -17,6 +17,15 @@ const BIOME_BY_NAME := {
 	"bamboo": Gen.Biome.BAMBOO_GROVE,
 	"wetland": Gen.Biome.WETLAND,
 	"highland": Gen.Biome.HIGHLAND,
+	"plains": Gen.Biome.PLAINS,
+	"grassland": Gen.Biome.GRASSLAND,
+	"grasslands": Gen.Biome.GRASSLAND,
+	"rocky": Gen.Biome.ROCKY_MOUNTAINS,
+	"desert": Gen.Biome.DESERT,
+	"tundra": Gen.Biome.TUNDRA,
+	"ice": Gen.Biome.ICE,
+	"ocean": Gen.Biome.OCEAN,
+	"lake": Gen.Biome.LAKE,
 }
 
 
@@ -260,6 +269,16 @@ func teleport_to_player(peer_id: int) -> void:
 		feedback("%s is not in view of this client yet." % _peer_name(peer_id))
 
 
+func travel_to_realm(realm: int, peer_id := -1) -> bool:
+	var target := Net.local_id() if peer_id < 0 else peer_id
+	if realm not in [Net.PlayerRealm.EARTH, Net.PlayerRealm.MOON]:
+		return false
+	Net.admin_command("travel_realm", {"target": target, "realm": realm})
+	feedback("Sending %s to %s." % [_peer_name(target),
+		"the Moon" if realm == Net.PlayerRealm.MOON else "Earth"])
+	return true
+
+
 func kick_player(peer_id: int, reason := "Kicked by admin") -> void:
 	var clean_reason: String = str(reason).left(Net.MAX_CHAT_LENGTH)
 	Net.admin_command("kick", {"target": peer_id, "reason": clean_reason})
@@ -369,6 +388,12 @@ func _on_remote_admin_action(action: String, args: Dictionary) -> void:
 			if destination is Vector3 and (destination as Vector3).is_finite() \
 					and (destination as Vector3).length() < 1000000.0:
 				player.admin_teleport(destination)
+		"travel_realm":
+			var realm := int(args.get("realm", Net.PlayerRealm.EARTH))
+			if main and main.expedition_manager:
+				main.expedition_manager.show_notice(
+					"Admin transfer authorized: %s." % (
+						"Moon" if realm == Net.PlayerRealm.MOON else "Earth"))
 
 
 # ---- slash commands --------------------------------------------------------
@@ -388,8 +413,10 @@ func run_command(text: String) -> void:
 			feedback("/kill [player] · /heal [player] — KO or restore")
 			feedback("/give <banana|shotgun|smg|sniper> <rounds> [player]")
 			feedback("/fly — toggle angel wings (SPACE up, CTRL down)")
-			feedback("/tp <rainforest|bamboo|wetland|highland|mountains"
+			feedback("/tp <rainforest|bamboo|wetland|highland|plains|grassland"
+				+ "|rocky|desert|tundra|ice|ocean|lake|mountains"
 				+ "|player-name>")
+			feedback("/moon [player] · /earth [player] — realm travel")
 			feedback("/tp <airstrip|pool|dock|machine> — to the vehicles")
 			feedback("/spawn <peel|swinger|follower|statue|villager>")
 			feedback("/vehicle <bike|jeep|boat|jet> — deliver any machine")
@@ -412,7 +439,11 @@ func run_command(text: String) -> void:
 			give_ammo(_resolve_peer(parts, 3), kind, amount)
 		"tp", "teleport":
 			var where := parts[1].to_lower() if parts.size() > 1 else ""
-			if BIOME_BY_NAME.has(where) or where.begins_with("mountain"):
+			if where == "moon":
+				travel_to_realm(Net.PlayerRealm.MOON)
+			elif where == "earth":
+				travel_to_realm(Net.PlayerRealm.EARTH)
+			elif BIOME_BY_NAME.has(where) or where.begins_with("mountain"):
 				teleport_to_biome(where)
 			elif VEHICLE_SPOTS.has(where):
 				teleport_to_vehicle_spot(where)
@@ -424,6 +455,10 @@ func run_command(text: String) -> void:
 					teleport_to_biome(where)
 		"spawn":
 			spawn_monkey(parts[1].to_lower() if parts.size() > 1 else "")
+		"moon", "tomoon":
+			travel_to_realm(Net.PlayerRealm.MOON, _resolve_peer(parts, 1))
+		"earth", "toearth":
+			travel_to_realm(Net.PlayerRealm.EARTH, _resolve_peer(parts, 1))
 		"time":
 			if parts.size() > 1 and parts[1] == "clear":
 				clear_time()

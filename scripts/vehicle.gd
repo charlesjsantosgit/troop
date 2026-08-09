@@ -169,6 +169,24 @@ func display_name() -> String:
 	return KIND_NAMES[kind]
 
 
+## Rebase a locally-flat vehicle onto the equivalent planetary chart image.
+## A pole reflection rotates pose and momentum together, preserving a straight
+## geographic trajectory for cars, bikes, boats, and aircraft alike.
+func apply_planet_wrap(canonical_xz: Vector2, yaw_delta: float) -> void:
+	var next_position := global_position
+	next_position.x = canonical_xz.x
+	next_position.z = canonical_xz.y
+	var turn := Basis(Vector3.UP, yaw_delta)
+	global_transform = Transform3D(turn * global_basis, next_position)
+	if absf(yaw_delta) > 0.000001:
+		linear_velocity = turn * linear_velocity
+		angular_velocity = turn * angular_velocity
+		_prev_velocity = turn * _prev_velocity
+	_last_safe_position = next_position
+	_last_safe_yaw = yaw_angle()
+	reset_physics_interpolation()
+
+
 ## Verb shown in the HUD prompt ("RIDE", "PILOT"...).
 func mount_verb() -> String:
 	return "RIDE"
