@@ -12,6 +12,9 @@ extends RigidBody3D
 ## through the world.
 
 signal driver_impact(delta_speed: float)
+## A deliberately completed backwards motorcycle loop is categorically fatal,
+## unlike ordinary impacts that respect spawn/revive protection.
+signal driver_fatal_crash()
 
 enum Kind { BIKE, JEEP, BOAT, JET }
 const KIND_NAMES := ["DUAL-SPORT", "SAFARI JEEP", "AIRBOAT", "FIGHTER JET"]

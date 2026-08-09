@@ -245,8 +245,19 @@ func build() -> void:
 	Net.bullet_fired.connect(_on_network_bullet)
 	Net.melee_swung.connect(_on_network_melee)
 	Net.peer_defeated.connect(_on_peer_defeated)
+	Net.vehicle_spawn_registered.connect(_on_vehicle_spawn_registered)
 	Net.vehicle_claimed.connect(_on_vehicle_claimed)
 	Net.vehicle_released.connect(_on_vehicle_released)
+	Net.cycle_hour_changed.connect(_on_shared_cycle_hour_changed)
+	# Dynamic admin deliveries are authority-owned world citizens. Existing peers
+	# receive this signal immediately; late joiners receive the same definitions
+	# in cl_world before their World node is built.
+	for vehicle_id in Net.vehicle_spawn_definitions:
+		var definition: Dictionary = Net.vehicle_spawn_definitions[vehicle_id]
+		_on_vehicle_spawn_registered(str(vehicle_id),
+			int(definition.get("kind", -1)),
+			definition.get("pos", Vector3.ZERO),
+			float(definition.get("yaw", 0.0)))
 
 
 func set_expensive_effects(enabled: bool) -> void:
@@ -308,6 +319,19 @@ func clear_time_of_day_override() -> void:
 	_time_override_elapsed = 0.0
 	_clock_resync_timer = CLOCK_RESYNC_STEP
 	time_of_day_hours = Net.authoritative_cycle_hour()
+	_apply_day_night(true)
+
+
+## A live admin time change is a server clock re-anchor, not a local visual
+## override. Clearing any local fixture override here keeps every connected sky
+## on the same continuously advancing phase, including the issuing admin.
+func _on_shared_cycle_hour_changed(hour: float) -> void:
+	if not is_finite(hour):
+		return
+	_time_override_hour = -1.0
+	_time_override_elapsed = 0.0
+	_clock_resync_timer = CLOCK_RESYNC_STEP
+	time_of_day_hours = wrapf(hour, 0.0, 24.0)
 	_apply_day_night(true)
 
 
@@ -582,6 +606,13 @@ func _on_vehicle_claimed(vid: String, claimant_id: int) -> void:
 		return
 	if v:
 		v.set_remote_controlled(true, claimant_id)
+
+
+func _on_vehicle_spawn_registered(vid: String, kind: int, pos: Vector3,
+		yaw: float) -> void:
+	if kind >= Vehicle.Kind.BIKE and kind <= Vehicle.Kind.JET \
+			and vehicle_by_id(vid) == null:
+		spawn_vehicle(kind, vid, pos, yaw)
 
 
 func _on_vehicle_released(vid: String, rest: Array) -> void:
@@ -956,6 +987,17 @@ func center_chunk() -> Vector2i:
 	return Vector2i(floori(c.x / Gen.CHUNK), floori(c.z / Gen.CHUNK))
 
 
+## An online camera must not clip a replicated jet merely because terrain near
+## the ground is intentionally streamed only 2.2 km. Raising a reverse-Z far
+## plane does not expand any chunk ring; it only exposes the one-draw jet LOD.
+static func gameplay_camera_far_distance(streamed_distance: float,
+		multiplayer_active: bool) -> float:
+	var desired := streamed_distance * 1.15
+	if multiplayer_active:
+		desired = maxf(desired, FighterJet.LONG_RANGE_CAMERA_FAR)
+	return clampf(desired, 1200.0, 30000.0)
+
+
 func _process(dt: float) -> void:
 	_t += dt
 	_update_day_night(dt)
@@ -1015,7 +1057,8 @@ func _update_biome_ambience(dt: float) -> void:
 	current_view_distance = lerpf(current_view_distance, target_far,
 		1.0 - exp(-0.55 * dt))
 	if local_player.cam:
-		local_player.cam.set_far_distance(current_view_distance * 1.15)
+		local_player.cam.set_far_distance(gameplay_camera_far_distance(
+			current_view_distance, Net.active))
 	if altitude > 50.0 and not _altitude_quality_low:
 		_altitude_quality_low = true
 		_sun.directional_shadow_max_distance = 45.0

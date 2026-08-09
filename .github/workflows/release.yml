@@ -93,6 +93,10 @@ jobs:
           "$GODOT_BIN" --headless --path . --script res://tests/netsecuritytest.gd
           "$GODOT_BIN" --headless --path . res://scenes/main.tscn \
             --quit-after 30000 -- freefalltest
+          "$GODOT_BIN" --headless --path . res://scenes/main.tscn \
+            --quit-after 30000 -- generationtest
+          "$GODOT_BIN" --headless --path . res://scenes/main.tscn \
+            --quit-after 12000 -- pausetest
 
       - name: Run vehicle physics and world regressions
         shell: bash

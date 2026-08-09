@@ -1682,6 +1682,8 @@ func enter_vehicle(v: Vehicle) -> void:
 	v.begin_drive(self)
 	if not v.driver_impact.is_connected(_on_vehicle_impact):
 		v.driver_impact.connect(_on_vehicle_impact)
+	if not v.driver_fatal_crash.is_connected(_on_vehicle_fatal_crash):
+		v.driver_fatal_crash.connect(_on_vehicle_fatal_crash)
 	state = S.GROUND
 	galloping = false
 	dived = false
@@ -1707,6 +1709,8 @@ func exit_vehicle(bail := false) -> void:
 	vehicle = null
 	if v.driver_impact.is_connected(_on_vehicle_impact):
 		v.driver_impact.disconnect(_on_vehicle_impact)
+	if v.driver_fatal_crash.is_connected(_on_vehicle_fatal_crash):
+		v.driver_fatal_crash.disconnect(_on_vehicle_fatal_crash)
 	var exit_pos := v.end_drive()
 	if Net.active:
 		var aux := v.state_aux()
@@ -1787,6 +1791,19 @@ func _on_vehicle_impact(delta_speed: float) -> void:
 	if eject:
 		exit_vehicle(true)
 	take_damage(damage, null, impulse, "body")
+
+
+## A true backwards motorcycle loop is a player-authored fatal crash, not an
+## enemy/spawn-camping hit. Route it separately so revive protection cannot
+## swallow the bike's one physical crash event and leave an inverted rider alive.
+func _on_vehicle_fatal_crash() -> void:
+	if vehicle == null:
+		return
+	var crash_velocity := velocity
+	exit_vehicle(true)
+	_invulnerable_t = 0.0
+	var impulse := -crash_velocity.normalized() * 2.0 + Vector3.UP * 3.0
+	take_damage(maxf(health + 1.0, MAX_HEALTH + 1.0), null, impulse, "body")
 
 
 func set_fly_mode(active: bool) -> void:

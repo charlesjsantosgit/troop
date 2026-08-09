@@ -144,9 +144,11 @@ func setup(display_name: String, show_tag: bool) -> void:
 	torso_p.add_child(weapon_back_mount)
 
 	var torso := _cap(0.2, 0.58, fur_m)
+	torso.name = "BodyTorso"
 	torso.position = Vector3(0, 0.23, 0)
 	torso_p.add_child(torso)
-	var belly := _sph(0.13, skin_m)
+	var belly := _sph(0.13, skin_m, false)
+	belly.name = "BellyPatch"
 	belly.position = Vector3(0, 0.19, -0.1)
 	belly.scale = Vector3(0.9, 1.25, 0.55)
 	torso_p.add_child(belly)
@@ -155,12 +157,15 @@ func setup(display_name: String, show_tag: bool) -> void:
 	head_p.position = Vector3(0, 0.54, 0)
 	torso_p.add_child(head_p)
 	var head := _sph(0.18, fur_m)
+	head.name = "HeadShell"
 	head_p.add_child(head)
-	var face := _sph(0.13, skin_m)
+	var face := _sph(0.13, skin_m, false)
+	face.name = "Face"
 	face.position = Vector3(0, -0.02, -0.088)
 	face.scale = Vector3(1.0, 0.95, 0.6)
 	head_p.add_child(face)
-	var muzzle := _sph(0.072, skin_m)
+	var muzzle := _sph(0.072, skin_m, false)
+	muzzle.name = "Muzzle"
 	muzzle.position = Vector3(0, -0.064, -0.153)
 	muzzle.scale = Vector3(1.05, 0.78, 0.42)
 	head_p.add_child(muzzle)
@@ -169,23 +174,28 @@ func setup(display_name: String, show_tag: bool) -> void:
 		ear.position = Vector3(sx * 0.175, 0.06, 0.01)
 		ear.scale = Vector3(0.55, 1.0, 0.9)
 		head_p.add_child(ear)
-		var inner_ear := _sph(0.047, skin_m)
+		var inner_ear := _sph(0.047, skin_m, false)
+		inner_ear.name = "InnerEar"
 		inner_ear.position = Vector3(sx * 0.175, 0.06, -0.046)
 		inner_ear.scale = Vector3(0.38, 0.70, 0.52)
 		head_p.add_child(inner_ear)
-		var eye := _sph(0.031, white_m)
+		var eye := _sph(0.031, white_m, false)
+		eye.name = "Eye"
 		eye.position = Vector3(sx * 0.058, 0.043, -0.152)
 		eye.scale = Vector3(0.90, 1.05, 0.32)
 		head_p.add_child(eye)
-		var pupil := _sph(0.0115, dark_m)
+		var pupil := _sph(0.0115, dark_m, false)
+		pupil.name = "Pupil"
 		pupil.position = Vector3(sx * 0.058, 0.043, -0.166)
 		pupil.scale = Vector3(1.0, 1.0, 0.28)
 		head_p.add_child(pupil)
-		var eye_glint := _sph(0.0035, white_m)
+		var eye_glint := _sph(0.0035, white_m, false)
+		eye_glint.name = "EyeGlint"
 		eye_glint.position = Vector3(sx * 0.055, 0.047, -0.170)
 		eye_glint.scale = Vector3(0.8, 0.8, 0.45)
 		head_p.add_child(eye_glint)
-		var cheek := _sph(0.018, blush_m)
+		var cheek := _sph(0.018, blush_m, false)
+		cheek.name = "Cheek"
 		cheek.position = Vector3(sx * 0.092, -0.033, -0.148)
 		cheek.scale = Vector3(1.18, 0.60, 0.24)
 		head_p.add_child(cheek)
@@ -300,7 +310,7 @@ func _build_arm(shoulder: Node3D, fur_m: Material, skin_m: Material,
 	elbow.add_child(elbow_joint)
 	# A small hairless outer cap makes the hinge readable from gameplay camera
 	# distance and keeps the upper/forearm seam from looking like one tube.
-	var elbow_pad := _sph(0.038, skin_m)
+	var elbow_pad := _sph(0.038, skin_m, false)
 	elbow_pad.name = "ElbowPad"
 	elbow_pad.position = Vector3(side_sign * 0.048, 0.006, 0.004)
 	elbow_pad.scale = Vector3(0.50, 0.82, 0.88)
@@ -328,7 +338,7 @@ func _build_leg(hip: Node3D, fur_m: Material, skin_m: Material) -> Array:
 	var knee_joint := _sph(0.077, fur_m)
 	knee_joint.name = "KneeJoint"
 	knee.add_child(knee_joint)
-	var kneecap := _sph(0.043, skin_m)
+	var kneecap := _sph(0.043, skin_m, false)
 	kneecap.name = "Kneecap"
 	kneecap.position = Vector3(0, 0.004, -0.056)
 	kneecap.scale = Vector3(0.78, 0.88, 0.48)
@@ -345,7 +355,8 @@ func _build_leg(hip: Node3D, fur_m: Material, skin_m: Material) -> Array:
 	return [knee, foot]
 
 
-func _cap(r: float, h: float, m: Material) -> MeshInstance3D:
+func _cap(r: float, h: float, m: Material,
+		outline_body := true) -> MeshInstance3D:
 	var mi := MeshInstance3D.new()
 	var c := CapsuleMesh.new()
 	c.radius = r
@@ -356,12 +367,12 @@ func _cap(r: float, h: float, m: Material) -> MeshInstance3D:
 	mi.material_override = m
 	if _is_local_visual:
 		mi.layers = LOCAL_BODY_VISUAL_LAYER
-	if _outline_material:
+	if _outline_material and outline_body:
 		mi.material_overlay = _outline_material
 	return mi
 
 
-func _sph(r: float, m: Material) -> MeshInstance3D:
+func _sph(r: float, m: Material, outline_body := true) -> MeshInstance3D:
 	var mi := MeshInstance3D.new()
 	var s := SphereMesh.new()
 	s.radius = r
@@ -372,7 +383,7 @@ func _sph(r: float, m: Material) -> MeshInstance3D:
 	mi.material_override = m
 	if _is_local_visual:
 		mi.layers = LOCAL_BODY_VISUAL_LAYER
-	if _outline_material:
+	if _outline_material and outline_body:
 		mi.material_overlay = _outline_material
 	return mi
 
@@ -388,8 +399,6 @@ func _build_winter_scarf(display_name: String) -> void:
 	winter_scarf.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_SELF
 	if _is_local_visual:
 		winter_scarf.layers = LOCAL_BODY_VISUAL_LAYER
-	if _outline_material:
-		winter_scarf.material_overlay = _outline_material
 	torso_p.add_child(winter_scarf)
 	set_winter_scarf_visible(SeasonalCycle.active_season == SeasonalCycle.Season.WINTER)
 
@@ -505,7 +514,7 @@ func _add_cute_smile(parent: Node3D, material: Material) -> void:
 	for index in range(7):
 		var t := float(index) / 6.0
 		var curve := sin(t * PI)
-		var bead := _sph(0.0067, material)
+		var bead := _sph(0.0067, material, false)
 		bead.position = Vector3(
 			lerpf(-0.033, 0.033, t),
 			-0.089 - curve * 0.018,

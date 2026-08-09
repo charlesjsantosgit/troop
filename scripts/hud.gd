@@ -615,9 +615,14 @@ func _process(dt: float) -> void:
 				spread_label.modulate = Color(0.82, 0.96, 0.72)
 			else:
 				spread_label.text = ""
-	camera_badge.text = "◉ FRONT VIEW" if front_camera \
-		else ("◉ FIRST PERSON" if player.cam and player.cam.first_person \
-		else "◉ RIGHT-SHOULDER CAMERA")
+	if player.vehicle != null:
+		camera_badge.text = "◉ MONKEY-HEAD CAMERA" \
+			if player.cam and player.cam.first_person \
+			else "◉ CENTERED CHASE CAMERA"
+	else:
+		camera_badge.text = "◉ FRONT VIEW" if front_camera \
+			else ("◉ FIRST PERSON" if player.cam and player.cam.first_person \
+			else "◉ RIGHT-SHOULDER CAMERA")
 	weapon_slots.text = ("[1] BANANA  [2] SHOTGUN  [3] SMG  [4] SNIPER  [Q] MELEE" if not weapon \
 		else ("1  BANANA   " if player.weapon_slot == 1 else "1  Banana   ")
 		+ ("2  SHOTGUN   " if player.weapon_slot == 2 else "2  Shotgun   ")
@@ -751,15 +756,15 @@ func _update_vehicle_cluster() -> void:
 func _vehicle_hint(v: Vehicle) -> String:
 	match v.kind:
 		Vehicle.Kind.JET:
-			return "%s NOSE UP · %s NOSE DOWN · W/S THROTTLE · A/D ROLL · MOUSE DOT AIM\nSHIFT BURNER · G/F GEAR/FLAPS · SPACE AIRBRAKE · CTRL BRAKES · E EXIT" % [
+			return "%s NOSE UP · %s NOSE DOWN · W/S THROTTLE · A/D ROLL · MOUSE DOT AIM\nSHIFT BURNER · G/F GEAR/FLAPS · SPACE AIRBRAKE · CTRL BRAKES · C CHASE/HEAD · E EXIT" % [
 				Settings.binding_text(&"vehicle_pitch_up"),
 				Settings.binding_text(&"vehicle_pitch_down")]
 		Vehicle.Kind.BOAT:
-			return "W fan · S fast idle/coast · A/D rudders · no reverse · E step off"
+			return "W fan · S fast idle/coast · A/D rudders · no reverse · C chase/head · E step off"
 		Vehicle.Kind.BIKE:
-			return "W THROTTLE · S BRAKES · A/D TURN · %s WHEELIE · SPACE REAR BRAKE · SHIFT TUCK · E DISMOUNT" % Settings.binding_text(&"crouch")
+			return "W THROTTLE · S BRAKES · A/D TURN · %s WHEELIE · SPACE REAR BRAKE · SHIFT TUCK · C CHASE/HEAD · E DISMOUNT" % Settings.binding_text(&"crouch")
 		_:
-			return "W drive · S brake/reverse · A/D steer · SPACE handbrake · SHIFT low range · E exit"
+			return "W drive · S brake/reverse · A/D steer · SPACE handbrake · SHIFT low range · C chase/head · E exit"
 
 
 func _aim_distance(maximum: float) -> float:

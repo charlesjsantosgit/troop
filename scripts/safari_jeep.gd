@@ -12,6 +12,7 @@ const WHEELBASE_REAR := -1.39
 const WHEEL_RADIUS := 0.38
 const LOW_RANGE_MULTIPLIER := 2.72
 const LOW_RANGE_MAX_SPEED := 0.8
+const DRIVER_X := 0.36              # vehicle-left while facing local +Z
 
 var low_range := false
 var _aux_was_down := false
@@ -30,12 +31,14 @@ func _init() -> void:
 	drag_area = 1.9
 	max_steer_angle = 0.58
 	steer_speed = 2.6
-	seat_offset = Vector3(-0.36, 0.78, 0.30)
+	# American left-hand drive. Vehicle +X is the seated monkey's anatomical
+	# left because every vehicle faces local +Z in this project.
+	seat_offset = Vector3(DRIVER_X, 0.78, 0.30)
 	# Rig origin chosen from the actual front cushion top (y=0.58), rather
 	# than the motorcycle's old universal sink, which left the driver hovering.
-	rider_root_offset = Vector3(-0.36, 0.16, 0.22)
-	fp_camera_offset = Vector3(-0.36, 1.34, 0.30)
-	exit_offsets = [Vector3(-1.6, 0.4, 0.3), Vector3(1.6, 0.4, 0.3),
+	rider_root_offset = Vector3(DRIVER_X, 0.16, 0.22)
+	fp_camera_offset = Vector3(DRIVER_X, 1.34, 0.30)
+	exit_offsets = [Vector3(1.6, 0.4, 0.3), Vector3(-1.6, 0.4, 0.3),
 		Vector3(0, 0.6, -3.0)]
 	camera_distance = 6.4
 	camera_height = 2.25
@@ -108,6 +111,37 @@ func _ready() -> void:
 
 func mount_verb() -> String:
 	return "DRIVE"
+
+
+func end_drive() -> Vector3:
+	# At a real parking-speed exit all four tire contacts and the parking brake
+	# form a static support. Lock that verified pose before removing the small
+	# driver payload so the suspension cannot rebound/pop when the monkey leaves.
+	var can_park := speed() < 1.5 and _has_parked_support() \
+		and global_basis.y.y > 0.62
+	var exit_position := super()
+	if can_park:
+		_lock_parked_pose()
+	return exit_position
+
+
+func apply_rest_state(pos: Vector3, yaw: float, pitch: float,
+		roll: float) -> void:
+	# Multiplayer peers receive the same host-authored rest pose. Rebuild the
+	# parking-brake lock there too so only the local driver is not magically stable.
+	freeze = false
+	super(pos, yaw, pitch, roll)
+	if global_basis.y.y > 0.62:
+		_lock_parked_pose()
+
+
+func _lock_parked_pose() -> void:
+	linear_velocity = Vector3.ZERO
+	angular_velocity = Vector3.ZERO
+	freeze_mode = RigidBody3D.FREEZE_MODE_STATIC
+	freeze = true
+	sleeping = true
+	reset_physics_interpolation()
 
 
 func _total_brake_torque() -> float:
@@ -198,14 +232,14 @@ func _build_body() -> void:
 	add_box(body, Vector3(0.62, 0.12, 0.55), Vector3(0, 0.52, -1.05), seat_mat)
 	add_box(body, Vector3(0.62, 0.44, 0.10), Vector3(0, 0.76, -1.33), seat_mat)
 	add_box(body, Vector3(1.40, 0.24, 0.24), Vector3(0, 0.62, 0.52), trim)
-	add_cylinder(body, 0.025, 0.025, 0.34, Vector3(-0.36, 0.78, 0.44), trim,
+	add_cylinder(body, 0.025, 0.025, 0.34, Vector3(DRIVER_X, 0.78, 0.44), trim,
 		Vector3(1.05, 0, 0))
 	# A real open rim, hub, and three spokes make steering rotation readable. The
 	# paw markers live on the same pivot, so the driver visibly feeds the wheel
 	# through a turn instead of holding two fixed points while a solid disc spins.
 	_steering_wheel = Node3D.new()
 	_steering_wheel.name = "SteeringWheel"
-	_steering_wheel.position = Vector3(-0.36, 0.885, 0.36)
+	_steering_wheel.position = Vector3(DRIVER_X, 0.885, 0.36)
 	_steering_wheel.rotation = Vector3(1.05, 0, 0)
 	body.add_child(_steering_wheel)
 	var wheel_mat := paint_material(Color(0.08, 0.08, 0.08), 0.1, 0.7)
@@ -231,8 +265,8 @@ func _build_body() -> void:
 	# paw spheres wrap it without hovering beyond the rubber.
 	add_rider_target(_steering_wheel, &"hand_left", Vector3(0.145, 0.018, 0))
 	add_rider_target(_steering_wheel, &"hand_right", Vector3(-0.145, 0.018, 0))
-	add_rider_target(body, &"foot_left", Vector3(-0.22, 0.27, 0.62))
-	add_rider_target(body, &"foot_right", Vector3(-0.49, 0.27, 0.62))
+	add_rider_target(body, &"foot_left", Vector3(0.49, 0.27, 0.62))
+	add_rider_target(body, &"foot_right", Vector3(0.22, 0.27, 0.62))
 
 	# Bull bar + winch.
 	for side in [-0.55, 0.55]:

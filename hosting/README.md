@@ -153,7 +153,23 @@ secrets, and the public client hostname described above.
 
 Grant yourself (and only yourself) in-game admin by setting a shared secret on
 the server — `fly secrets set TROOP_ADMIN_TOKEN=<long-random-string>` — and
-launching your own client with `TROOP_ADMIN_KEY=<the-same-string>`. The server
-compares the two during registration; display names are never trusted. Kick
-and temp-ban verbs act on connected peers, and address bans persist in the
-machine's `user://bans.json`.
+launching your own client with `TROOP_ADMIN_KEY=<the-same-string>`. The secret
+is not sent over ENet: the client uses it for an HMAC of the server's fresh
+registration challenge. Each client also proves possession of its locally
+encrypted RSA installation key by signing that peer/name/version/nonce-bound
+challenge. The server receives only the public key and signature; display names,
+MAC addresses, raw platform identifiers, and client-supplied fingerprints are
+never trusted as identity.
+
+That bootstrap admin can grant or revoke another connected installation from
+the F8 player list or with `/admin <exact-name|peer-id>` and
+`/unadmin <exact-name|peer-id>`. The server persists approved public-key
+fingerprints and address bans beneath `TROOP_STATE_DIR` when it names a safe
+absolute directory, otherwise beneath `user://`.
+
+The checked-in Fly configuration intentionally does **not** provision or mount
+a paid volume. Therefore `admin_grants.json` and `bans.json` can disappear when
+a deployment replaces the Machine, even though they survive an ordinary process
+restart on the same Machine filesystem. Operators who already provide durable
+storage can point `TROOP_STATE_DIR` at its mount; do not claim cross-deployment
+durability without such storage.

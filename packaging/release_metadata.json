@@ -1,8 +1,8 @@
 {
   "godot_compatibility": "4.7",
   "minimum_bootstrap": 1,
-  "network_protocol": 5,
+  "network_protocol": 6,
   "release_title": "TROOP 0.3",
-  "notes": "TROOP 0.3 vehicle polish: repaired jet surfaces and aiming, easy arrow-assisted takeoffs, automatic Jeep downshifts with an accurate analog tachometer, correctly sized motorcycle handling with sustained Ctrl wheelies, seated riders, realistic exhaust, a live FPS meter, and uncapped 9.81 m/s^2 player freefall.",
-  "requires_installer": false
+  "notes": "TROOP 0.3.6 expands the runway to 1,260 metres with six jet hangars; adds connected packed-dirt roads and hillier terrain; improves bike coasting turns, throttle-driven wheelies, parked stability, vehicle cameras, left-hand-drive Jeep seating, and hands-off jet stability; keeps remote jets visible beyond ten miles with distance-aware turbine audio based on a 130 dB source reference; limits enemy outlines to the outer body; adds nonce-signed installation-key admin grants, an authority-validated replicated vehicle catalog, and multiplayer-wide /time changes; and adds a Graphics page with an FPS meter plus Unlimited, 480, lower, and Custom limits.",
+  "requires_installer": true
 }

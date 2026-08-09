@@ -26,12 +26,14 @@ const SUSPENSION_ATTACH_Y := -0.013
 const RAKE := 0.45                    # steering-head angle, rad (~26 deg)
 const MAX_LEAN := 0.83                # ~48 deg on knobbies
 const LOWSIDE_LEAN_ERROR := 0.55
-const WHEELIE_DURATION := 2.20
-const WHEELIE_COOLDOWN := 2.45
-const WHEELIE_TARGET_PITCH := -0.52   # ~30° balance-point target
+const WHEELIE_DURATION := 4.80
+const WHEELIE_COOLDOWN := 1.25
 const WHEELIE_STEER_SCALE := 0.08
 const WHEELIE_MIN_SPEED := 2.5
 const WHEELIE_MAX_SPEED := 38.0
+const WHEELIE_LOOP_THROTTLE := 0.86
+const WHEELIE_OVERPOWER_GRACE := 1.45
+const WHEELIE_OVERPOWER_FULL := 2.70
 const MAX_ASSISTED_LEAN := 0.66       # ~38°: quick without a snap lowside
 
 var lean_target := 0.0
@@ -41,6 +43,8 @@ var _lowside_t := 0.0
 var wheelie_remaining := 0.0
 var _wheelie_elapsed := 0.0
 var _wheelie_cooldown := 0.0
+var _wheelie_crash_emitted := false
+var _wheelie_overpower := 0.0
 var _steer_head: Node3D
 var _front_fork_tubes: Array[MeshInstance3D] = []
 var _front_sliders: Array[MeshInstance3D] = []
@@ -97,7 +101,10 @@ func _init() -> void:
 		"final_drive": 5.86 * MODEL_SCALE,
 		"driveline_efficiency": 0.90,
 		"shift_time": 0.16,
-		"engine_brake_coefficient": 1.1,
+		# The big single still slows on a closed throttle, but not so abruptly that
+		# releasing W removes the momentum (and therefore the steering/lean response)
+		# in the middle of a corner.
+		"engine_brake_coefficient": 0.78,
 		"clutch_engage_rpm": 2200.0,
 	})
 
@@ -168,6 +175,7 @@ func begin_drive(player: Node3D) -> void:
 	# the sidestand. Retract it before Vehicle applies the rider payload so the
 	# chassis is fully physical again from the first driven tick.
 	_kickstand_engaged = false
+	_wheelie_crash_emitted = false
 	super(player)
 
 
@@ -175,14 +183,13 @@ func end_drive() -> Vector3:
 	# A grounded, upright rider can place the bike directly on its kickstand.
 	# Requiring both wheel rays prevents Ctrl-wheelie or low-speed hop dismounts
 	# from freezing a machine in midair or balanced on the rear contact alone.
-	var pose := global_basis.get_euler(EULER_ORDER_YXZ)
+	var support_up := _supported_ground_normal()
 	var can_set_stand := speed() < 4.5 and _both_wheels_near_ground() \
-		and global_basis.y.y > 0.72 and absf(pose.x) < 0.28 \
-		and absf(pose.z) < 0.60
+		and global_basis.y.dot(support_up) > 0.80
 	var exit_position := super()
 	_reset_special_physics_state()
 	if can_set_stand:
-		_engage_kickstand(pose.y)
+		_engage_kickstand()
 	return exit_position
 
 
@@ -194,14 +201,13 @@ func apply_rest_state(pos: Vector3, yaw: float, pitch: float,
 	_kickstand_engaged = false
 	freeze = false
 	super(pos, yaw, pitch, roll)
-	if absf(pitch) < 0.03 and absf(angle_difference(roll, -0.12)) < 0.03 \
-			and _both_wheels_near_ground():
-		_engage_kickstand(yaw)
+	var support_up := _supported_ground_normal()
+	if global_basis.y.dot(support_up) > 0.88 and _both_wheels_near_ground():
+		_engage_kickstand()
 
 
-func _engage_kickstand(yaw: float) -> void:
-	global_basis = Basis.from_euler(Vector3(0.0, yaw, -0.12),
-		EULER_ORDER_YXZ)
+func _engage_kickstand() -> void:
+	global_basis = kickstand_basis(global_basis.z, _supported_ground_normal())
 	# Keep at least one real tire ray in contact after rotating about the chassis
 	# origin. Without this small ground fit, a near-limit suspension ray can sit
 	# a few millimetres high and make a parked bike visibly hover.
@@ -213,8 +219,12 @@ func _engage_kickstand(yaw: float) -> void:
 		if is_finite(float(probe.distance)):
 			closest_clearance = minf(closest_clearance,
 				float(probe.distance) - rest)
-	if is_finite(closest_clearance) and closest_clearance > -0.002:
-		global_position -= global_basis.y * (closest_clearance + 0.004)
+	if is_finite(closest_clearance):
+		# Fit both hovering and shallow post-rotation penetration. Terrain-aligned
+		# pitch makes the correction small; the bound prevents malformed geometry
+		# from ever teleporting a parked bike vertically.
+		var fit := clampf(closest_clearance + 0.004, -0.12, 0.12)
+		global_position -= global_basis.y * fit
 	_refresh_kickstand_contacts()
 	_update_visuals(0.0)
 	linear_velocity = Vector3.ZERO
@@ -227,6 +237,39 @@ func _engage_kickstand(yaw: float) -> void:
 	freeze = true
 	sleeping = true
 	reset_physics_interpolation()
+
+
+## Terrain-aligned stand frame. The forward axis is projected into the supported
+## road plane, preserving hill pitch/cross-slope instead of snapping to world
+## level, then the authored 0.12 rad sidestand lean is applied around that axis.
+func kickstand_basis(forward_hint: Vector3, support_normal: Vector3) -> Basis:
+	var up := support_normal.normalized()
+	if up.length_squared() < 0.5:
+		up = Vector3.UP
+	var forward := forward_hint - up * forward_hint.dot(up)
+	if forward.length_squared() < 0.001:
+		forward = global_basis.z - up * global_basis.z.dot(up)
+	if forward.length_squared() < 0.001:
+		forward = Vector3.FORWARD - up * Vector3.FORWARD.dot(up)
+	forward = forward.normalized()
+	var right := up.cross(forward).normalized()
+	var aligned := Basis(right, up, forward).orthonormalized()
+	return aligned.rotated(forward, -0.12).orthonormalized()
+
+
+func _supported_ground_normal() -> Vector3:
+	var normal_sum := Vector3.ZERO
+	var samples := 0
+	for wheel in wheels:
+		var attach := global_position + global_basis * wheel.local_pos
+		var reach := wheel.radius + wheel.travel + 0.10
+		var probe: Dictionary = probe_ground(attach, reach)
+		if is_finite(float(probe.distance)):
+			normal_sum += (probe.normal as Vector3).normalized()
+			samples += 1
+	if samples > 0 and normal_sum.length_squared() > 0.01:
+		return normal_sum.normalized()
+	return terrain_normal_at(global_position.x, global_position.z)
 
 
 func _refresh_kickstand_contacts() -> void:
@@ -276,7 +319,9 @@ func set_driver_view(_aim: Vector3, inp: Dictionary) -> void:
 			and global_basis.get_euler(EULER_ORDER_YXZ).x > -0.12:
 		wheelie_remaining = WHEELIE_DURATION
 		_wheelie_elapsed = 0.0
+		_wheelie_overpower = 0.0
 		_wheelie_cooldown = WHEELIE_COOLDOWN
+		_wheelie_crash_emitted = false
 
 
 func wheelie_active() -> bool:
@@ -287,7 +332,9 @@ func _reset_special_physics_state() -> void:
 	wheelie_remaining = 0.0
 	_wheelie_elapsed = 0.0
 	_wheelie_cooldown = 0.0
+	_wheelie_overpower = 0.0
 	_lowside_t = 0.0
+	_wheelie_crash_emitted = false
 	lean_target = 0.0
 	_lean_integral = 0.0
 
@@ -320,22 +367,19 @@ func _simulate(dt: float) -> void:
 	if driver and input_brake > 0.4 and speed() < 0.9 \
 			and _wheels_grounded() == 2:
 		apply_central_force(-global_basis.z * 620.0)
-	# Cut torque before Vehicle._simulate advances the drivetrain. Doing this
-	# after super() only changed the HUD/audio value; the rear wheel had already
-	# received the full engine impulse for the frame.
-	if anti_loop_active():
-		input_throttle = 0.0
 	super(dt)
 	input_steer = unscaled_steer
 	_advance_wheelie(dt)
 	_advance_lean(dt)
+	_check_wheelie_crash()
 	_check_lowside(dt)
 
 
 func anti_loop_active() -> bool:
-	var pitch := global_basis.get_euler(EULER_ORDER_YXZ).x
-	# This project drives along local +Z, so nose-up is negative X pitch.
-	return pitch < -0.61 and input_throttle > 0.0
+	# Kept as a compatibility probe for older diagnostics. Wheelies are no longer
+	# protected by a hidden throttle cut: pushing beyond the balance point can now
+	# loop the bike and crash the rider, as the visible physics suggests.
+	return false
 
 
 func _wheels_grounded() -> int:
@@ -365,25 +409,80 @@ func _near_ground_for_feet() -> bool:
 	return terrain_gap >= -0.1 and terrain_gap <= 0.85
 
 
+## Requested nose-up angle for the live throttle. A binary keyboard W first
+## reaches a high but controllable balance point; only holding maximum power well
+## beyond the grace window progressively asks for a loop. Analog throttle still
+## scales the safe height below that point.
+func wheelie_target_nose_angle(throttle: float,
+		overpower_seconds := 0.0) -> float:
+	var pedal := clampf(throttle, 0.0, 1.0)
+	if pedal <= 0.035:
+		return 0.0
+	var safe_mix := smoothstep(0.035, WHEELIE_LOOP_THROTTLE, pedal)
+	var target := lerpf(0.18, 0.80, safe_mix)
+	if pedal > WHEELIE_LOOP_THROTTLE:
+		var full_power_mix := smoothstep(WHEELIE_LOOP_THROTTLE, 1.0, pedal)
+		var sustained_mix := smoothstep(WHEELIE_OVERPOWER_GRACE,
+			WHEELIE_OVERPOWER_FULL, overpower_seconds)
+		target = lerpf(0.80, 1.78, full_power_mix * sustained_mix)
+	return target
+
+
 ## A sustained PD attitude assist represents the monkey shifting rearward and
-## feeding power to the balance point. It rises decisively, holds long enough
-## to read as a real wheelie, then eases down while tire contact and landing
-## remain entirely in the rigid-body simulation.
+## feeding power to the balance point. Height follows actual throttle instead of
+## a canned animation: rolling off asks for level immediately and keeps the
+## controller alive until the front tire has settled back onto the ground.
 func _advance_wheelie(dt: float) -> void:
 	if not wheelie_active() or driver == null:
 		wheelie_remaining = 0.0 if driver == null else wheelie_remaining
 		return
 	_wheelie_elapsed = minf(_wheelie_elapsed + dt, WHEELIE_DURATION)
 	wheelie_remaining = maxf(WHEELIE_DURATION - _wheelie_elapsed, 0.0)
-	var phase := _wheelie_elapsed / WHEELIE_DURATION
-	var envelope := smoothstep(0.0, 0.12, phase) \
-		* (1.0 - smoothstep(0.78, 1.0, phase))
-	var target_pitch := WHEELIE_TARGET_PITCH * envelope
-	var pitch := global_basis.get_euler(EULER_ORDER_YXZ).x
-	var pitch_rate := angular_velocity.dot(global_basis.x)
-	var command := clampf((target_pitch - pitch) * 26.0
-		- pitch_rate * 6.5, -8.0, 8.0)
-	apply_torque(global_basis.x * command * mass)
+	if input_throttle > WHEELIE_LOOP_THROTTLE:
+		_wheelie_overpower = minf(_wheelie_overpower + dt,
+			WHEELIE_OVERPOWER_FULL + 0.5)
+	else:
+		_wheelie_overpower = maxf(_wheelie_overpower - dt * 2.5, 0.0)
+	var target_nose_up := wheelie_target_nose_angle(input_throttle,
+		_wheelie_overpower) \
+		* smoothstep(0.0, 0.20, _wheelie_elapsed)
+	# Once the maximum assist window expires it behaves exactly like rolling off:
+	# gravity and the attitude controller place the front tire down instead of
+	# abruptly abandoning a still-raised chassis.
+	if _wheelie_elapsed >= WHEELIE_DURATION:
+		target_nose_up = 0.0
+		wheelie_remaining = 0.001
+	# atan2(forward-up, chassis-up) remains continuous beyond 90 degrees. Euler X
+	# wraps at the vertical and made the old controller mathematically incapable of
+	# completing a genuine backwards loop even when its target was past vertical.
+	var nose_angle := atan2(global_basis.z.dot(Vector3.UP),
+		global_basis.y.dot(Vector3.UP))
+	var nose_rate := -angular_velocity.dot(global_basis.x)
+	var command := clampf((target_nose_up - nose_angle) * 26.0
+		- nose_rate * 6.0, -11.0, 11.0)
+	apply_torque(-global_basis.x * command * mass)
+	if target_nose_up <= 0.001 and wheels[0].in_contact \
+			and absf(nose_angle) < 0.13 and absf(nose_rate) < 0.7:
+		wheelie_remaining = 0.0
+
+
+## A crash is declared only after the chassis has physically rotated behind the
+## balance point, not merely because the front tire is high. The dedicated fatal
+## path then ejects and kills the rider even during revive protection, while the
+## existing replicated player/vehicle release plumbing carries that state online.
+func _check_wheelie_crash() -> bool:
+	if not wheelie_active() or driver == null or _wheelie_crash_emitted \
+			or wheels[0].in_contact:
+		return false
+	var nose_angle := atan2(global_basis.z.dot(Vector3.UP),
+		global_basis.y.dot(Vector3.UP))
+	var true_backward_loop := nose_angle > deg_to_rad(92.0) \
+		and absf(global_basis.x.dot(Vector3.UP)) < 0.62
+	if not true_backward_loop:
+		return false
+	_wheelie_crash_emitted = true
+	driver_fatal_crash.emit()
+	return true
 
 
 ## The rider's balance. A bike stays up because steering places the contact

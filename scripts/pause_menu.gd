@@ -11,6 +11,8 @@ const VIEW_HOME := 0
 const VIEW_SETTINGS := 1
 const TAB_AUDIO := 0
 const TAB_CONTROLS := 1
+const TAB_GRAPHICS := 2
+const CUSTOM_FPS_OPTION := -1
 
 const BINDABLE_ACTIONS := [
 	{"category": "MOVEMENT", "action": "move_fwd", "label": "Move Forward"},
@@ -53,7 +55,7 @@ var _online := false
 var _built := false
 var _pending_settings_open := false
 var _current_view := VIEW_HOME
-var _current_tab := TAB_AUDIO
+var _current_tab := TAB_GRAPHICS
 var _syncing := false
 var _capture_action := ""
 var _capture_button: Button
@@ -61,17 +63,23 @@ var _capture_button: Button
 var _panel: PanelContainer
 var _home_view: Control
 var _settings_view: Control
+var _graphics_view: Control
 var _audio_view: Control
 var _controls_view: Control
 var _resume_button: Button
 var _main_menu_button: Button
 var _online_warning: Label
+var _graphics_tab: Button
 var _audio_tab: Button
 var _controls_tab: Button
 var _status_label: Label
 var _capture_banner: Label
 var _sensitivity_slider: HSlider
 var _sensitivity_value: Label
+var _fps_limit_select: OptionButton
+var _custom_fps_row: Control
+var _custom_fps_spin: SpinBox
+var _fps_limit_status: Label
 var _volume_sliders: Dictionary = {}
 var _volume_values: Dictionary = {}
 var _binding_buttons: Dictionary = {}
@@ -267,10 +275,13 @@ func _build_settings_view() -> Control:
 
 	var tabs := HBoxContainer.new()
 	tabs.add_theme_constant_override("separation", 8)
+	_graphics_tab = _tab_button("GRAPHICS")
 	_audio_tab = _tab_button("AUDIO")
 	_controls_tab = _tab_button("CONTROLS")
+	_graphics_tab.pressed.connect(func(): _show_settings_tab(TAB_GRAPHICS))
 	_audio_tab.pressed.connect(func(): _show_settings_tab(TAB_AUDIO))
 	_controls_tab.pressed.connect(func(): _show_settings_tab(TAB_CONTROLS))
+	tabs.add_child(_graphics_tab)
 	tabs.add_child(_audio_tab)
 	tabs.add_child(_controls_tab)
 	column.add_child(tabs)
@@ -279,6 +290,9 @@ func _build_settings_view() -> Control:
 	content.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	content.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	column.add_child(content)
+	_graphics_view = _build_graphics_view()
+	_graphics_view.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	content.add_child(_graphics_view)
 	_audio_view = _build_audio_view()
 	_audio_view.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	content.add_child(_audio_view)
@@ -286,6 +300,92 @@ func _build_settings_view() -> Control:
 	_controls_view.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	content.add_child(_controls_view)
 	return column
+
+
+func _build_graphics_view() -> Control:
+	var scroll := ScrollContainer.new()
+	scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+	var column := VBoxContainer.new()
+	column.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	column.add_theme_constant_override("separation", 14)
+	scroll.add_child(column)
+
+	column.add_child(_section_copy("FRAME RATE", "Choose how many frames TROOP "
+		+ "renders each second. Unlimited removes the cap; a cap can keep your "
+		+ "computer cooler and frame pacing steadier."))
+
+	var preset_row := HBoxContainer.new()
+	preset_row.custom_minimum_size = Vector2(0, 52)
+	preset_row.add_theme_constant_override("separation", 12)
+	var preset_label := Label.new()
+	preset_label.text = "FPS LIMIT"
+	preset_label.custom_minimum_size = Vector2(170, 0)
+	preset_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	preset_label.add_theme_font_size_override("font_size", 12)
+	preset_label.add_theme_color_override("font_color", COLOR_MUTED)
+	preset_row.add_child(preset_label)
+	_fps_limit_select = OptionButton.new()
+	_fps_limit_select.name = "FPSLimitPreset"
+	_fps_limit_select.focus_mode = Control.FOCUS_ALL
+	_fps_limit_select.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_fps_limit_select.custom_minimum_size = Vector2(220, 40)
+	_fps_limit_select.tooltip_text = "Maximum rendered frames per second"
+	for fps_limit in GameSettings.FPS_LIMIT_PRESETS:
+		_fps_limit_select.add_item("UNLIMITED" if fps_limit == 0 \
+			else "%d FPS" % fps_limit)
+		var index := _fps_limit_select.item_count - 1
+		_fps_limit_select.set_item_metadata(index, fps_limit)
+	_fps_limit_select.add_item("CUSTOM…")
+	_fps_limit_select.set_item_metadata(_fps_limit_select.item_count - 1,
+		CUSTOM_FPS_OPTION)
+	_fps_limit_select.item_selected.connect(_on_fps_limit_selected)
+	preset_row.add_child(_fps_limit_select)
+	column.add_child(preset_row)
+
+	_custom_fps_row = HBoxContainer.new()
+	_custom_fps_row.name = "CustomFPSRow"
+	_custom_fps_row.custom_minimum_size = Vector2(0, 52)
+	_custom_fps_row.add_theme_constant_override("separation", 12)
+	var custom_label := Label.new()
+	custom_label.text = "CUSTOM LIMIT"
+	custom_label.custom_minimum_size = Vector2(170, 0)
+	custom_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	custom_label.add_theme_font_size_override("font_size", 12)
+	custom_label.add_theme_color_override("font_color", COLOR_MUTED)
+	_custom_fps_row.add_child(custom_label)
+	_custom_fps_spin = SpinBox.new()
+	_custom_fps_spin.name = "CustomFPSLimit"
+	_custom_fps_spin.focus_mode = Control.FOCUS_ALL
+	_custom_fps_spin.min_value = GameSettings.MIN_CUSTOM_FPS_LIMIT
+	_custom_fps_spin.max_value = GameSettings.MAX_CUSTOM_FPS_LIMIT
+	_custom_fps_spin.step = 1.0
+	_custom_fps_spin.rounded = true
+	_custom_fps_spin.suffix = " FPS"
+	_custom_fps_spin.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_custom_fps_spin.custom_minimum_size = Vector2(220, 40)
+	_custom_fps_spin.tooltip_text = ("Enter %d–%d FPS; use the arrows, keyboard, "
+		+ "mouse wheel, or controller") % [GameSettings.MIN_CUSTOM_FPS_LIMIT,
+		GameSettings.MAX_CUSTOM_FPS_LIMIT]
+	_custom_fps_spin.value_changed.connect(_on_custom_fps_changed)
+	_custom_fps_row.add_child(_custom_fps_spin)
+	column.add_child(_custom_fps_row)
+
+	_fps_limit_status = Label.new()
+	_fps_limit_status.name = "FPSLimitStatus"
+	_fps_limit_status.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	_fps_limit_status.add_theme_stylebox_override("normal", _inset_style())
+	_fps_limit_status.add_theme_font_size_override("font_size", 12)
+	_fps_limit_status.add_theme_color_override("font_color", COLOR_MINT)
+	column.add_child(_fps_limit_status)
+
+	var note := Label.new()
+	note.text = ("Unlimited may use more power. The limiter changes immediately "
+		+ "and does not affect the game's 60 Hz physics simulation.")
+	note.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	note.add_theme_font_size_override("font_size", 12)
+	note.add_theme_color_override("font_color", COLOR_MUTED)
+	column.add_child(note)
+	return scroll
 
 
 func _build_audio_view() -> Control:
@@ -445,15 +545,21 @@ func _show_home() -> void:
 
 func _show_settings_tab(tab: int) -> void:
 	_current_tab = tab
+	_graphics_view.visible = tab == TAB_GRAPHICS
 	_audio_view.visible = tab == TAB_AUDIO
 	_controls_view.visible = tab == TAB_CONTROLS
+	_set_tab_selected(_graphics_tab, tab == TAB_GRAPHICS)
 	_set_tab_selected(_audio_tab, tab == TAB_AUDIO)
 	_set_tab_selected(_controls_tab, tab == TAB_CONTROLS)
 	_status_label.text = "ESC  BACK  ·  CHANGES SAVE AUTOMATICALLY"
 	if tab == TAB_CONTROLS:
 		refresh_bindings()
-	call_deferred("_focus_control", _audio_tab if tab == TAB_AUDIO \
-		else _controls_tab)
+	var selected_tab: Button = _graphics_tab
+	if tab == TAB_AUDIO:
+		selected_tab = _audio_tab
+	elif tab == TAB_CONTROLS:
+		selected_tab = _controls_tab
+	call_deferred("_focus_control", selected_tab)
 
 
 func _set_tab_selected(button: Button, selected: bool) -> void:
@@ -477,6 +583,20 @@ func _sync_from_settings() -> void:
 	var sensitivity := _setting_float(settings, "mouse_sensitivity", 1.0)
 	_sensitivity_slider.value = sensitivity
 	_sensitivity_value.text = "%.2f×" % sensitivity
+	var custom_limit := _setting_int(settings, "custom_fps_limit",
+		GameSettings.DEFAULT_FPS_LIMIT)
+	_custom_fps_spin.value = custom_limit
+	var fps_limit := _setting_int(settings, "fps_limit",
+		GameSettings.DEFAULT_FPS_LIMIT)
+	var custom_selected := _setting_bool(settings, "fps_limit_custom", false)
+	var selected_index := _find_fps_option(CUSTOM_FPS_OPTION)
+	if not custom_selected:
+		var preset_index := _find_fps_option(fps_limit)
+		if preset_index >= 0:
+			selected_index = preset_index
+	_fps_limit_select.select(selected_index)
+	_custom_fps_row.visible = custom_selected
+	_update_fps_limit_status(fps_limit)
 	_syncing = false
 	refresh_bindings()
 
@@ -490,6 +610,57 @@ func _on_sensitivity_changed(value: float) -> void:
 		settings.call("set_mouse_sensitivity", value)
 	sensitivity_changed.emit(value)
 	_schedule_save()
+
+
+func _on_fps_limit_selected(index: int) -> void:
+	if _syncing or index < 0 or index >= _fps_limit_select.item_count:
+		return
+	var selected_limit := int(_fps_limit_select.get_item_metadata(index))
+	var settings := _settings()
+	if selected_limit == CUSTOM_FPS_OPTION:
+		_custom_fps_row.visible = true
+		var custom_limit := roundi(_custom_fps_spin.value)
+		if settings and settings.has_method("set_custom_fps_limit"):
+			settings.call("set_custom_fps_limit", custom_limit)
+		_update_fps_limit_status(custom_limit)
+		_custom_fps_spin.grab_focus()
+	else:
+		_custom_fps_row.visible = false
+		if settings and settings.has_method("set_fps_limit"):
+			settings.call("set_fps_limit", selected_limit)
+		_update_fps_limit_status(selected_limit)
+	_schedule_save()
+
+
+func _on_custom_fps_changed(value: float) -> void:
+	if _syncing or not _custom_fps_row.visible:
+		return
+	var custom_limit := roundi(value)
+	var settings := _settings()
+	var accepted := false
+	if settings and settings.has_method("set_custom_fps_limit"):
+		accepted = bool(settings.call("set_custom_fps_limit", custom_limit))
+	if accepted:
+		_update_fps_limit_status(custom_limit)
+		_schedule_save()
+	else:
+		_status_label.text = ("CUSTOM FPS MUST BE BETWEEN %d AND %d" % [
+			GameSettings.MIN_CUSTOM_FPS_LIMIT,
+			GameSettings.MAX_CUSTOM_FPS_LIMIT])
+
+
+func _update_fps_limit_status(value: int) -> void:
+	if not _fps_limit_status:
+		return
+	_fps_limit_status.text = ("UNLIMITED  ·  No render frame cap is active."
+		if value == 0 else "ACTIVE LIMIT  ·  %d FPS" % value)
+
+
+func _find_fps_option(value: int) -> int:
+	for index in range(_fps_limit_select.item_count):
+		if int(_fps_limit_select.get_item_metadata(index)) == value:
+			return index
+	return -1
 
 
 func _begin_capture(action: String, button: Button) -> void:
@@ -587,6 +758,20 @@ func _setting_float(settings: Node, property_name: String,
 		return fallback
 	var value = settings.get(property_name)
 	return float(value) if typeof(value) in [TYPE_FLOAT, TYPE_INT] else fallback
+
+
+func _setting_int(settings: Node, property_name: String, fallback: int) -> int:
+	if not settings:
+		return fallback
+	var value = settings.get(property_name)
+	return int(value) if typeof(value) in [TYPE_FLOAT, TYPE_INT] else fallback
+
+
+func _setting_bool(settings: Node, property_name: String, fallback: bool) -> bool:
+	if not settings:
+		return fallback
+	var value = settings.get(property_name)
+	return bool(value) if typeof(value) == TYPE_BOOL else fallback
 
 
 func _schedule_save() -> void:

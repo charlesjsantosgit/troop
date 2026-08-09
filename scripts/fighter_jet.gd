@@ -34,8 +34,31 @@ const TAKEOFF_PITCH_LIMIT := 0.24       # ~14° protected rotation
 const ASSISTED_CLIMB_PITCH := 0.24      # Up holds a useful, non-stalling climb
 const ASSISTED_DESCENT_PITCH := -0.16   # Down lowers the nose without a dive
 const CONTROL_AUTHORITY_Q := 3500.0     # Pa for full control-surface response
+# Raw local-direction displacement: ~0.46 degrees. CameraRig snaps a caught dot
+# to the nose at ~0.54 degrees, so every still-visible deliberate dot remains
+# outside this stability deadzone and keeps full fine-aim control.
+const HANDS_OFF_AIM_DEADZONE := 0.008
 const NOZZLE_LIP_Z := -7.25
 const BURNER_CORE_LENGTH := 2.25
+# Multiplayer aircraft remain tactically readable well past the streamed
+# terrain. The detailed generated model switches to one tiny draw call before
+# it is smaller than a few pixels, while the gameplay camera keeps enough far
+# plane for a ten-mile contact with a little interpolation margin.
+const TEN_MILES_METERS := 16093.44
+const DETAIL_LOD_DISTANCE := 2600.0
+const LONG_RANGE_RENDER_DISTANCE := 20000.0
+const LONG_RANGE_CAMERA_FAR := 20500.0
+const SILHOUETTE_MODEL_LENGTH := 15.2
+const SILHOUETTE_MIN_ANGULAR_LENGTH := 0.0026179939 # 0.15 degrees
+# 130 dB SPL at 1 m is an acoustic source reference, never a digital gain.
+# Inverse-square propagation is preserved, then compressed into the game's
+# safe dynamic range so a full-power turbine is only faintly audible at ten
+# miles instead of either clipping nearby or disappearing completely.
+const SOURCE_LEVEL_DB_SPL := 130.0
+const AUDIO_REFERENCE_DISTANCE := 1.0
+const AUDIO_DISTANCE_DYNAMIC_RANGE := 0.42
+const LONG_RANGE_AUDIO_DISTANCE := 24000.0
+const SAFE_AUDIO_MAX_DB := -6.0
 # The replicated aux vector has no spare component. Values 0..1 remain normal
 # spool for backwards compatibility; +2 carries the independent burner bit.
 const REMOTE_AFTERBURNER_OFFSET := 2.0
@@ -66,6 +89,8 @@ var _nav_lights: Array[MeshInstance3D] = []
 var _nav_blink := 0.0
 var _burner_player: AudioStreamPlayer3D
 var _wingtip_trails: Array[GPUParticles3D] = []
+var _detail_body: Node3D
+var _far_silhouette: MeshInstance3D
 
 
 func _init() -> void:
@@ -142,11 +167,22 @@ func _ready() -> void:
 	wing_shape.position = Vector3(0, -0.15, -1.2)
 	add_child(wing_shape)
 	_build_body()
+	_build_far_silhouette()
+	_configure_long_range_engine_audio()
 	_build_burner_audio()
 	# The existing cone is the luminous burner core; this outlet adds only the
 	# translucent high-speed heat plume from the real nozzle lip.
 	add_exhaust(Vector3(0, 0, NOZZLE_LIP_Z), Vector3(0, 0, -1),
 		VehicleExhaust.Profile.JET)
+
+
+## Sleeping parked jets and remote kinematic jets both need the same render
+## switch as the camera moves. This costs one distance check per aircraft per
+## frame; the far tier itself is one unlit mesh and casts no shadow.
+func _process(_dt: float) -> void:
+	var camera := get_viewport().get_camera_3d() if is_inside_tree() else null
+	_update_distance_lod(global_position.distance_to(camera.global_position) \
+		if camera else 0.0)
 
 
 func mount_verb() -> String:
@@ -343,6 +379,7 @@ func _apply_flight_controls(dt: float, q: float, grounded: bool,
 		authority *= clampf(speed() / 65.0, 0.0, 1.0)
 	var local_aim := global_basis.inverse() * _aim
 	_roll_override = move_toward(_roll_override, input_steer, 3.0 * dt)
+	var hands_off := _hands_off_flight(local_aim, grounded)
 
 	var pitch_error := atan2(local_aim.y,
 		maxf(local_aim.z, 0.05))
@@ -353,12 +390,16 @@ func _apply_flight_controls(dt: float, q: float, grounded: bool,
 		# aircraft underneath a keyboard-commanded climb.
 		roll_error = clampf(
 			global_basis.get_euler(EULER_ORDER_YXZ).z * 1.4, -1.0, 1.0)
+	elif hands_off:
+		# A rate-only controller preserves whatever bank numerical turbulence leaves
+		# behind. Neutral controls now command a real wings-level attitude, while the
+		# deadzone is small enough that any deliberate mouse dot immediately retakes
+		# control. This makes letting go of the controls stable rather than a slow,
+		# unexplained roll into an eventual inversion.
+		roll_error = clampf(
+			global_basis.get_euler(EULER_ORDER_YXZ).z * 1.8, -1.25, 1.25)
 	elif not grounded:
-		var pull_magnitude := Vector2(local_aim.x, local_aim.y).length()
-		if pull_magnitude > 0.04 and absf(pitch_error) < 1.2:
-			roll_error = atan2(local_aim.x, maxf(local_aim.y, 0.02)) \
-				* clampf(pull_magnitude * 3.0, 0.0, 1.0)
-			roll_error = clampf(roll_error, -2.6, 2.6)
+		roll_error = _pursuit_roll_error(local_aim, pitch_error)
 	# A/D roll override: positive steer means "left" everywhere else in the
 	# game, and roll_error is positive-right, so it enters negated.
 	roll_error = clampf(roll_error - _roll_override * 2.2, -3.2, 3.2)
@@ -406,13 +447,30 @@ func _apply_flight_controls(dt: float, q: float, grounded: bool,
 	var pitch_damping := 8.0 if grounded else 2.9
 	var pitch_torque := (-pitch_cmd * pitch_gain - rates.x * pitch_damping) \
 		* q * WING_AREA * CHORD * 0.052 * authority
-	var roll_torque := (-clampf(roll_error, -1.0, 1.0) * 2.6 - rates.z * 2.1) \
+	var roll_rate_damping := 3.4 if hands_off else 2.1
+	var roll_torque := (-clampf(roll_error, -1.0, 1.0) * 2.6 \
+		- rates.z * roll_rate_damping) \
 		* q * WING_AREA * WING_SPAN * 0.012 * authority
 	var yaw_torque := (beta * 2.4 - rates.y * 1.8) \
 		* q * WING_AREA * WING_SPAN * 0.010 * authority
 	apply_torque(global_basis.x * pitch_torque
 		+ global_basis.z * roll_torque
 		+ global_basis.y * yaw_torque)
+
+
+func _hands_off_flight(local_aim: Vector3, grounded: bool) -> bool:
+	return not grounded and absf(_pitch_input) <= 0.04 \
+		and absf(input_steer) <= 0.04 \
+		and Vector2(local_aim.x, local_aim.y).length() \
+			<= HANDS_OFF_AIM_DEADZONE
+
+
+func _pursuit_roll_error(local_aim: Vector3, pitch_error: float) -> float:
+	var pull_magnitude := Vector2(local_aim.x, local_aim.y).length()
+	if pull_magnitude <= HANDS_OFF_AIM_DEADZONE or absf(pitch_error) >= 1.2:
+		return 0.0
+	return clampf(atan2(local_aim.x, maxf(local_aim.y, 0.02)) \
+		* clampf(pull_magnitude * 3.0, 0.0, 1.0), -2.6, 2.6)
 
 
 func _advance_ground_steering(dt: float, grounded: bool) -> void:
@@ -457,6 +515,107 @@ func apply_remote_state(pos: Vector3, yaw: float, aux: Vector3,
 
 # ---- construction ----------------------------------------------------------
 
+## Free-field spherical spreading from a 130 dB SPL source measured at 1 m.
+## SPL remains useful for validation/documentation; it is deliberately not fed
+## straight into digital gain, where 130 dB would have no safe meaning.
+static func turbine_spl_at_distance(distance_m: float) -> float:
+	var distance := maxf(distance_m, AUDIO_REFERENCE_DISTANCE)
+	return SOURCE_LEVEL_DB_SPL - 20.0 * log(distance \
+		/ AUDIO_REFERENCE_DISTANCE) / log(10.0)
+
+
+## Preserve the physical distance curve but compress its 84 dB ten-mile span
+## into a playable range. max_distance supplies a final linear CPU-saving fade
+## near 24 km; this value is the source player's gain before that cutoff.
+static func turbine_game_volume_db(source_game_db: float,
+		distance_m: float) -> float:
+	if distance_m > LONG_RANGE_AUDIO_DISTANCE:
+		return -60.0
+	var propagation_loss := SOURCE_LEVEL_DB_SPL \
+		- turbine_spl_at_distance(distance_m)
+	return clampf(source_game_db \
+		- propagation_loss * AUDIO_DISTANCE_DYNAMIC_RANGE,
+		-60.0, SAFE_AUDIO_MAX_DB)
+
+
+func _configure_long_range_engine_audio() -> void:
+	if not _engine_player:
+		return
+	_engine_player.attenuation_model = AudioStreamPlayer3D.ATTENUATION_DISABLED
+	_engine_player.max_distance = LONG_RANGE_AUDIO_DISTANCE
+	_engine_player.max_db = SAFE_AUDIO_MAX_DB
+	_engine_player.doppler_tracking = \
+		AudioStreamPlayer3D.DOPPLER_TRACKING_PHYSICS_STEP
+
+
+## One unlit surface: horizontal planform plus a vertical profile. At least one
+## of the perpendicular silhouettes has area from every viewing direction,
+## without retaining the detailed cockpit, gear, rider contacts, particles, or
+## dozens of close-model draw calls at inter-city distances.
+func _build_far_silhouette() -> void:
+	var surface := SurfaceTool.new()
+	surface.begin(Mesh.PRIMITIVE_TRIANGLES)
+	var triangles: Array[PackedVector3Array] = [
+		# Horizontal fuselage, main wing, and stabilator planforms.
+		PackedVector3Array([Vector3(0, 0, 7.6), Vector3(-0.72, 0, -4.9),
+			Vector3(0, 0, -6.9)]),
+		PackedVector3Array([Vector3(0, 0, 7.6), Vector3(0, 0, -6.9),
+			Vector3(0.72, 0, -4.9)]),
+		PackedVector3Array([Vector3(0, 0, 0.8),
+			Vector3(-WING_SPAN * 0.5, 0, -1.7), Vector3(0, 0, -2.9)]),
+		PackedVector3Array([Vector3(0, 0, 0.8), Vector3(0, 0, -2.9),
+			Vector3(WING_SPAN * 0.5, 0, -1.7)]),
+		PackedVector3Array([Vector3(0, 0, -4.4), Vector3(-2.6, 0, -6.0),
+			Vector3(0, 0, -6.55)]),
+		PackedVector3Array([Vector3(0, 0, -4.4), Vector3(0, 0, -6.55),
+			Vector3(2.6, 0, -6.0)]),
+		# Vertical fuselage and tail profile for an edge-on planform view.
+		PackedVector3Array([Vector3(0, 0, 7.6), Vector3(0, -0.38, -5.8),
+			Vector3(0, 0.68, -4.4)]),
+		PackedVector3Array([Vector3(0, -0.38, -5.8), Vector3(0, 0.0, -6.8),
+			Vector3(0, 2.6, -5.6)]),
+		PackedVector3Array([Vector3(0, -0.38, -5.8), Vector3(0, 2.6, -5.6),
+			Vector3(0, 0.68, -4.4)]),
+	]
+	for triangle: PackedVector3Array in triangles:
+		for vertex: Vector3 in triangle:
+			surface.add_vertex(vertex)
+	var mesh := surface.commit()
+	var material := StandardMaterial3D.new()
+	material.albedo_color = Color(0.48, 0.52, 0.58)
+	material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	material.cull_mode = BaseMaterial3D.CULL_DISABLED
+	# World fog is intentionally dense enough to hide normal geometry at 16 km.
+	# This restrained silhouette bypasses it so "rendered" remains true; terrain
+	# depth still occludes an aircraft that is genuinely behind a hill.
+	material.disable_fog = true
+	_far_silhouette = MeshInstance3D.new()
+	_far_silhouette.name = "FarAircraftSilhouette"
+	_far_silhouette.mesh = mesh
+	_far_silhouette.material_override = material
+	_far_silhouette.cast_shadow = \
+		GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	_far_silhouette.ignore_occlusion_culling = true
+	_far_silhouette.extra_cull_margin = 8.0
+	_far_silhouette.visibility_range_end = LONG_RANGE_RENDER_DISTANCE
+	_far_silhouette.visibility_range_end_margin = 500.0
+	_far_silhouette.visible = false
+	add_child(_far_silhouette)
+
+
+func _update_distance_lod(distance_m: float) -> void:
+	if not _detail_body or not _far_silhouette:
+		return
+	var far := distance_m >= DETAIL_LOD_DISTANCE
+	_detail_body.visible = not far
+	_far_silhouette.visible = far and distance_m <= LONG_RANGE_RENDER_DISTANCE
+	if not far:
+		return
+	var minimum_length := maxf(SILHOUETTE_MODEL_LENGTH,
+		distance_m * tan(SILHOUETTE_MIN_ANGULAR_LENGTH))
+	var silhouette_scale := minimum_length / SILHOUETTE_MODEL_LENGTH
+	_far_silhouette.scale = Vector3.ONE * silhouette_scale
+
 ## SurfaceTool follows Godot's clockwise front-face convention. Return a
 ## triangle whose generated normal points toward the supplied exterior hint,
 ## regardless of which side of a mirrored aircraft part produced the points.
@@ -491,6 +650,7 @@ func _build_body() -> void:
 	var body := Node3D.new()
 	body.name = "Body"
 	add_child(body)
+	_detail_body = body
 	var skin := paint_material(Color(0.47, 0.50, 0.54), 0.22, 0.62)
 	var fuselage_skin := skin.duplicate() as StandardMaterial3D
 	fuselage_skin.vertex_color_use_as_albedo = true
@@ -919,11 +1079,13 @@ func _build_burner_audio() -> void:
 	_burner_player = AudioStreamPlayer3D.new()
 	_burner_player.stream = Sfx.streams.get("jet_burner")
 	_burner_player.bus = &"SFX"
-	_burner_player.max_distance = 240.0
-	_burner_player.unit_size = 12.0
+	_burner_player.max_distance = LONG_RANGE_AUDIO_DISTANCE
 	_burner_player.volume_db = -60.0
+	_burner_player.max_db = SAFE_AUDIO_MAX_DB
 	_burner_player.attenuation_model = \
-		AudioStreamPlayer3D.ATTENUATION_LOGARITHMIC
+		AudioStreamPlayer3D.ATTENUATION_DISABLED
+	_burner_player.doppler_tracking = \
+		AudioStreamPlayer3D.DOPPLER_TRACKING_PHYSICS_STEP
 	add_child(_burner_player)
 	if _burner_player.stream:
 		_burner_player.play()
@@ -1011,7 +1173,17 @@ func _update_extra_visuals(dt: float) -> void:
 
 func _update_audio(dt: float, rpm_frac: float, load: float) -> void:
 	super(dt, rpm_frac, load)
+	var camera := get_viewport().get_camera_3d() if is_inside_tree() else null
+	var listener_distance := global_position.distance_to(camera.global_position) \
+		if camera else AUDIO_REFERENCE_DISTANCE
+	var running := driver != null or remote_controlled or rpm_frac > 0.02
+	if _engine_player and running:
+		_engine_player.volume_db = turbine_game_volume_db(
+			_engine_player.volume_db, listener_distance)
 	if _burner_player:
+		var burner_source_db := -8.0 if afterburner else -60.0
+		var burner_target_db := turbine_game_volume_db(
+			burner_source_db, listener_distance)
 		_burner_player.volume_db = lerpf(_burner_player.volume_db,
-			-4.0 if afterburner else -60.0, 1.0 - exp(-6.0 * dt))
+			burner_target_db, 1.0 - exp(-6.0 * dt))
 		_burner_player.pitch_scale = 0.9 + spool * 0.3

@@ -997,7 +997,28 @@ func run(main) -> void:
 	await get_tree().process_frame
 	_check(proxy.body_hitbox != null and proxy.head_hitbox != null and
 		proxy.rig._outline_material != null,
-		"remote player replicas expose outlined body and head zones")
+		"remote player replicas expose body/head hit zones and a shared outline")
+	var torso_outline = proxy.rig.torso_p.get_node_or_null("BodyTorso")
+	var belly_patch = proxy.rig.torso_p.get_node_or_null("BellyPatch")
+	var face_details_clean := true
+	for visual in proxy.rig.head_p.find_children("*", "MeshInstance3D", true,
+			false):
+		var visual_name := str(visual.name)
+		var is_face_detail := visual_name.begins_with("Face") \
+			or visual_name.begins_with("Muzzle") \
+			or visual_name.begins_with("InnerEar") \
+			or visual_name.begins_with("Eye") \
+			or visual_name.begins_with("Pupil") \
+			or visual_name.begins_with("Cheek") \
+			or str(visual.get_parent().name) == "Smile"
+		if is_face_detail and visual.material_overlay != null:
+			face_details_clean = false
+	_check(torso_outline != null and torso_outline.material_overlay \
+			== proxy.rig._outline_material and belly_patch != null \
+			and belly_patch.material_overlay == null and face_details_clean \
+			and (proxy.rig.winter_scarf == null \
+				or proxy.rig.winter_scarf.material_overlay == null),
+		"enemy outline follows the outer body only, never face, eyes, belly, or scarf")
 	proxy.on_shot(Vector3.FORWARD, Net.WEAPON_SMG)
 	_check(proxy.smg.visible and not proxy.gun.visible and
 		not proxy.shotgun.visible and proxy.smg.recoil > 0.0,
