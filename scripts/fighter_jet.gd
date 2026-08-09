@@ -108,7 +108,10 @@ func _init() -> void:
 	exit_offsets = [Vector3(-2.4, -0.4, 2.0), Vector3(2.4, -0.4, 2.0),
 		Vector3(0, -0.4, 6.5)]
 	camera_distance = 13.5
-	camera_height = 3.4
+	camera_height = 4.5
+	# Keep the sight picture on the nose. Mouse pursuit adds a small presentation
+	# lead in chase view without moving the bounded flight-control target.
+	camera_chase_pitch = 0.0
 	camera_bank_factor = 0.34
 	speed_for_max_fov = 250.0
 	driver_mass = 38.0

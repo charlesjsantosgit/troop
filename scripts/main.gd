@@ -1502,6 +1502,31 @@ func _do_debug_shot(what: String, out: String) -> void:
 			chat_box.add_system_line("Admin unlocked — F8 opens the console.")
 			for i in range(10):
 				await get_tree().process_frame
+		"debug-chase-jeep", "debug-chase-jeep-orbit":
+			# Use the live mounted-player CameraRig, not the free diagnostic camera.
+			# The approach to lane 1 puts rough ground and distance signs ahead so the
+			# higher/downward framing has an unmistakable landing path to reveal.
+			world.set_time_of_day_override(12.0)
+			if chat_box:
+				chat_box.visible = false
+			var chase_jeep := world.vehicle_by_id("v:debug#jeep") as SafariJeep
+			chase_jeep.settle_at(Vector3(-21.0,
+				DebugWorldBuilder.GROUND_Y, 24.0), 0.0)
+			chase_jeep.reset_physics_interpolation()
+			p.enter_vehicle(chase_jeep)
+			for i in range(30):
+				await get_tree().physics_frame
+			chase_jeep.linear_velocity = Vector3.ZERO
+			chase_jeep.angular_velocity = Vector3.ZERO
+			chase_jeep.freeze = true
+			chase_jeep.reset_physics_interpolation()
+			p.cam.center_vehicle_chase()
+			if what == "debug-chase-jeep-orbit":
+				var orbit_sensitivity := p.cam.effective_sensitivity()
+				p.cam.apply_look(Vector2(0.38 / orbit_sensitivity,
+					0.08 / orbit_sensitivity))
+			for i in range(36):
+				await get_tree().process_frame
 		"debug-vehicles":
 			if hud:
 				hud.visible = false

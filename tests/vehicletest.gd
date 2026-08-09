@@ -234,6 +234,16 @@ func run(main) -> void:
 		print("VEHICLETEST %d/%d FAIL" % [total - fails, total])
 		main.get_tree().quit(1)
 		return
+	check("all machines author a higher readable chase pivot",
+		bike.camera_height >= 1.95 and jeep.camera_height >= 2.60 \
+			and boat.camera_height >= 2.65 and jet.camera_height >= 4.45 \
+			and bike.camera_chase_pitch < -0.15 \
+			and jeep.camera_chase_pitch < -0.15 \
+			and boat.camera_chase_pitch < -0.15 \
+			and absf(jet.camera_chase_pitch) < 0.001,
+		"height bike=%.2f jeep=%.2f boat=%.2f jet=%.2f" % [
+			bike.camera_height, jeep.camera_height, boat.camera_height,
+			jet.camera_height])
 	# Five dedicated outlets cover the four machines (the airboat has twin
 	# headers). Keep this registry separate from unrelated jet wingtip trails.
 	var exhaust_counts_ok: bool = bike.exhaust_emitters.size() == 1 \
@@ -597,14 +607,20 @@ func run(main) -> void:
 	check("jeep static sag sits mid-travel", sag_ok)
 
 	# --- mounting through the real E path -----------------------------------
-	# Reproduce mounting while ADS has temporarily forced first person. Entry
-	# must clear ADS and restore the player's actual shoulder-view preference.
-	p.cam.set_view_mode(CameraRig.ViewMode.SHOULDER)
+	# Reproduce mounting from an on-foot first-person preference while ADS is
+	# active. Every machine must still open in chase without destroying that
+	# stored on-foot preference.
+	p.cam.set_view_mode(CameraRig.ViewMode.FIRST_PERSON)
 	p.cam.set_aiming(true)
 	var mounted: bool = await mount(p, w, jeep)
 	check("E mounts the jeep through the interaction ladder", mounted)
-	check("mounting while ADS restores the preferred vehicle view",
+	check("every vehicle entry defaults to chase even from on-foot first person",
 		not p.cam.aiming and p.cam.view_mode == CameraRig.ViewMode.SHOULDER)
+	var authored_chase_anchor: Vector3 = jeep.get_global_transform_interpolated().origin \
+		+ Vector3.UP * jeep.camera_height
+	check("vehicle-aware snap starts at the authored chase height without a dip",
+		p.cam.global_position.distance_to(authored_chase_anchor) < 0.20,
+		"camera=%s expected=%s" % [p.cam.global_position, authored_chase_anchor])
 	check("mounting stows the weapon and disables the capsule",
 		p.is_weapon_stowed() and p._collision_shape.disabled)
 	await sim(18)
@@ -646,10 +662,65 @@ func run(main) -> void:
 		p.cam.global_basis.y.dot(Vector3.UP) > 0.999)
 	p.cam._process(1.0 / 60.0)
 	var jeep_chase_offset: Vector3 = p.cam.cam_pos() - jeep.seat_render_global()
-	check("vehicle chase camera is centered directly behind the machine",
+	var jeep_chase_forward: Vector3 = -p.cam.cam_basis().z
+	check("default Jeep chase is high, behind, downward, and self-collision free",
 		absf(p.cam._arm.position.x) < 0.01 \
-			and jeep_chase_offset.normalized().dot(-jeep.global_basis.z) > 0.70,
-		"arm=%s offset=%s" % [p.cam._arm.position, jeep_chase_offset])
+			and jeep_chase_offset.normalized().dot(-jeep.global_basis.z) > 0.60 \
+			and p.cam.cam_pos().y - jeep.global_position.y > 3.25 \
+			and jeep_chase_forward.y < -0.12 \
+			and p.cam._arm.get_hit_length() > p.cam._arm.spring_length * 0.90,
+		"arm=%s offset=%s forward=%s hit=%.2f/%.2f" % [p.cam._arm.position,
+			jeep_chase_offset, jeep_chase_forward, p.cam._arm.get_hit_length(),
+			p.cam._arm.spring_length])
+	# Exercise the same relative mouse path used by captured gameplay. Horizontal
+	# motion orbits around the chassis, vertical motion changes the downward look,
+	# and a later chassis turn retains that chosen local three-quarter angle.
+	p.cam.center_vehicle_chase()
+	var centered_chase_forward: Vector3 = -p.cam.cam_basis().z
+	var orbit_sensitivity: float = p.cam.effective_sensitivity()
+	p.cam.apply_look(Vector2(0.42 / orbit_sensitivity,
+		0.11 / orbit_sensitivity))
+	p.cam._process(1.0 / 60.0)
+	var mouse_orbit: Vector2 = p.cam.vehicle_chase_orbit()
+	var mouse_chase_forward: Vector3 = -p.cam.cam_basis().z
+	check("mouse directly orbits and pitches the ground-vehicle chase camera",
+		absf(mouse_orbit.x) > 0.25 \
+			and mouse_orbit.y < jeep.camera_chase_pitch - 0.05 \
+			and centered_chase_forward.angle_to(mouse_chase_forward) > 0.20,
+		"orbit=%s angle=%.1f°" % [mouse_orbit,
+			rad_to_deg(centered_chase_forward.angle_to(mouse_chase_forward))])
+	var camera_fixture_freeze: bool = jeep.freeze
+	jeep.freeze = true
+	var orbit_fixture_basis: Basis = jeep.global_basis
+	jeep.global_basis = Basis(Vector3.UP, 0.46) * orbit_fixture_basis
+	jeep.reset_physics_interpolation()
+	p.cam._process(1.0 / 60.0)
+	var turned_heading := atan2(-jeep.global_basis.z.x, -jeep.global_basis.z.z)
+	check("mouse chase orbit stays vehicle-relative through a chassis turn",
+		p.cam.vehicle_chase_orbit().distance_to(mouse_orbit) < 0.001 \
+			and absf(angle_difference(p.cam.yaw,
+				turned_heading + mouse_orbit.x)) < 0.01)
+	p.cam.apply_look(Vector2(0.0, 100000.0))
+	var lower_clamp: float = p.cam.vehicle_chase_orbit().y
+	p.cam.apply_look(Vector2(0.0, -100000.0))
+	var upper_clamp: float = p.cam.vehicle_chase_orbit().y
+	check("vehicle mouse pitch remains finite inside comfortable chase limits",
+		is_equal_approx(lower_clamp, CameraRig.VEHICLE_CHASE_PITCH_MIN) \
+			and is_equal_approx(upper_clamp, CameraRig.VEHICLE_CHASE_PITCH_MAX))
+	p.cam.center_vehicle_chase()
+	jeep.global_basis = orbit_fixture_basis
+	jeep.reset_physics_interpolation()
+	p.cam._process(1.0 / 60.0)
+	# The driven chassis is excluded (full open-air extension), while the arm keeps
+	# its real world collision mask for terrain, walls, and other vehicles.
+	var open_arm_length: float = p.cam._arm.get_hit_length()
+	check("chase arm clears its own vehicle while retaining world obstruction",
+		open_arm_length > p.cam._arm.spring_length * 0.90 \
+			and (p.cam._arm.collision_mask & 1) != 0,
+		"open=%.2f arm=%.2f mask=%d" % [open_arm_length,
+			p.cam._arm.spring_length, p.cam._arm.collision_mask])
+	jeep.freeze = camera_fixture_freeze
+	jeep.sleeping = false
 	p.cam._apply_view_mode(CameraRig.ViewMode.FRONT)
 	var vehicle_front_blocked: bool = \
 		p.cam.view_mode == CameraRig.ViewMode.SHOULDER
@@ -672,7 +743,9 @@ func run(main) -> void:
 			head_camera_error])
 	main.hud._process(0.0)
 	check("vehicle HUD names the centered chase/head camera pair",
-		main.hud.camera_badge.text.contains("CENTERED CHASE") \
+		main.hud.camera_badge.text.contains("CHASE CAMERA") \
+			and main.hud.camera_badge.text.contains("MOUSE LOOK") \
+			and main.hud._vehicle_hint(jeep).contains("MOUSE look") \
 			and main.hud._vehicle_hint(jeep).contains("chase/head"))
 	jeep.global_basis = parked_jeep_basis
 	jeep.reset_physics_interpolation()
@@ -953,8 +1026,9 @@ func run(main) -> void:
 		gathered_bike_left and gathered_bike_right)
 	check("bike HUD teaches the Ctrl wheelie",
 		main.hud._vehicle_hint(bike).contains("WHEELIE") \
-		and main.hud._vehicle_hint(bike).contains(Settings.binding_text(&"crouch")) \
-		and main.hud._vehicle_hint(bike).contains("CHASE/HEAD"))
+			and main.hud._vehicle_hint(bike).contains(Settings.binding_text(&"crouch")) \
+			and main.hud._vehicle_hint(bike).contains("MOUSE LOOK") \
+			and main.hud._vehicle_hint(bike).contains("CHASE/HEAD"))
 	check("keyboard W holds a safe wheelie before sustained over-power loops it",
 		bike.wheelie_target_nose_angle(0.72) \
 			> bike.wheelie_target_nose_angle(0.35) + 0.20 \
@@ -1064,6 +1138,9 @@ func run(main) -> void:
 	var maximum_wheelie_steer := 0.0
 	var wheelie_start_yaw: float = bike.yaw_angle()
 	var maximum_wheelie_yaw_change := 0.0
+	var wheelie_chase_horizon_stable := true
+	var wheelie_chase_kept_ground_visible := true
+	var wheelie_camera_samples := 0
 	for i in range(150):
 		if i == 20:
 			p.ti.dir = Vector2(-0.70710678, -0.70710678)
@@ -1074,6 +1151,12 @@ func run(main) -> void:
 		await sim(1)
 		var nose_up: float = -bike.global_basis.get_euler(EULER_ORDER_YXZ).x
 		peak_nose_up = maxf(peak_nose_up, nose_up)
+		if nose_up > 0.35:
+			wheelie_camera_samples += 1
+			wheelie_chase_horizon_stable = wheelie_chase_horizon_stable \
+				and p.cam.global_basis.y.dot(Vector3.UP) > 0.999
+			wheelie_chase_kept_ground_visible = wheelie_chase_kept_ground_visible \
+				and (-p.cam.cam_basis().z).y < -0.08
 		var front_center_local: Vector3 = bike.wheels[0].local_pos \
 			- Vector3.UP * (bike.wheels[0].travel - bike.wheels[0].compression)
 		var front_center_world: Vector3 = bike.to_global(front_center_local)
@@ -1104,6 +1187,11 @@ func run(main) -> void:
 		"peak=%.2f clearance=%.2f sustained=%d support=%.0f%%" % [
 			peak_nose_up, peak_front_clearance, longest_sustained_lift,
 			rear_support_ratio * 100.0])
+	check("bike chase stays level and looks toward the landing ground in a wheelie",
+		wheelie_camera_samples >= 30 and wheelie_chase_horizon_stable \
+			and wheelie_chase_kept_ground_visible,
+		"samples=%d root_up=%.4f camera_forward=%s" % [wheelie_camera_samples,
+			p.cam.global_basis.y.dot(Vector3.UP), -p.cam.cam_basis().z])
 	check("wheelie sharply limits turning while the front is raised",
 		maximum_wheelie_steer <= bike.max_steer_angle * 0.12 \
 			and maximum_wheelie_yaw_change < 0.10,
@@ -1330,23 +1418,31 @@ func run(main) -> void:
 	# Exercise the real captured-mouse path: screen-right and screen-up move the
 	# dot into the matching quadrant while the exact same normalized command is
 	# converted into the jet's pursuit direction.
+	var jet_chase_direction_before_mouse: Vector3 = -p.cam.cam_basis().z
 	p.cam.apply_look(Vector2(105.0, -62.0))
 	await sim(2)
 	main.hud._process(0.0)
 	var moderate_flight_aim: Vector2 = p.cam.aircraft_aim_normalized()
+	var jet_chase_direction_after_mouse: Vector3 = -p.cam.cam_basis().z
 	var moderate_control_dot: float = jet._aim.dot(
 		p.cam.vehicle_aim_direction())
 	check("flight dot follows the real mouse command and jet control aim",
 		moderate_flight_aim.x > 0.05 and moderate_flight_aim.y < -0.03 \
 		and moderate_flight_aim.length() < 1.0 \
 		and flight_reticle.normalized_aim.distance_to(moderate_flight_aim) < 0.001 \
-		and flight_reticle.dot_offset.distance_to(moderate_flight_aim \
-			* AircraftAimReticle.DOT_TRAVEL_RADIUS) < 0.01 \
-		and moderate_control_dot > 0.9999,
-		"camera=%s hud=%s dot_error=%.4f control_dot=%.6f" % [
+			and flight_reticle.dot_offset.distance_to(moderate_flight_aim \
+				* AircraftAimReticle.DOT_TRAVEL_RADIUS) < 0.01 \
+			and moderate_control_dot > 0.9999 \
+			and jet_chase_direction_before_mouse.angle_to(
+				jet_chase_direction_after_mouse) > 0.015,
+		"camera=%s hud=%s view_lead=%.2f° dot_error=%.4f control_dot=%.6f" % [
 			moderate_flight_aim, flight_reticle.normalized_aim,
+			rad_to_deg(jet_chase_direction_before_mouse.angle_to(
+				jet_chase_direction_after_mouse)),
 			flight_reticle.dot_offset.distance_to(moderate_flight_aim \
 				* AircraftAimReticle.DOT_TRAVEL_RADIUS), moderate_control_dot])
+	check("jet HUD explains that mouse aim also leads the chase camera",
+		main.hud._vehicle_hint(jet).contains("MOUSE DOT AIM + CAMERA"))
 	p.cam.apply_look(Vector2(100000.0, -100000.0))
 	await sim(2)
 	main.hud._process(0.0)
