@@ -102,6 +102,93 @@ func run(main) -> void:
 			and celestial.moon_crater_count() >= 4 \
 			and celestial.moon_crater_count() <= 8,
 		"the moon is moderately enlarged with bounded crater detail")
+	var sun_radius_uniform := float(
+		celestial_material.get_shader_parameter("sun_radius_sine"))
+	var sun_edge_softness_uniform := float(
+		celestial_material.get_shader_parameter("sun_disc_edge_softness"))
+	var sun_half_opacity_radius := ((1.0 - sun_edge_softness_uniform) \
+		+ (1.0 + sun_edge_softness_uniform)) * 0.5
+	# Measure the implementation this replaces rather than trusting the new
+	# constant to define its own baseline. The legacy disc's smoothstep reached
+	# half opacity at the midpoint of these two cosine thresholds.
+	var legacy_sun_diameter_degrees := rad_to_deg(2.0 * acos(
+		(0.999980780 + 0.999988480) * 0.5))
+	_check(is_equal_approx(celestial.sun_apparent_diameter_degrees(),
+			legacy_sun_diameter_degrees * 3.0) \
+			and is_equal_approx(CelestialSky.SUN_BASE_DIAMETER_DEGREES,
+				legacy_sun_diameter_degrees) \
+			and is_equal_approx(celestial.sun_angular_diameter_degrees(),
+				celestial.sun_apparent_diameter_degrees()) \
+			and is_equal_approx(celestial.sun_diameter_scale(), 3.0) \
+			and is_equal_approx(sun_radius_uniform, sin(deg_to_rad(
+				celestial.sun_apparent_diameter_degrees() * 0.5))) \
+			and is_equal_approx(sun_edge_softness_uniform,
+				CelestialSky.SUN_DISC_EDGE_SOFTNESS) \
+			and is_equal_approx(sun_half_opacity_radius, 1.0),
+		"the sun is exactly three-times wider at its symmetric half-opacity contour")
+	var pre_zenith_direction := (Vector3.UP + Vector3.FORWARD * 0.001).normalized()
+	var post_zenith_direction := (Vector3.UP - Vector3.FORWARD * 0.001).normalized()
+	var pre_zenith_face_up := CelestialSky.sun_face_up_for_direction(
+		pre_zenith_direction)
+	var zenith_face_up := CelestialSky.sun_face_up_for_direction(Vector3.UP)
+	var post_zenith_face_up := CelestialSky.sun_face_up_for_direction(
+		post_zenith_direction)
+	_check(absf(pre_zenith_face_up.dot(pre_zenith_direction)) < 0.0001 \
+			and absf(zenith_face_up.dot(Vector3.UP)) < 0.0001 \
+			and absf(post_zenith_face_up.dot(post_zenith_direction)) < 0.0001 \
+			and pre_zenith_face_up.dot(zenith_face_up) > 0.9999 \
+			and zenith_face_up.dot(post_zenith_face_up) > 0.9999,
+		"the sun face tangent stays orthogonal and continuous across zenith")
+	var expected_world_smile := CelestialSky.sun_smiley_for_seed(Gen.world_seed)
+	var smile_uniform := float(
+		celestial_material.get_shader_parameter("sun_smiley_enabled"))
+	var peer_sky_a: CelestialSky = CelestialSky.new(Gen.world_seed)
+	var peer_sky_b: CelestialSky = CelestialSky.new(Gen.world_seed)
+	var peer_resource_ids_a := peer_sky_a.resource_instance_ids()
+	var peer_resource_ids_b := peer_sky_b.resource_instance_ids()
+	_check(celestial.sun_world_seed() == Gen.world_seed \
+			and celestial.sun_smiley_enabled() == expected_world_smile \
+			and peer_sky_a.sun_smiley_enabled() == expected_world_smile \
+			and peer_sky_b.sun_smiley_enabled() == expected_world_smile \
+			and is_equal_approx(smile_uniform, 1.0 if expected_world_smile else 0.0) \
+			and is_equal_approx(float(peer_sky_a.get_material().get_shader_parameter(
+				"sun_smiley_enabled")), smile_uniform) \
+			and is_equal_approx(float(peer_sky_b.get_material().get_shader_parameter(
+				"sun_smiley_enabled")), smile_uniform),
+		"the shared world seed gives every multiplayer peer the same stable sun face")
+	_check(peer_resource_ids_a.shader == celestial_resource_ids.shader \
+			and peer_resource_ids_b.shader == celestial_resource_ids.shader \
+			and peer_resource_ids_a.atlas == celestial_resource_ids.atlas \
+			and peer_resource_ids_b.atlas == celestial_resource_ids.atlas \
+			and peer_resource_ids_a.material != celestial_resource_ids.material \
+			and peer_resource_ids_b.material != celestial_resource_ids.material \
+			and peer_resource_ids_a.material != peer_resource_ids_b.material,
+		"peer skies share the bounded shader and atlas but keep independent uniforms")
+	peer_sky_a.update_celestials(0.8, 0.7, Vector3.UP, 0.0, 9.0,
+		Vector3(0.2, 0.8, -0.4))
+	var expected_peer_sun_visibility := 0.8 * pow(0.7, 3.0)
+	_check(is_equal_approx(peer_sky_a.sun_visibility(),
+			expected_peer_sun_visibility) \
+			and is_equal_approx(float(peer_sky_a.get_material().get_shader_parameter(
+				"sun_visibility")), expected_peer_sun_visibility) \
+			and CelestialSky.SKY_SHADER.find(
+				"sun_disc * sun_visibility") >= 0 \
+			and CelestialSky.SKY_SHADER.find(
+				"sun_halo * sun_visibility") >= 0,
+		"weather visibility attenuates the complete sun disc, face, and halo")
+	peer_sky_a = null
+	peer_sky_b = null
+	var smiling_seed_count := 0
+	for seed_value in range(CelestialSky.SUN_SMILE_BUCKETS):
+		if CelestialSky.sun_smiley_for_seed(seed_value):
+			smiling_seed_count += 1
+	_check(smiling_seed_count == CelestialSky.SUN_SMILE_THRESHOLD \
+			and CelestialSky.SUN_SMILE_THRESHOLD == int(
+				CelestialSky.SUN_SMILE_CHANCE * CelestialSky.SUN_SMILE_BUCKETS) \
+			and is_equal_approx(float(smiling_seed_count) \
+				/ float(CelestialSky.SUN_SMILE_BUCKETS),
+				CelestialSky.SUN_SMILE_CHANCE),
+		"the deterministic broad seed sample selects exactly thirty percent smiley suns")
 	var celestial_catalog_signature := celestial.catalog_signature()
 	_check(not celestial_catalog_signature.is_empty(),
 		"the generated celestial catalogue has a deterministic signature")
@@ -167,6 +254,10 @@ func run(main) -> void:
 		"the cratered moon follows the moonlight source direction")
 	_check(midnight_moon_direction.dot(midnight_sun_direction) < -0.999,
 		"the moon remains opposite the sun in the celestial orbit")
+	_check(celestial.sun_smiley_enabled() == expected_world_smile \
+			and is_equal_approx(float(celestial_material.get_shader_parameter(
+				"sun_smiley_enabled")), smile_uniform),
+		"the per-world sun face remains unchanged across noon and midnight updates")
 	world.set_time_of_day_override(3.0)
 	var advanced_shader_moon_direction := Vector3(
 		celestial_material.get_shader_parameter("moon_direction"))

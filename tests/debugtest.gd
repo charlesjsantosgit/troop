@@ -19,8 +19,10 @@ func run(main) -> void:
 			flat = false
 	_check(flat and Gen.debug_world, "debug world generates a flat plane")
 
-	# 2 — player landed on real collision
-	await _frames(40)
+	# 2 — player landed on real collision. The 2.5 m spawn drop takes about
+	# 43 fixed 60 Hz steps at the authored 9.81 m/s^2 freefall acceleration;
+	# use a one-second deadline without relaxing the exact contact assertion.
+	await _frames(60)
 	_check(p.is_on_floor() and absf(p.global_position.y - 2.0) < 1.0,
 		"player stands on the debug plane")
 

@@ -4,14 +4,16 @@ extends Node3D
 ## player's altitude buys a long horizon (up to 15 miles from the peaks). One
 ## indexed terrain draw per sector — water is baked straight into the lattice
 ## as flattened, depth-tinted vertices, so a sector is a single mesh with no
-## physics, no process cost, and satellite-style coloring that matches the
-## minimap by construction (both read Gen.ground_color).
+## physics or process cost. Its satellite-style base reads Gen.ground_color,
+## then adds deterministic canopy tint and crown relief for the aircraft view.
 
 const SECTOR_SIZE := Gen.CHUNK * Gen.STRATOS_SECTOR_CHUNKS
 const CELLS := Gen.STRATOS_CELLS
 
 var key := Vector2i.ZERO
 var terrain_vertex_count := 0
+var canopy_vertex_count := 0
+var canopy_relief_max := 0.0
 
 
 func setup(sector_key: Vector2i) -> void:
@@ -28,6 +30,8 @@ func _build_terrain() -> void:
 	var z0 := float(key.y) * SECTOR_SIZE
 	var st := SurfaceTool.new()
 	st.begin(Mesh.PRIMITIVE_TRIANGLES)
+	canopy_vertex_count = 0
+	canopy_relief_max = 0.0
 	for iz in range(CELLS + 1):
 		for ix in range(CELLS + 1):
 			var x := x0 + float(ix) * step
@@ -38,23 +42,29 @@ func _build_terrain() -> void:
 				# depth: at multi-kilometre range a colored plane reads exactly
 				# like water while costing zero extra draws.
 				var depth: float = clampf((Gen.WATER_Y - h) / 5.0, 0.0, 1.0)
-				st.set_color(Color(0.16, 0.42, 0.55).lerp(
-					Color(0.05, 0.20, 0.33), depth))
+				var water_color := Color(0.16, 0.42, 0.55).lerp(
+					Color(0.05, 0.20, 0.33), depth)
+				# Alpha is a data channel for the stratos shader: zero means water or
+				# bare ground, while forest vertices carry their canopy coverage.
+				water_color.a = 0.0
+				st.set_color(water_color)
 				st.add_vertex(Vector3(x - position.x, Gen.WATER_Y - 0.25,
 					z - position.z))
 			else:
-				# Tint forested ground toward canopy color: individual trees
-				# cannot be instanced across a 6 km sector, but from altitude a
-				# jungle IS its canopy — this keeps the 15-mile view green
-				# instead of bare dirt, matching the skyline tier's tint where
-				# the two overlap.
+				# Tint and physically lift forested vertices. A few metres of
+				# deterministic cluster relief gives the 192 m lattice a broken
+				# crown line without allocating per-tree geometry across 24 km.
 				var ground := Gen.ground_color(h, x, z)
 				var cover := Gen.canopy_cover(h, x, z)
+				var relief := Gen.stratos_canopy_relief(cover, x, z)
 				if cover > 0.0:
 					ground = ground.lerp(Gen.canopy_color(x, z, h),
-						cover * 0.66)
+						cover * 0.74)
+					canopy_vertex_count += 1
+					canopy_relief_max = maxf(canopy_relief_max, relief)
+				ground.a = cover
 				st.set_color(ground)
-				st.add_vertex(Vector3(x - position.x, h, z - position.z))
+				st.add_vertex(Vector3(x - position.x, h + relief, z - position.z))
 	for iz in range(CELLS):
 		for ix in range(CELLS):
 			var p00 := iz * (CELLS + 1) + ix

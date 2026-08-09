@@ -250,6 +250,55 @@ void fragment() {
 }
 """
 
+const STRATOS_GROUND_SHADER := """
+shader_type spatial;
+render_mode diffuse_burley, specular_schlick_ggx;
+
+uniform vec2 focus_xz = vec2(0.0);
+uniform float near_fade = 1700.0;
+uniform float fade_band = 220.0;
+uniform float snow_amount : hint_range(0.0, 1.0) = 0.0;
+varying vec3 world_pos;
+varying vec4 vertex_tint;
+
+float hash21(vec2 p) {
+	p = fract(p * vec2(123.34, 456.21));
+	p += dot(p, p + 45.32);
+	return fract(p.x * p.y);
+}
+
+void vertex() {
+	world_pos = (MODEL_MATRIX * vec4(VERTEX, 1.0)).xyz;
+	vertex_tint = COLOR;
+}
+
+void fragment() {
+	float distance_to_focus = distance(world_pos.xz, focus_xz);
+	float coverage = smoothstep(near_fade - fade_band, near_fade + fade_band,
+		distance_to_focus);
+	if (hash21(floor(world_pos.xz * 0.018)) > coverage) { discard; }
+
+	// COLOR.a carries deterministic canopy coverage. Broad 64/190 m patches
+	// survive at aircraft distance, unlike literal crowns that become sub-pixel.
+	float canopy = clamp(vertex_tint.a, 0.0, 1.0);
+	float broad = hash21(floor(world_pos.xz / 190.0));
+	float crown = hash21(floor(world_pos.xz / 64.0));
+	float canopy_light = mix(0.72, 1.10, broad) * mix(0.88, 1.08, crown);
+	vec3 ground = vertex_tint.rgb * 0.84;
+	vec3 forest = vertex_tint.rgb * canopy_light;
+	vec3 shaded = mix(ground, forest, canopy * 0.82);
+
+	float snow_noise = hash21(floor(world_pos.xz * 0.012));
+	float alt_snow = smoothstep(26.0, 40.0, world_pos.y);
+	float snow = max(snow_amount, alt_snow) * mix(0.68, 0.90, snow_noise);
+	vec3 snow_color = vec3(0.68, 0.75, 0.81) * mix(0.90, 1.07, snow_noise);
+	ALBEDO = mix(shaded, snow_color, snow);
+	ROUGHNESS = mix(0.98, 0.91, canopy);
+	SPECULAR = mix(0.10, 0.13, canopy);
+	AO = mix(0.88, 0.78, canopy);
+}
+"""
+
 const FAR_JUNGLE_SHADER := """
 shader_type spatial;
 render_mode diffuse_burley, specular_schlick_ggx;
@@ -730,11 +779,11 @@ static func far_ground_material() -> ShaderMaterial:
 	return _shared.far_ground
 
 
-## Fourth-tier stratos material: same shader again, handoff pushed inside the
-## skyline ring with a very wide dither band to match its 192 m cells.
+## Fourth-tier stratos material: a canopy-aware satellite shader with its
+## handoff pushed inside the skyline ring and a wide 192 m-cell dither band.
 static func stratos_ground_material() -> ShaderMaterial:
 	if not _shared.has("stratos_ground"):
-		_shared.stratos_ground = _material(FAR_GROUND_SHADER,
+		_shared.stratos_ground = _material(STRATOS_GROUND_SHADER,
 			{"near_fade": Gen.STRATOS_NEAR_FADE,
 				"fade_band": 220.0,
 				"snow_amount": _snow_amount})

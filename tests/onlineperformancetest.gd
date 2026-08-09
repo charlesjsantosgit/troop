@@ -14,7 +14,10 @@ func run() -> void:
 	world.warm_online_entry()
 	_check(world.chunks.size() == 1,
 		"online entry builds only the playable center chunk")
-	var center_chunk = world.chunks.get(Vector2i.ZERO)
+	var spawn_pos := world.spawn_position(1)
+	var spawn_chunk := Vector2i(floori(spawn_pos.x / Gen.CHUNK),
+		floori(spawn_pos.z / Gen.CHUNK))
+	var center_chunk = world.chunks.get(spawn_chunk)
 	_check(center_chunk != null and center_chunk.has_collisions(),
 		"online center chunk is collision-ready before spawning")
 	_check(world.horizon_chunks.is_empty(),

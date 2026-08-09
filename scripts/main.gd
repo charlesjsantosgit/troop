@@ -125,28 +125,29 @@ func _ready() -> void:
 		"perftest":
 			mode = "perftest"
 			_start_solo("PerfMonkey", 2026, 2)
-			if args.size() > 1 and str(args[1]).to_lower() == "altitude":
+			var perf_variant := str(args[1]).to_lower() if args.size() > 1 else ""
+			if perf_variant in ["altitude", "highspeed"]:
 				# Peak-view benchmark: fly high over the world so the far
 				# plane stretches to the full 15-mile horizon while moving.
 				world.set_time_of_day_override(12.0)
 				var flyer := world.local_player
 				flyer.set_fly_mode(true)
 				flyer.admin_teleport(Vector3(0, 120, 0))
-			elif args.size() > 1 and str(args[1]).to_lower() == "night":
+			elif perf_variant == "night":
 				world.set_season_override(SeasonalCycle.Season.SUMMER)
 				world.set_time_of_day_override(0.0)
-			elif args.size() > 1 and str(args[1]).to_lower() == "spring":
+			elif perf_variant == "spring":
 				world.set_season_override(SeasonalCycle.Season.SPRING)
 				world.set_time_of_day_override(12.0)
-			elif args.size() > 1 and str(args[1]).to_lower() == "winter":
+			elif perf_variant == "winter":
 				world.set_season_override(SeasonalCycle.Season.WINTER)
 				world.set_time_of_day_override(12.0)
-			elif args.size() > 1 and str(args[1]).to_lower() == "summer":
+			elif perf_variant == "summer":
 				world.set_season_override(SeasonalCycle.Season.SUMMER)
 				world.set_time_of_day_override(12.0)
 			var pt = load("res://tests/perftest.gd").new()
 			add_child(pt)
-			pt.run(self)
+			pt.run(self, perf_variant)
 		"combattest":
 			mode = "combattest"
 			_start_solo("CombatMonkey", 2026, 2)
@@ -1502,6 +1503,15 @@ func _do_debug_shot(what: String, out: String) -> void:
 			chat_box.add_system_line("Admin unlocked — F8 opens the console.")
 			for i in range(10):
 				await get_tree().process_frame
+		"debug-hit-marker":
+			# Keep a real gameplay camera/crosshair underneath the short-lived cue so
+			# its center clearance, stroke weight, and body-hit color remain visible.
+			world.set_time_of_day_override(12.0)
+			if chat_box:
+				chat_box.visible = false
+			if hud and hud.hit_marker:
+				hud.hit_marker.flash(false)
+				hud.hit_marker.set_process(false)
 		"debug-chase-jeep", "debug-chase-jeep-orbit":
 			# Use the live mounted-player CameraRig, not the free diagnostic camera.
 			# The approach to lane 1 puts rough ground and distance signs ahead so the
@@ -1772,7 +1782,8 @@ func _do_shot(args: Array) -> void:
 	var bandage_diagnostic := what in ["bandage", "bandage-third"]
 	var seasonal_diagnostic := what in [
 		"season-spring", "season-summer", "season-autumn", "season-winter",
-		"winter-scarf", "lighting-sunrise", "lighting-night", "lighting-moon",
+		"winter-scarf", "lighting-sunrise", "lighting-sun-detail",
+		"lighting-night", "lighting-moon",
 		"lighting-celestial", "lighting-celestial-rain", "lighting-moon-detail",
 	]
 	var diagnostic_clip := movement_diagnostic_clip or sniper_diagnostic_clip
@@ -1808,6 +1819,9 @@ func _do_shot(args: Array) -> void:
 		"lighting-sunrise":
 			world.set_season_override(SeasonalCycle.Season.SUMMER)
 			world.set_time_of_day_override(6.35)
+		"lighting-sun-detail":
+			world.set_season_override(SeasonalCycle.Season.SUMMER)
+			world.set_time_of_day_override(9.0)
 		"lighting-night":
 			world.set_season_override(SeasonalCycle.Season.SUMMER)
 			world.set_time_of_day_override(23.0)
@@ -2781,6 +2795,17 @@ func _do_shot(args: Array) -> void:
 					else Vector3.UP
 				cam.look_at(cam.global_position + detailed_moon_direction * 240.0,
 					moon_detail_up)
+			elif what == "lighting-sun-detail":
+				# Match the moon-detail lens and align camera roll with the stable sun
+				# tangent so the exact three-times disc and optional face are readable.
+				cam.fov = 27.0
+				cam.far = 1800.0
+				cam.global_position = Vector3(sp.x, sp.y + 44.0, sp.z)
+				var detailed_sun_direction := world._sun.global_basis.z.normalized()
+				var sun_detail_up := CelestialSky.sun_face_up_for_direction(
+					detailed_sun_direction)
+				cam.look_at(cam.global_position + detailed_sun_direction * 240.0,
+					sun_detail_up)
 			else:
 				cam.global_position = sp + Vector3(5.8, 2.8, 5.8)
 				cam.look_at(Vector3(0, g0 + 1.15, 0))

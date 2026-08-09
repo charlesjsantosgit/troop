@@ -9,7 +9,7 @@ const CHUNK := 48.0
 const CELLS := 16                # terrain quads per chunk side
 const WATER_Y := 0.55
 const VIEW_R := 2                # 5x5 visible grid; fog hides the streamed edge
-const DROP_R := 2                # immediately retire chunks outside that grid
+const DROP_R := 2                # base visible radius; World may add a speed guard
 const HORIZON_SECTOR_CHUNKS := 4 # 192 m coarse sectors, rendered without physics
 const HORIZON_VIEW_R := 3        # 7x7 sectors: about a 672 m visible radius
 const HORIZON_DROP_R := 3
@@ -25,6 +25,8 @@ const SKYLINE_DISTANCE := CHUNK * SKYLINE_SECTOR_CHUNKS \
 const STRATOS_SECTOR_CHUNKS := 128  # 6144 m ultra tier for altitude vistas
 const STRATOS_CELLS := 32           # 192 m cells: 33x33 lattice per sector
 const STRATOS_NEAR_FADE := 1700.0   # dithered handoff inside the skyline ring
+const STRATOS_CANOPY_RELIEF_MIN := 2.4
+const STRATOS_CANOPY_RELIEF_MAX := 7.2
 const VIEW_BASE_DISTANCE := 2200.0  # ground-level far plane (m)
 const VIEW_PEAK_DISTANCE := 24140.0 # 15 miles from the tallest peaks
 const VIEW_PER_METER := 300.0       # extra view metres per metre of altitude
@@ -1266,8 +1268,9 @@ func biome_foliage_color(biome: int, shade: float) -> Color:
 ## Deterministic vehicle spawn definitions for one chunk. Curated machines sit
 ## at the origin motor pool, inside the six airfield hangars, and at the nearest lake
 ## dock; rare wilderness finds use their own RNG salt so adding them never
-## reshuffles any existing layout. World spawns each id at most once per
-## session, so re-streamed chunks cannot duplicate a driven-away machine.
+## reshuffles any existing layout. World retains curated/driven IDs, while an
+## untouched wilderness find retires with its streamed area and can respawn at
+## this same deterministic definition when the player returns.
 ## Kind ints match Vehicle.Kind (avoiding a script dependency from Gen).
 const VEHICLE_BIKE := 0
 const VEHICLE_JEEP := 1
@@ -1446,6 +1449,23 @@ func canopy_color(x: float, z: float, h: float) -> Color:
 	var shade := 0.32 + clampf(_n_color.get_noise_2d(x * 0.5, z * 0.5)
 		* 0.5 + 0.5, 0.0, 1.0) * 0.30
 	return biome_foliage_color(biome_at_height(x, z, h), shade)
+
+
+## Sub-pixel tree crowns should not become millions of literal instances at the
+## 6 km stratos tier. Lift the shared terrain lattice by a few deterministic
+## metres instead: from aircraft altitude the resulting rough silhouette and
+## lighting read as one continuous forest canopy all the way to the far plane.
+## `cover` is supplied by canopy_cover() so the expensive terrain gates are not
+## evaluated twice for every stratos vertex.
+func stratos_canopy_relief(cover: float, x: float, z: float) -> float:
+	if cover <= 0.0:
+		return 0.0
+	# _n_color normally varies tree-to-tree. Sampling it at a much lower input
+	# scale produces coherent 150-250 m crown clusters that match the 192 m mesh.
+	var cluster := clampf(_n_color.get_noise_2d(x * 0.05, z * 0.05)
+		* 0.5 + 0.5, 0.0, 1.0)
+	return cover * lerpf(STRATOS_CANOPY_RELIEF_MIN,
+		STRATOS_CANOPY_RELIEF_MAX, cluster)
 
 
 func _make_tree(rng: RandomNumberGenerator, p: Vector3, force_h: float,

@@ -30,6 +30,7 @@ const ANGEL_FEATHER_TRIANGLES := ANGEL_FEATHER_LENGTH_SEGMENTS \
 	+ ANGEL_FEATHER_WIDTH_SEGMENTS * 4
 const ANGEL_WING_FEATHERS_PER_SIDE := 91
 const ANGEL_WING_RENDER_OBJECTS := 6
+const ANGEL_WING_ROOT_OFFSET := Vector3(0.095, 0.26, 0.17)
 
 const FURS := [Color(0.48, 0.31, 0.17), Color(0.36, 0.23, 0.12), Color(0.54, 0.5, 0.47),
 	Color(0.72, 0.54, 0.25), Color(0.23, 0.18, 0.14), Color(0.56, 0.35, 0.2)]
@@ -2218,7 +2219,8 @@ func _build_angel_wings() -> void:
 	for side in [-1.0, 1.0]:
 		var root := Node3D.new()
 		root.name = "AngelWingL" if side < 0.0 else "AngelWingR"
-		root.position = Vector3(0.095 * side, 0.34, 0.17)
+		root.position = Vector3(ANGEL_WING_ROOT_OFFSET.x * side,
+			ANGEL_WING_ROOT_OFFSET.y, ANGEL_WING_ROOT_OFFSET.z)
 		torso_p.add_child(root)
 
 		var coverts := Node3D.new()

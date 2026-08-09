@@ -10,6 +10,19 @@ const RANDOM_STAR_COUNT := 900
 const PLANET_COUNT := 4
 const MOON_DIAMETER_DEGREES := 1.1
 const MOON_CRATER_COUNT := 7
+# The prior shader's half-opacity contour was the midpoint of its two cosine
+# thresholds, which resolves to 0.635338416 degrees rather than its rounded
+# nominal 0.62-degree description. Preserve that player-visible baseline so the
+# new disc is genuinely three times what the old build rendered.
+const SUN_BASE_DIAMETER_DEGREES := 0.635338416
+const SUN_DIAMETER_SCALE := 3.0
+const SUN_DIAMETER_DEGREES := SUN_BASE_DIAMETER_DEGREES * SUN_DIAMETER_SCALE
+const SUN_DISC_EDGE_SOFTNESS := 0.04
+const SUN_SMILE_CHANCE := 0.30
+const SUN_SMILE_BUCKETS := 10_000
+const SUN_SMILE_THRESHOLD: int = int(SUN_SMILE_CHANCE * SUN_SMILE_BUCKETS)
+# Versioned salt keeps the easter egg independent from terrain/catalog RNG.
+const SUN_SMILE_SEED_SALT := 0x510710
 const CONSTELLATION_LINE_STRENGTH := 0.16
 const MAX_MOON_STRENGTH := 3.8
 
@@ -36,6 +49,12 @@ uniform float moon_visibility = 1.0;
 uniform float moon_radius_sine = 0.008726535;
 uniform float moon_guard_cosine = 0.999902524;
 uniform vec3 sun_direction = vec3(0.0, -1.0, 0.0);
+uniform float sun_radius_sine = 0.01623000;
+uniform float sun_guard_cosine = 0.99947300;
+uniform float sun_disc_edge_softness = 0.04;
+uniform vec3 sun_face_up_direction = vec3(0.0, 0.0, 1.0);
+uniform float sun_smiley_enabled = 0.0;
+uniform float sun_visibility = 0.0;
 
 float ellipse_mask(vec2 p, vec2 center, vec2 radius, float softness) {
 	float d = length((p - center) / radius);
@@ -123,19 +142,58 @@ void sky() {
 				* moon_visibility * 0.19;
 		}
 
-		// Keep a compact physical sun after replacing ProceduralSkyMaterial.
-		if (daylight_amount > 0.001) {
+		// Keep a crisp procedural sun after replacing ProceduralSkyMaterial. Its
+		// visible diameter is independent from DirectionalLight3D, so changing the
+		// disc or its rare face never changes lighting direction, energy, or shadows.
+		if (sun_visibility > 0.001) {
 			vec3 sd = sun_direction;
 			float sun_facing = dot(view_dir, sd);
-			float sun_disc = smoothstep(0.999980780, 0.999988480,
-				sun_facing);
-			float sun_halo = smoothstep(0.999550034, 0.999982000,
-				sun_facing) * (1.0 - sun_disc);
-			float sun_height = clamp(sd.y, 0.0, 1.0);
-			vec3 sun_color = mix(vec3(1.0, 0.34, 0.09),
-				vec3(1.0, 0.92, 0.72), sun_height);
-			COLOR += sun_color * daylight_amount
-				* (sun_disc * 1.8 + sun_halo * 0.16);
+			if (sun_facing > sun_guard_cosine) {
+				// CPU-authored tangent basis remains continuous through noon
+				// and zenith; unlike projected world-up it cannot suddenly flip 180°.
+				vec3 sun_up = normalize(sun_face_up_direction);
+				vec3 sun_right = normalize(cross(sd, sun_up));
+				vec2 sun_uv = vec2(dot(view_dir, sun_right),
+					dot(view_dir, sun_up)) / max(sun_radius_sine, 0.0001);
+				float sun_radius = length(sun_uv);
+				// The authored diameter is the symmetric half-opacity contour at radius
+				// 1.0; softness expands inward/outward equally around that exact contour.
+				float sun_disc = 1.0 - smoothstep(
+					1.0 - sun_disc_edge_softness,
+					1.0 + sun_disc_edge_softness, sun_radius);
+				float sun_halo = (1.0 - smoothstep(1.0, 1.88, sun_radius))
+					* (1.0 - sun_disc);
+				float sun_height = clamp(sd.y, 0.0, 1.0);
+				vec3 sun_color = mix(vec3(1.0, 0.34, 0.09),
+					vec3(1.0, 0.92, 0.72), sun_height);
+				vec3 sun_surface = sun_color * 1.34;
+
+				// Exactly one tiny branch is added on the 30% of worlds with the
+				// easter egg, and only inside the guarded sun/halo pixels. Two warm
+				// eyes and an open, tooth-topped grin read as a clear ":D" face.
+				if (sun_smiley_enabled > 0.5 && sun_disc > 0.001) {
+					float left_eye = ellipse_mask(sun_uv, vec2(-0.30, 0.28),
+						vec2(0.105, 0.145), 0.28);
+					float right_eye = ellipse_mask(sun_uv, vec2(0.30, 0.28),
+						vec2(0.105, 0.145), 0.28);
+					float mouth = ellipse_mask(sun_uv, vec2(0.0, -0.20),
+						vec2(0.40, 0.30), 0.16);
+					mouth *= 1.0 - smoothstep(0.045, 0.12, sun_uv.y);
+					float face = max(max(left_eye, right_eye), mouth);
+					sun_surface = mix(sun_surface, vec3(0.24, 0.035, 0.008),
+						face * 0.96);
+					float teeth = mouth * smoothstep(-0.105, -0.035, sun_uv.y)
+						* (1.0 - smoothstep(0.015, 0.075, sun_uv.y))
+						* (1.0 - smoothstep(0.18, 0.32, abs(sun_uv.x)));
+					sun_surface = mix(sun_surface, vec3(1.0, 0.92, 0.68),
+						teeth * 0.92);
+				}
+
+				// One weather-derived visibility attenuates the disc, its face, and halo
+				// together, preventing a pasted-on sun during rain or snow.
+				COLOR = mix(COLOR, sun_surface, sun_disc * sun_visibility);
+				COLOR += sun_color * sun_halo * sun_visibility * 0.16;
+			}
 		}
 	}
 }
@@ -157,9 +215,15 @@ var _constellation_names := PackedStringArray([
 ])
 var _constellation_segment_count := 0
 var _catalog_signature := ""
+var _world_seed := 0
+var _sun_smiley_enabled := false
+var _sun_visibility := 0.0
 
 
-func _init() -> void:
+func _init(world_seed_override: Variant = null) -> void:
+	_world_seed = Gen.world_seed if world_seed_override == null \
+		else int(world_seed_override)
+	_sun_smiley_enabled = sun_smiley_for_seed(_world_seed)
 	if _shared_shader == null or _shared_atlas_texture == null:
 		_build_catalog()
 		_shader = Shader.new()
@@ -179,6 +243,13 @@ func _init() -> void:
 	var moon_radius := deg_to_rad(MOON_DIAMETER_DEGREES * 0.5)
 	material.set_shader_parameter("moon_radius_sine", sin(moon_radius))
 	material.set_shader_parameter("moon_guard_cosine", cos(moon_radius * 1.6))
+	var sun_radius := deg_to_rad(SUN_DIAMETER_DEGREES * 0.5)
+	material.set_shader_parameter("sun_radius_sine", sin(sun_radius))
+	material.set_shader_parameter("sun_guard_cosine", cos(sun_radius * 2.0))
+	material.set_shader_parameter("sun_disc_edge_softness",
+		SUN_DISC_EDGE_SOFTNESS)
+	material.set_shader_parameter("sun_smiley_enabled",
+		1.0 if _sun_smiley_enabled else 0.0)
 	update_palette(_palette.top, _palette.horizon,
 		_palette.ground_bottom, _palette.ground_horizon, 0.72)
 	update_celestials(1.0, 1.0, Vector3.UP, 0.0, 12.0, Vector3.DOWN)
@@ -209,6 +280,7 @@ func update_celestials(daylight: float, weather_visibility_v: float,
 	var day := clampf(daylight, 0.0, 1.0)
 	_night_visibility = pow(1.0 - day, 1.65)
 	_weather_visibility = pow(clampf(weather_visibility_v, 0.0, 1.0), 3.0)
+	_sun_visibility = day * _weather_visibility
 	var safe_moon_direction := moon_direction.normalized() \
 		if moon_direction.length_squared() > 0.0001 else Vector3.UP
 	# The current celestial orbit keeps the moon opposite the sun. Inferring that
@@ -218,6 +290,7 @@ func update_celestials(daylight: float, weather_visibility_v: float,
 	material.set_shader_parameter("daylight_amount", day)
 	material.set_shader_parameter("night_visibility", _night_visibility)
 	material.set_shader_parameter("weather_visibility", _weather_visibility)
+	material.set_shader_parameter("sun_visibility", _sun_visibility)
 	var sidereal_angle := wrapf(hour / 24.0 + 0.08, 0.0, 1.0) * TAU
 	material.set_shader_parameter("sidereal_rotation",
 		Vector2(cos(sidereal_angle), sin(sidereal_angle)))
@@ -225,6 +298,8 @@ func update_celestials(daylight: float, weather_visibility_v: float,
 	material.set_shader_parameter("moon_visibility",
 		clampf(moon_strength / MAX_MOON_STRENGTH, 0.0, 1.0))
 	material.set_shader_parameter("sun_direction", safe_sun_direction)
+	material.set_shader_parameter("sun_face_up_direction",
+		sun_face_up_for_direction(safe_sun_direction))
 
 
 func star_count() -> int:
@@ -249,6 +324,58 @@ func moon_angular_diameter_degrees() -> float:
 
 func moon_crater_count() -> int:
 	return MOON_CRATER_COUNT
+
+
+func sun_angular_diameter_degrees() -> float:
+	return SUN_DIAMETER_DEGREES
+
+
+## Apparent diameter is measured at the disc's symmetric half-opacity contour.
+func sun_apparent_diameter_degrees() -> float:
+	return SUN_DIAMETER_DEGREES
+
+
+func sun_diameter_scale() -> float:
+	return SUN_DIAMETER_SCALE
+
+
+func sun_smiley_enabled() -> bool:
+	return _sun_smiley_enabled
+
+
+func sun_world_seed() -> int:
+	return _world_seed
+
+
+func sun_visibility() -> float:
+	return _sun_visibility
+
+
+## Continuous orthonormal tangent on the entire visible upper hemisphere. This
+## is the Frisvad basis with Y as its pole, placing its only singularity at
+## straight down where the daylight-gated sun is not rendered.
+static func sun_face_up_for_direction(direction: Vector3) -> Vector3:
+	var safe_direction := direction.normalized() \
+		if direction.length_squared() > 0.0001 else Vector3.UP
+	if safe_direction.y < -0.9999:
+		return Vector3.BACK
+	var inverse_pole_distance := 1.0 / (1.0 + safe_direction.y)
+	var cross_term := -safe_direction.x * safe_direction.z \
+		* inverse_pole_distance
+	return Vector3(cross_term, -safe_direction.z,
+		1.0 - safe_direction.z * safe_direction.z \
+		* inverse_pole_distance).normalized()
+
+
+## Pure per-world selection: no global/client RNG state and no frame or clock
+## input. The two avalanche rounds distribute sequential shared seeds evenly,
+## while the chance-derived bucket threshold makes the authored probability 30%.
+static func sun_smiley_for_seed(seed_value: int) -> bool:
+	var mixed := (seed_value ^ SUN_SMILE_SEED_SALT) & 0x7fffffff
+	mixed = ((mixed ^ (mixed >> 16)) * 0x45d9f3b) & 0x7fffffff
+	mixed = ((mixed ^ (mixed >> 16)) * 0x45d9f3b) & 0x7fffffff
+	mixed = (mixed ^ (mixed >> 16)) & 0x7fffffff
+	return mixed % SUN_SMILE_BUCKETS < SUN_SMILE_THRESHOLD
 
 
 func night_visibility() -> float:

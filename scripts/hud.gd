@@ -23,6 +23,7 @@ var hint: Label
 var roster: Label
 var minimap: Minimap
 var crosshair: CombatCrosshair
+var hit_marker: HitMarker
 var aircraft_aim_reticle: AircraftAimReticle
 var spread_label: Label
 var camera_badge: Label
@@ -222,6 +223,18 @@ func _ready() -> void:
 	crosshair.offset_bottom = 110
 	add_child(crosshair)
 
+	hit_marker = HitMarker.new()
+	hit_marker.name = "HitMarker"
+	hit_marker.anchor_left = 0.5
+	hit_marker.anchor_right = 0.5
+	hit_marker.anchor_top = 0.5
+	hit_marker.anchor_bottom = 0.5
+	hit_marker.offset_left = -22
+	hit_marker.offset_right = 22
+	hit_marker.offset_top = -22
+	hit_marker.offset_bottom = 22
+	add_child(hit_marker)
+
 	aircraft_aim_reticle = AircraftAimReticle.new()
 	aircraft_aim_reticle.name = "AircraftAimReticle"
 	aircraft_aim_reticle.mouse_filter = Control.MOUSE_FILTER_IGNORE
@@ -335,8 +348,10 @@ func _ready() -> void:
 	move_child(damage_overlay, get_child_count() - 1)
 	# Diagnostics stay readable over the optical and damage layers while all
 	# normal combat information keeps the intended scope presentation.
+	move_child(hit_marker, get_child_count() - 1)
 	move_child(fps_label, get_child_count() - 1)
 	player.health_changed.connect(_on_health_changed)
+	player.bullet_hit_confirmed.connect(_on_bullet_hit_confirmed)
 	_last_health = player.health
 	if player.world is World:
 		player.world.headshot_scored.connect(_on_headshot_scored)
@@ -452,6 +467,11 @@ func _on_headshot_scored(source: Node3D, _target: Node3D, lethal: bool,
 	tween.tween_property(headshot_label, "scale", Vector2.ONE, 0.12)
 	tween.tween_property(headshot_label, "modulate:a", 0.0,
 		clampf(0.85 + distance * 0.003, 0.85, 1.15)).set_delay(0.32)
+
+
+func _on_bullet_hit_confirmed(headshot: bool, _damage: float) -> void:
+	if hit_marker:
+		hit_marker.flash(headshot)
 
 
 func show_camera_mode(mode: int) -> void:
