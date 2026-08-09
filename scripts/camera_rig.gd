@@ -166,6 +166,12 @@ func _apply_first_person(enabled: bool) -> void:
 
 
 func _apply_view_mode(mode: int) -> void:
+	# Vehicle presentation has two useful, readable anchors: a centred chase view
+	# directly behind the machine and the monkey's authored head/cockpit view.
+	# The on-foot selfie camera remains available, but is never carried into a
+	# driver seat where it points back through the body and reverses spatial cues.
+	if _vehicle_view and mode == ViewMode.FRONT:
+		mode = ViewMode.SHOULDER
 	var was_cockpit := _vehicle_view and first_person \
 		and is_instance_valid(_vehicle)
 	var was_relative_cockpit := was_cockpit \
@@ -189,7 +195,8 @@ func _apply_view_mode(mode: int) -> void:
 	if is_instance_valid(_camera_mount):
 		_camera_mount.position = _mount_base_position()
 	_arm.position = SHOULDER_OFFSET \
-		if view_mode == ViewMode.SHOULDER else Vector3.ZERO
+		if view_mode == ViewMode.SHOULDER and not _vehicle_view \
+		else Vector3.ZERO
 	if first_person:
 		_cam.cull_mask &= ~MonkeyRig.LOCAL_BODY_VISUAL_LAYER
 	else:
@@ -210,6 +217,12 @@ func _apply_view_mode(mode: int) -> void:
 
 
 func toggle_view() -> int:
+	if _vehicle_view:
+		preferred_view_mode = ViewMode.SHOULDER \
+			if first_person else ViewMode.FIRST_PERSON
+		preferred_first_person = preferred_view_mode == ViewMode.FIRST_PERSON
+		_apply_view_mode(preferred_view_mode)
+		return preferred_view_mode
 	preferred_view_mode = (preferred_view_mode + 1) % 3
 	preferred_first_person = preferred_view_mode == ViewMode.FIRST_PERSON
 	if not aiming and not _death_view:
@@ -319,9 +332,14 @@ func begin_vehicle_view(v: Vehicle) -> void:
 	# before declaring a vehicle view; otherwise releasing aim cannot undo the
 	# stale temporary cockpit because aiming has already been cleared.
 	aiming = false
-	_apply_view_mode(preferred_view_mode)
+	# FRONT is an on-foot composition view. Enter the matching centred chase mode
+	# instead; C then alternates only between chase and head/cockpit while seated.
+	var initial_vehicle_mode := ViewMode.FIRST_PERSON \
+		if preferred_view_mode == ViewMode.FIRST_PERSON else ViewMode.SHOULDER
+	_apply_view_mode(initial_vehicle_mode)
 	_vehicle = v
 	_vehicle_view = true
+	_apply_view_mode(initial_vehicle_mode)
 	var vehicle_basis := v.get_global_transform_interpolated().basis
 	# A jet's pursuit controller consumes the camera aim immediately. Start it
 	# on the aircraft nose instead of inheriting an unrelated on-foot/selfie aim
@@ -428,8 +446,15 @@ func _aircraft_control_aim_direction() -> Vector3:
 		return _look_direction(false)
 	if _aircraft_aim_tracks_nose:
 		return _vehicle.global_basis.z.normalized()
-	return _aircraft_direction_from_offset(
-		_aircraft_offset_for_direction(_aircraft_aim_world_direction))
+	var offset := _aircraft_offset_for_direction(_aircraft_aim_world_direction)
+	# Once the airframe has genuinely caught a commanded dot, hand it back to the
+	# live nose. Leaving a tiny fixed world target behind the jet made untouched
+	# controls keep correcting past centre and could grow into a self-induced flip.
+	if offset.length() < 0.018:
+		_aircraft_aim_tracks_nose = true
+		_aircraft_aim_world_direction = _vehicle.global_basis.z.normalized()
+		return _aircraft_aim_world_direction
+	return _aircraft_direction_from_offset(offset)
 
 
 ## Mode-matching view frame used by both flight control and the HUD dot. Chase
@@ -550,6 +575,11 @@ func apply_look(relative: Vector2) -> void:
 			+ normalized_delta).limit_length(1.0)
 		_aircraft_aim_world_direction = _aircraft_direction_from_offset(next_offset)
 		return
+	if _vehicle_view and not first_person:
+		# Ground/water chase cameras are heading-locked behind the machine. Cockpit
+		# freelook remains available from the monkey's head, while the fighter's
+		# separate bounded-dot branch above still accepts mouse flight commands.
+		return
 	var limits := pitch_limits()
 	if _is_relative_vehicle_cockpit():
 		_vehicle_local_yaw = wrapf(_vehicle_local_yaw \
@@ -606,17 +636,17 @@ func _process(dt: float) -> void:
 	elif _vehicle_view:
 		grounded = true
 		motion_velocity = _vehicle.linear_velocity
-	# Unlike on-foot freelook, the aircraft camera follows the airframe while
-	# the bounded HUD dot owns mouse steering. The chase view is horizon-stable;
-	# cockpit mode applies the jet's real roll below.
-	if _is_aircraft_vehicle_view():
-		var aircraft_forward := _vehicle.get_global_transform_interpolated() \
+	# Every chase camera follows the machine's forward axis instead of orbiting to
+	# a stale side/front angle. The fighter remains horizon-stable while its HUD dot
+	# owns mouse steering; cockpit modes apply the vehicle's real attitude below.
+	if _vehicle_view and not first_person:
+		var vehicle_forward := _vehicle.get_global_transform_interpolated() \
 			.basis.z.normalized()
 		# Retain the last heading through a vertical loop instead of letting atan2
 		# flip the chase camera by 180 degrees when horizontal length approaches 0.
-		if Vector2(aircraft_forward.x, aircraft_forward.z).length_squared() > 0.0004:
-			yaw = atan2(-aircraft_forward.x, -aircraft_forward.z)
-		pitch = clampf(asin(clampf(aircraft_forward.y, -1.0, 1.0)),
+		if Vector2(vehicle_forward.x, vehicle_forward.z).length_squared() > 0.0004:
+			yaw = atan2(-vehicle_forward.x, -vehicle_forward.z)
+		pitch = clampf(asin(clampf(vehicle_forward.y, -1.0, 1.0)),
 			-CAMERA_PITCH_LIMIT, CAMERA_PITCH_LIMIT)
 	var sp: float = motion_velocity.length()
 	var height := DEATH_FOLLOW_HEIGHT if _death_view \
@@ -691,7 +721,8 @@ func _process(dt: float) -> void:
 	_arm.spring_length = lerpf(_arm.spring_length, desired_arm,
 		1.0 - exp(-arm_rate * dt))
 	var desired_shoulder := SHOULDER_OFFSET \
-		if view_mode == ViewMode.SHOULDER and not _death_view else Vector3.ZERO
+		if view_mode == ViewMode.SHOULDER and not _death_view \
+			and not _vehicle_view else Vector3.ZERO
 	_arm.position = _arm.position.lerp(desired_shoulder,
 		1.0 - exp(-12.0 * dt))
 

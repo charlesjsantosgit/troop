@@ -15,6 +15,7 @@ const MONKEY_NAMES := ["Bongo", "Mango", "Kiko", "Chimpy", "Zuzu", "Coco", "Peel
 const RENDER_PIXEL_BUDGET := 1440000.0
 const MIN_RENDER_SCALE := 0.38
 const NETTEST_CYCLE_HOUR := 7.25
+const NETTEST_LIVE_CYCLE_HOUR := 21.5
 const NETTEST_CYCLE_TOLERANCE_HOURS := 0.20
 
 var world: World
@@ -59,6 +60,7 @@ func _ready() -> void:
 	if args.is_empty() or args[0] in ["solo", "host", "join", "online"]:
 		Settings.apply_saved_bindings()
 	_mouse_sensitivity = Settings.mouse_sensitivity
+	Settings.fps_limit_changed.connect(_on_fps_limit_changed)
 	get_viewport().size_changed.connect(_on_viewport_size_changed)
 	randomize()
 	Net.roster_changed.connect(_sync_puppets)
@@ -418,10 +420,14 @@ func _process(dt: float) -> void:
 	var refresh := DisplayServer.screen_get_refresh_rate()
 	if refresh <= 1.0:
 		refresh = 60.0
-	# Hold at least a 120 FPS render budget even on a 60 Hz panel for low input
-	# latency, then match high-refresh displays up to the 160 FPS cap. Only the
-	# 3D resolution steps down; menus and HUD remain pin-sharp.
+	# Hold at least a 120 FPS quality target on a 60 Hz panel for low input
+	# latency, then match high-refresh displays up to 160 FPS. This target only
+	# guides dynamic 3D resolution; it never limits rendering. Respect a lower
+	# player-selected cap so choosing 30/60/90 FPS does not needlessly reduce 3D
+	# resolution while the limiter is working as intended.
 	var target := clampf(refresh, 120.0, 160.0)
+	if Engine.max_fps > 0:
+		target = minf(target, float(Engine.max_fps))
 	var fps := float(Engine.get_frames_per_second())
 	if fps < target * 0.92:
 		_perf_low_samples += 1
@@ -440,6 +446,19 @@ func _process(dt: float) -> void:
 	elif _perf_high_samples >= 4 and _render_scale < _render_scale_ceiling:
 		_perf_high_samples = 0
 		_render_scale = minf(_render_scale_ceiling, _render_scale + 0.02)
+		get_viewport().scaling_3d_scale = _render_scale
+
+
+func _on_fps_limit_changed(_value: int) -> void:
+	# A new cap changes what "healthy" performance means. Discard samples taken
+	# under the old cap and immediately undo any resolution reduction they caused
+	# instead of making the player wait through the slow scale-up hysteresis.
+	_perf_warmup = 2.0
+	_perf_sample_t = 0.0
+	_perf_low_samples = 0
+	_perf_high_samples = 0
+	if world and is_instance_valid(world):
+		_render_scale = _render_scale_ceiling
 		get_viewport().scaling_3d_scale = _render_scale
 
 
@@ -2555,23 +2574,32 @@ func _do_shot(args: Array) -> void:
 		var strip_center := Gen.airstrip_center
 		var strip_direction := Vector2(sin(Gen.airstrip_heading),
 			cos(Gen.airstrip_heading))
-		var apron_spot := Gen.airstrip_apron_world()
 		var p := world.local_player
 		p.test_mode = true
 		p.set_fly_mode(true)
-		p.admin_teleport(Vector3(apron_spot.x, Gen.airstrip_elevation + 3.0,
-			apron_spot.y))
+		# Stream from the middle of the 125 m bay row so the diagnostic proves all
+		# six hangars/jets at once; the camera remains on the runway approach.
+		var shot_hangars := Gen.airstrip_hangar_layout()
+		var stream_spot: Vector3 = shot_hangars[floori(
+			float(shot_hangars.size()) * 0.5)].pos
+		p.admin_teleport(stream_spot + Vector3.UP * 3.0)
 		for i in range(420):
 			await get_tree().process_frame
 		if hud:
 			hud.visible = false
-		cam.fov = 62.0
+		cam.fov = 65.0
 		cam.far = 6000.0
-		var eye := strip_center - strip_direction * (Gen.AIRSTRIP_LENGTH * 0.72)
-		cam.global_position = Vector3(eye.x, Gen.airstrip_elevation + 60.0,
+		var strip_perpendicular := Vector2(strip_direction.y,
+			-strip_direction.x)
+		# A high diagonal approach view keeps the complete runway in frame while
+		# looking through all six open hangar fronts on its far shoulder.
+		var eye := strip_center - strip_direction * 620.0 \
+			- strip_perpendicular * 105.0
+		var focus := strip_center - strip_direction * 300.0 \
+			+ strip_perpendicular * 20.0
+		cam.global_position = Vector3(eye.x, Gen.airstrip_elevation + 50.0,
 			eye.y)
-		cam.look_at(Vector3(strip_center.x, Gen.airstrip_elevation,
-			strip_center.y))
+		cam.look_at(Vector3(focus.x, Gen.airstrip_elevation, focus.y))
 		print("AIRSTRIP center=(%.0f,%.0f) heading=%.2f elev=%.1f" % [
 			strip_center.x, strip_center.y, Gen.airstrip_heading,
 			Gen.airstrip_elevation])
@@ -2710,6 +2738,14 @@ func _nettest_host() -> void:
 	var p := world.local_player
 	p.test_mode = true
 	p.ti.dir = Vector2(0, -1)
+	# Register one dynamic vehicle before the client connects. The join fixture
+	# must receive it through cl_world and construct it immediately, proving the
+	# authoritative admin-delivery snapshot rather than only live state relay.
+	if not admin_controller.spawn_vehicle("bike") \
+			or world.vehicle_by_id("v:admin#1-1") == null:
+		print("NETTEST-HOST FAIL dynamic vehicle registration")
+		get_tree().quit(1)
+		return
 	print("NETTEST-HOST listening on %d" % Net.PORT)
 	var t := 0.0
 	var frames := 0
@@ -2720,6 +2756,8 @@ func _nettest_host() -> void:
 	var saw_remote_melee := false
 	var fired_host_sniper := false
 	var saw_host_sniper_bolt := false
+	var sent_shared_time := false
+	var host_shared_time_synced := false
 	var remote_sniper_packet: Array[bool] = [false, false]
 	var on_sniper_packet := func(shooter_id: int, _origin: Vector3,
 			velocity: Vector3, damage: float, headshot_rule: bool,
@@ -2746,6 +2784,16 @@ func _nettest_host() -> void:
 		var pups := world.puppets.values()
 		if pups.size() > 0:
 			var pu: Puppet = pups[0]
+			if not sent_shared_time and pu.state_count > 10:
+				# Exercise the same slash-command parser and AdminController path a
+				# multiplayer admin uses, not a test-only direct clock mutation.
+				admin_controller.run_command("/time %.2f" % NETTEST_LIVE_CYCLE_HOUR)
+				sent_shared_time = true
+			host_shared_time_synced = host_shared_time_synced \
+				or (_cycle_hour_distance(Net.authoritative_cycle_hour(),
+					NETTEST_LIVE_CYCLE_HOUR) <= NETTEST_CYCLE_TOLERANCE_HOURS \
+				and _cycle_hour_distance(world.time_of_day_hours,
+					NETTEST_LIVE_CYCLE_HOUR) <= NETTEST_CYCLE_TOLERANCE_HOURS)
 			# A roster entry can exist before the joining world has connected its
 			# bullet listener. Received gameplay states prove that setup is complete.
 			if not fired_host_sniper and frames > 15 and pu.state_count > 5:
@@ -2770,8 +2818,9 @@ func _nettest_host() -> void:
 					and saw_remote_sniper and saw_remote_sniper_bolt \
 					and remote_sniper_packet[0] and remote_sniper_packet[1] \
 					and fired_host_sniper and saw_host_sniper_bolt \
-					and saw_remote_melee:
-				print("NETTEST-HOST PASS states=%d moved=%.1f shotgun=true smg=true sniper_packet=true sniper_visual=true sniper_bolt=true host_sniper=true melee=true" % [
+					and saw_remote_melee and sent_shared_time \
+					and host_shared_time_synced:
+				print("NETTEST-HOST PASS states=%d moved=%.1f shotgun=true smg=true sniper_packet=true sniper_visual=true sniper_bolt=true host_sniper=true melee=true shared_time=true" % [
 					pu.state_count, pu._target.distance_to(pu.first_pos)])
 				# linger so the client can finish its own count before we vanish
 				var t2 := 0.0
@@ -2784,11 +2833,11 @@ func _nettest_host() -> void:
 				return
 	if Net.bullet_fired.is_connected(on_sniper_packet):
 		Net.bullet_fired.disconnect(on_sniper_packet)
-	print("NETTEST-HOST FAIL timeout (peers=%d shotgun=%s smg=%s sniper=%s packet=%s payload=%s remote_bolt=%s host_shot=%s host_bolt=%s melee=%s)" % [
+	print("NETTEST-HOST FAIL timeout (peers=%d shotgun=%s smg=%s sniper=%s packet=%s payload=%s remote_bolt=%s host_shot=%s host_bolt=%s melee=%s time_sent=%s time_synced=%s)" % [
 		world.puppets.size(), saw_remote_shotgun, saw_remote_smg,
 		saw_remote_sniper, remote_sniper_packet[0], remote_sniper_packet[1],
 		saw_remote_sniper_bolt, fired_host_sniper, saw_host_sniper_bolt,
-		saw_remote_melee])
+		saw_remote_melee, sent_shared_time, host_shared_time_synced])
 	get_tree().quit(1)
 
 
@@ -2809,6 +2858,10 @@ func _nettest_join(ip: String) -> void:
 		received_cycle_hour, NETTEST_CYCLE_HOUR) \
 		<= NETTEST_CYCLE_TOLERANCE_HOURS
 	_enter_world("JoinBot", Net.world_seed, 1)
+	if world.vehicle_by_id("v:admin#1-1") == null:
+		print("NETTEST-JOIN FAIL missing late-join dynamic vehicle snapshot")
+		get_tree().quit(1)
+		return
 	cycle_synced = cycle_synced and _cycle_hour_distance(
 		world.time_of_day_hours, Net.authoritative_cycle_hour()) \
 		<= NETTEST_CYCLE_TOLERANCE_HOURS
@@ -2826,6 +2879,7 @@ func _nettest_join(ip: String) -> void:
 	var saw_remote_sniper := false
 	var saw_remote_sniper_bolt := false
 	var sent_network_melee := false
+	var saw_live_cycle_update := false
 	var remote_sniper_packet: Array[bool] = [false, false]
 	var on_sniper_packet := func(shooter_id: int, _origin: Vector3,
 			velocity: Vector3, damage: float, headshot_rule: bool,
@@ -2841,6 +2895,11 @@ func _nettest_join(ip: String) -> void:
 		await get_tree().process_frame
 		t += get_process_delta_time()
 		frames += 1
+		saw_live_cycle_update = saw_live_cycle_update \
+			or (_cycle_hour_distance(Net.authoritative_cycle_hour(),
+				NETTEST_LIVE_CYCLE_HOUR) <= NETTEST_CYCLE_TOLERANCE_HOURS \
+			and _cycle_hour_distance(world.time_of_day_hours,
+				NETTEST_LIVE_CYCLE_HOUR) <= NETTEST_CYCLE_TOLERANCE_HOURS)
 		if frames % 75 == 0:
 			p.ti.jump_just = true
 		if p.sniper and p.sniper.is_bolt_cycling() \
@@ -2891,8 +2950,8 @@ func _nettest_join(ip: String) -> void:
 				and saw_local_sniper_bolt and saw_remote_sniper \
 				and saw_remote_sniper_bolt and remote_sniper_packet[0] \
 				and remote_sniper_packet[1] and sent_network_melee \
-				and cycle_synced:
-			print("NETTEST-JOIN PASS states=%d shotgun=%s smg=%s sniper=true local_bolt=true remote_packet=true remote_sniper=true remote_bolt=true melee=%s cycle_synced=true phase=%.3f" % [
+				and cycle_synced and saw_live_cycle_update:
+			print("NETTEST-JOIN PASS states=%d shotgun=%s smg=%s sniper=true local_bolt=true remote_packet=true remote_sniper=true remote_bolt=true melee=%s cycle_synced=true live_time=true dynamic_vehicle=true phase=%.3f" % [
 				pups[0].state_count, fired_network_shotgun, fired_network_smg,
 				sent_network_melee, received_cycle_hour])
 			# keep driving briefly so the host reaches its own count too
@@ -2906,11 +2965,12 @@ func _nettest_join(ip: String) -> void:
 			return
 	if Net.bullet_fired.is_connected(on_sniper_packet):
 		Net.bullet_fired.disconnect(on_sniper_packet)
-	print("NETTEST-JOIN FAIL timeout (peers=%d shotgun=%s smg=%s sniper=%s local_bolt=%s remote_sniper=%s packet=%s payload=%s remote_bolt=%s melee=%s cycle_synced=%s phase=%.3f)" % [
+	print("NETTEST-JOIN FAIL timeout (peers=%d shotgun=%s smg=%s sniper=%s local_bolt=%s remote_sniper=%s packet=%s payload=%s remote_bolt=%s melee=%s cycle_synced=%s live_time=%s phase=%.3f)" % [
 		world.puppets.size(), fired_network_shotgun, fired_network_smg,
 		fired_network_sniper, saw_local_sniper_bolt, saw_remote_sniper,
 		remote_sniper_packet[0], remote_sniper_packet[1],
 		saw_remote_sniper_bolt, sent_network_melee, cycle_synced,
+		saw_live_cycle_update,
 		received_cycle_hour])
 	get_tree().quit(1)
 

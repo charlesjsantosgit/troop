@@ -8,14 +8,31 @@ extends Node
 
 signal volume_changed(channel: StringName, value: float)
 signal mouse_sensitivity_changed(value: float)
+signal fps_limit_changed(value: int)
 signal binding_changed(action: StringName, label: String)
 signal bindings_reset
 
 const CONFIG_PATH := "user://settings.cfg"
-const CONFIG_VERSION := 2
+const CONFIG_VERSION := 3
 const MIN_MOUSE_SENSITIVITY := 0.25
 const MAX_MOUSE_SENSITIVITY := 2.5
 const MIN_AUDIBLE_LINEAR := 0.0001
+const DEFAULT_FPS_LIMIT := 160
+const MIN_CUSTOM_FPS_LIMIT := 30
+const MAX_CUSTOM_FPS_LIMIT := 1000
+const FPS_LIMIT_PRESETS: Array[int] = [
+	0,
+	480,
+	360,
+	240,
+	165,
+	160,
+	144,
+	120,
+	90,
+	60,
+	30,
+]
 
 const BINDING_ACTIONS: Array[StringName] = [
 	&"move_fwd",
@@ -88,6 +105,11 @@ var mouse_sensitivity := 1.0
 var player_name := ""
 var minimap_mode := 0
 var minimap_zoom := 1.0
+## Zero is Godot's native unlimited value. Custom mode is stored separately so
+## a hand-entered value such as 144 remains visibly Custom after a restart.
+var fps_limit := DEFAULT_FPS_LIMIT
+var custom_fps_limit := DEFAULT_FPS_LIMIT
+var fps_limit_custom := false
 
 var _bindings: Dictionary = {}
 
@@ -97,6 +119,12 @@ func _init() -> void:
 	_load_from_disk()
 	_ensure_audio_buses()
 	_apply_all_volumes()
+	# CLI performance and fixture runs deliberately control their own render
+	# budget. Every normal player-facing launch receives the saved cap here,
+	# before the first gameplay frame.
+	var args := OS.get_cmdline_user_args()
+	if args.is_empty() or args[0] in ["solo", "host", "join", "online"]:
+		apply_graphics_settings()
 
 
 ## Sets a 0..1 linear volume and applies it to its AudioServer bus immediately.
@@ -144,6 +172,34 @@ func set_mouse_sensitivity(value: float) -> void:
 		return
 	mouse_sensitivity = clampf(value, MIN_MOUSE_SENSITIVITY, MAX_MOUSE_SENSITIVITY)
 	mouse_sensitivity_changed.emit(mouse_sensitivity)
+
+
+## Applies one of the visible presets immediately. A value of zero is unlimited;
+## arbitrary in-range values belong to set_custom_fps_limit instead.
+func set_fps_limit(value: int) -> bool:
+	if not FPS_LIMIT_PRESETS.has(value):
+		return false
+	fps_limit = value
+	fps_limit_custom = false
+	apply_graphics_settings()
+	fps_limit_changed.emit(fps_limit)
+	return true
+
+
+## Applies an exact user-entered cap without rounding it to a nearby preset.
+func set_custom_fps_limit(value: int) -> bool:
+	if value < MIN_CUSTOM_FPS_LIMIT or value > MAX_CUSTOM_FPS_LIMIT:
+		return false
+	custom_fps_limit = value
+	fps_limit = value
+	fps_limit_custom = true
+	apply_graphics_settings()
+	fps_limit_changed.emit(fps_limit)
+	return true
+
+
+func apply_graphics_settings() -> void:
+	Engine.max_fps = fps_limit
 
 
 ## Replaces the primary keyboard/mouse event for every registered action while
@@ -211,6 +267,9 @@ func save() -> Error:
 	config.set_value("profile", "name", player_name)
 	config.set_value("minimap", "mode", minimap_mode)
 	config.set_value("minimap", "zoom", minimap_zoom)
+	config.set_value("graphics", "fps_limit", fps_limit)
+	config.set_value("graphics", "fps_limit_custom", fps_limit_custom)
+	config.set_value("graphics", "custom_fps_limit", custom_fps_limit)
 	for action in BINDING_ACTIONS:
 		var event := _bindings.get(action) as InputEvent
 		if event != null:
@@ -235,6 +294,36 @@ func _load_from_disk() -> void:
 	minimap_mode = clampi(int(config.get_value("minimap", "mode", 0)), 0, 2)
 	minimap_zoom = clampf(float(config.get_value("minimap", "zoom", 1.0)),
 		0.4, 2.6)
+	var loaded_custom_limit := int(config.get_value("graphics",
+		"custom_fps_limit", custom_fps_limit))
+	var loaded_fps_limit := int(config.get_value("graphics", "fps_limit",
+		fps_limit))
+	var loaded_custom_mode := bool(config.get_value("graphics",
+		"fps_limit_custom", false))
+	var valid_loaded_custom := loaded_custom_limit >= MIN_CUSTOM_FPS_LIMIT \
+		and loaded_custom_limit <= MAX_CUSTOM_FPS_LIMIT
+	if loaded_custom_mode and loaded_fps_limit != 0:
+		# Custom is authoritative when a partially-edited config contains both
+		# values. Recover from an invalid custom field using the applied field.
+		if valid_loaded_custom:
+			custom_fps_limit = loaded_custom_limit
+			fps_limit = custom_fps_limit
+			fps_limit_custom = true
+		elif _valid_fps_limit(loaded_fps_limit):
+			custom_fps_limit = loaded_fps_limit
+			fps_limit = loaded_fps_limit
+			fps_limit_custom = true
+	elif FPS_LIMIT_PRESETS.has(loaded_fps_limit):
+		fps_limit = loaded_fps_limit
+		fps_limit_custom = false
+		if valid_loaded_custom:
+			custom_fps_limit = loaded_custom_limit
+	elif _valid_fps_limit(loaded_fps_limit):
+		# Normalize hand-edited or older non-preset caps into Custom. This keeps
+		# the numeric editor visible and prevents a hidden value from being active.
+		custom_fps_limit = loaded_fps_limit
+		fps_limit = loaded_fps_limit
+		fps_limit_custom = true
 
 	# Applying stored values through the same swap rule makes partially-written or
 	# hand-edited config files deterministic and conflict-free.
@@ -252,6 +341,11 @@ func _read_linear_volume(config: ConfigFile, key: String, fallback: float) -> fl
 	if is_nan(value) or is_inf(value):
 		return fallback
 	return clampf(value, 0.0, 1.0)
+
+
+func _valid_fps_limit(value: int) -> bool:
+	return value == 0 or (value >= MIN_CUSTOM_FPS_LIMIT \
+		and value <= MAX_CUSTOM_FPS_LIMIT)
 
 
 func _restore_default_bindings() -> void:

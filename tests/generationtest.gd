@@ -40,6 +40,130 @@ func run() -> void:
 	_check(structures_deterministic,
 		"supply hut position, loot type and chest contents are deterministic")
 
+	# The road graph is pure seeded generation: it must survive a full setup
+	# repeat byte-for-byte and connect the arena/motor pool hub to useful vehicle
+	# destinations without any network messages or chunk-order dependence.
+	var road_routes_a: Array = Gen.road_routes()
+	var relief_probes := PackedVector2Array([
+		Vector2(312.0, -264.0), Vector2(-528.0, 456.0),
+		Vector2(744.0, 192.0), Vector2(-816.0, -336.0),
+	])
+	var relief_heights_a := PackedFloat32Array()
+	for probe in relief_probes:
+		relief_heights_a.append(Gen.height(probe.x, probe.y))
+	Gen.setup(Gen.world_seed)
+	var road_routes_b: Array = Gen.road_routes()
+	var roads_repeat_exact := str(road_routes_a) == str(road_routes_b)
+	for i in range(relief_probes.size()):
+		roads_repeat_exact = roads_repeat_exact and is_equal_approx(
+			relief_heights_a[i], Gen.height(relief_probes[i].x,
+				relief_probes[i].y))
+	_check(roads_repeat_exact,
+		"road graph, profiles, and hill elevations repeat exactly from the world seed")
+
+	var route_ids := {}
+	var all_routes_share_hub := true
+	var airfield_connected := false
+	var lake_connected := not Gen.boat_dock_valid
+	var road_profiles_safe := true
+	var road_surfaces_safe := true
+	var road_chunks := {}
+	var hub := Vector2(43.0, 4.0)
+	for route_value in road_routes_b:
+		var route: Dictionary = route_value
+		route_ids[str(route.id)] = true
+		var points: PackedVector2Array = route.points
+		var elevations: PackedFloat32Array = route.elevations
+		all_routes_share_hub = all_routes_share_hub and not points.is_empty() \
+			and (points[0].distance_to(hub) < 0.01 \
+				or points[points.size() - 1].distance_to(hub) < 0.01)
+		if str(route.id) == "motorpool_airfield":
+			airfield_connected = points[points.size() - 1].distance_to(
+				Gen.airstrip_apron_world()) < 0.01
+		elif str(route.id) == "motorpool_lake":
+			var dock := Vector2(Gen.boat_dock_pos.x, Gen.boat_dock_pos.z)
+			lake_connected = points[points.size() - 1].distance_to(dock) < 52.0
+		for i in range(points.size()):
+			var sample: Dictionary = Gen.road_surface_sample(points[i].x,
+				points[i].y)
+			var road_h := Gen.height(points[i].x, points[i].y)
+			var road_color := Gen.ground_color(road_h, points[i].x,
+				points[i].y)
+			road_surfaces_safe = road_surfaces_safe \
+				and float(sample.grade) > 0.99 \
+				and road_h > Gen.WATER_Y + 0.70 \
+				and road_color.r > road_color.g * 1.12
+			var key := Vector2i(floori(points[i].x / Gen.CHUNK),
+				floori(points[i].y / Gen.CHUNK))
+			for dx in range(-1, 2):
+				for dz in range(-1, 2):
+					road_chunks[key + Vector2i(dx, dz)] = true
+			if i == 0:
+				continue
+			var run := points[i].distance_to(points[i - 1])
+			var profile_grade := absf(elevations[i] - elevations[i - 1]) \
+				/ maxf(run, 0.1)
+			road_profiles_safe = road_profiles_safe \
+				and profile_grade <= Gen.ROAD_MAX_GRADE + 0.0005
+	_check(route_ids.has("arena_motorpool") \
+		and route_ids.has("motorpool_airfield") and all_routes_share_hub \
+		and airfield_connected and lake_connected,
+		"connected dirt roads join the arena and motor pool to the airfield and lake",
+		"routes=%s airfield=%s lake=%s" % [route_ids.keys(),
+			str(airfield_connected), str(lake_connected)])
+	_check(road_profiles_safe and road_surfaces_safe,
+		"packed road crowns stay dry, visible, and at or below an 8.5 percent grade")
+
+	var road_clear := true
+	for road_key in road_chunks:
+		var road_layout: Dictionary = Gen.chunk_layout(road_key.x, road_key.y)
+		for tree in road_layout.trees:
+			road_clear = road_clear and not Gen.point_on_road(tree.pos.x,
+				tree.pos.z)
+		for rock in road_layout.rocks:
+			road_clear = road_clear and not Gen.point_on_road(rock.pos.x,
+				rock.pos.z)
+		for plant in road_layout.foliage:
+			road_clear = road_clear and not Gen.point_on_road(plant.pos.x,
+				plant.pos.z)
+		for structure_value in road_layout.structures:
+			var structure: Dictionary = structure_value
+			if bool(structure.get("arena", false)):
+				continue
+			var structure_pos: Vector3 = structure.pos
+			road_clear = road_clear and not Gen.point_in_road_clearance(
+				structure_pos.x, structure_pos.z,
+				float(structure.get("clearance", 0.0)))
+	_check(road_clear,
+		"trees, rocks, understory, and wilderness huts stay off every road surface")
+
+	# Measure rolling relief away from lakes, authored flat zones, roads, and the
+	# existing mountain-range layer. This isolates the strengthened ordinary
+	# jungle hills instead of letting one mountain peak satisfy the assertion.
+	var rolling_min := INF
+	var rolling_max := -INF
+	var rolling_samples := 0
+	for x in range(-960, 961, 72):
+		for z in range(-960, 961, 72):
+			var fx := float(x)
+			var fz := float(z)
+			if Vector2(fx, fz).length() < 150.0 \
+					or Gen.lake_influence(fx, fz) > 0.12 \
+					or Gen.mountain_influence(fx, fz) > 0.10 \
+					or Gen.point_on_airstrip(fx, fz) \
+					or Gen.point_on_road(fx, fz):
+				continue
+			var rolling_h := Gen.height(fx, fz)
+			rolling_min = minf(rolling_min, rolling_h)
+			rolling_max = maxf(rolling_max, rolling_h)
+			rolling_samples += 1
+	var rolling_relief := rolling_max - rolling_min
+	_check(Gen.BASE_RELIEF_AMPLITUDE >= 10.0 \
+		and Gen.ROLLING_HILL_AMPLITUDE >= 7.5 \
+		and rolling_samples > 80 and rolling_relief >= 18.0,
+		"ordinary jungle now has broad, deterministic rolling hills",
+		"relief=%.2fm samples=%d" % [rolling_relief, rolling_samples])
+
 	var arena_a: Dictionary = Gen.arena_layout()
 	var arena_b: Dictionary = Gen.arena_layout()
 	var arena_blueprint_ok := arena_a == arena_b \

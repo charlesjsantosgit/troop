@@ -33,12 +33,26 @@ func _ready() -> void:
 	style.set_corner_radius_all(14)
 	style.set_content_margin_all(18)
 	panel.add_theme_stylebox_override("panel", style)
-	panel.custom_minimum_size = Vector2(560, 0)
+	var viewport_size := get_viewport_rect().size
+	panel.custom_minimum_size = Vector2(
+		minf(980.0, maxf(560.0, viewport_size.x - 64.0)),
+		minf(820.0, maxf(360.0, viewport_size.y - 48.0)))
 	center.add_child(panel)
 
+	var shell := VBoxContainer.new()
+	shell.add_theme_constant_override("separation", 10)
+	panel.add_child(shell)
+	var body_scroll := ScrollContainer.new()
+	body_scroll.name = "AdminBodyScroll"
+	body_scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	body_scroll.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	body_scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_AUTO
+	body_scroll.vertical_scroll_mode = ScrollContainer.SCROLL_MODE_AUTO
+	shell.add_child(body_scroll)
 	var column := VBoxContainer.new()
 	column.add_theme_constant_override("separation", 10)
-	panel.add_child(column)
+	column.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	body_scroll.add_child(column)
 
 	column.add_child(_header("🛠 ADMIN · CANOPY CONTROL"))
 	var hint := Label.new()
@@ -50,6 +64,7 @@ func _ready() -> void:
 	column.add_child(_section("PLAYERS"))
 	_players_box = VBoxContainer.new()
 	_players_box.add_theme_constant_override("separation", 4)
+	_players_box.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	column.add_child(_players_box)
 
 	column.add_child(_section("SPAWN A MONKEY  ·  solo / debug world"))
@@ -133,9 +148,11 @@ func _ready() -> void:
 	close.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	close.pressed.connect(func() -> void: visible = false)
 	footer_row.add_child(close)
-	column.add_child(footer_row)
+	shell.add_child(footer_row)
 
 	visibility_changed.connect(_on_visibility_changed)
+	Net.admin_roster_changed.connect(_on_admin_roster_changed)
+	Net.admin_changed.connect(_on_admin_changed)
 
 
 func _on_visibility_changed() -> void:
@@ -144,6 +161,18 @@ func _on_visibility_changed() -> void:
 		Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
 	elif is_inside_tree() and DisplayServer.get_name() != "headless":
 		Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
+
+
+func _on_admin_roster_changed() -> void:
+	if visible and is_inside_tree():
+		_rebuild_players()
+
+
+func _on_admin_changed(enabled: bool) -> void:
+	if not enabled:
+		visible = false
+	elif visible and is_inside_tree():
+		_rebuild_players()
 
 
 func _rebuild_players() -> void:
@@ -166,13 +195,17 @@ func _player_row(peer_id: int) -> HBoxContainer:
 	var row := HBoxContainer.new()
 	row.add_theme_constant_override("separation", 5)
 	var is_self := peer_id == Net.local_id()
+	var is_peer_admin := Net.admin_peers.has(peer_id)
 	var name_label := Label.new()
-	name_label.text = str(Net.names.get(peer_id, peer_id)) \
-		+ (" (you)" if is_self else "")
-	name_label.custom_minimum_size = Vector2(130, 0)
+	name_label.text = "%s  ·  #%d" % [str(Net.names.get(peer_id, peer_id)),
+		peer_id] \
+		+ (" (you)" if is_self else "") \
+		+ (" · ADMIN" if is_peer_admin else "")
+	name_label.custom_minimum_size = Vector2(180, 0)
 	name_label.add_theme_font_size_override("font_size", 14)
 	name_label.add_theme_color_override("font_color",
-		Color(1.0, 0.9, 0.55) if is_self else Color(0.92, 0.96, 0.9))
+		Color(1.0, 0.9, 0.55) if is_self or is_peer_admin \
+		else Color(0.92, 0.96, 0.9))
 	row.add_child(name_label)
 
 	var kill := _button("KO")
@@ -187,6 +220,13 @@ func _player_row(peer_id: int) -> HBoxContainer:
 			controller.give_ammo(peer_id, kind, [24, 12, 60, 15][kind]))
 	row.add_child(ammo)
 	if not is_self:
+		var admin := _button("REVOKE ADMIN" if is_peer_admin else "MAKE ADMIN")
+		admin.pressed.connect(func() -> void:
+			if is_peer_admin:
+				controller.revoke_admin(peer_id)
+			else:
+				controller.grant_admin(peer_id))
+		row.add_child(admin)
 		var tp := _button("GO TO")
 		tp.pressed.connect(func() -> void:
 			controller.teleport_to_player(peer_id))

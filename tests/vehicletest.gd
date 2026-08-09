@@ -81,6 +81,8 @@ func reset_bike_control_fixture(bike: Motorcycle) -> void:
 	bike.wheelie_remaining = 0.0
 	bike._wheelie_elapsed = 0.0
 	bike._wheelie_cooldown = 0.0
+	bike._wheelie_crash_emitted = false
+	bike._wheelie_overpower = 0.0
 	bike.engine.gear = 1
 	bike.engine.rpm = bike.engine.idle_rpm
 	bike.engine._shift_cooldown = 0.0
@@ -421,6 +423,91 @@ func run(main) -> void:
 			encoded_jet_aux.z, jet.spool, jet.afterburner, jet._remote_rpm,
 			jet_outlet.boost, jet_outlet.target_intensity,
 			jet._nozzle_glow.albedo_color.a])
+	# The same remotely controlled node must remain a visible/audible contact at
+	# ten miles without retaining its detailed close mesh or particle budget.
+	jet._update_distance_lod(FighterJet.TEN_MILES_METERS)
+	var jet_detail_body := jet.get_node_or_null("Body") as Node3D
+	var far_silhouette: MeshInstance3D = jet._far_silhouette
+	check("remote jet switches to one cheap ten-mile aircraft silhouette",
+		jet.remote_controlled and jet_detail_body != null \
+			and not jet_detail_body.visible \
+			and far_silhouette != null and far_silhouette.visible \
+			and far_silhouette.get_parent() == jet \
+			and far_silhouette.mesh.get_surface_count() == 1 \
+			and far_silhouette.scale.x > 1.7 \
+			and far_silhouette.cast_shadow \
+				== GeometryInstance3D.SHADOW_CASTING_SETTING_OFF \
+			and far_silhouette.ignore_occlusion_culling,
+		"body=%s far=%s scale=%.2f surfaces=%d" % [
+			jet_detail_body.visible if jet_detail_body else true,
+			far_silhouette.visible if far_silhouette else false,
+			far_silhouette.scale.x if far_silhouette else 0.0,
+			far_silhouette.mesh.get_surface_count() if far_silhouette else 0])
+	var ten_mile_spl := FighterJet.turbine_spl_at_distance(
+		FighterJet.TEN_MILES_METERS)
+	var ten_mile_game_db := FighterJet.turbine_game_volume_db(
+		FighterJet.SAFE_AUDIO_MAX_DB, FighterJet.TEN_MILES_METERS)
+	check("130 dB jet source remains faint and safely clamped at ten miles",
+		absf(ten_mile_spl - 45.87) < 0.25 \
+			and ten_mile_game_db > -44.0 and ten_mile_game_db < -39.0 \
+			and jet._engine_player.max_distance \
+				> FighterJet.TEN_MILES_METERS \
+			and jet._burner_player.max_distance \
+				> FighterJet.TEN_MILES_METERS \
+			and jet._engine_player.max_db <= FighterJet.SAFE_AUDIO_MAX_DB \
+			and jet._burner_player.max_db <= FighterJet.SAFE_AUDIO_MAX_DB \
+			and jet._engine_player.attenuation_model \
+				== AudioStreamPlayer3D.ATTENUATION_DISABLED \
+			and jet._burner_player.attenuation_model \
+				== AudioStreamPlayer3D.ATTENUATION_DISABLED,
+		"spl=%.2f game=%.2f engine_range=%.0f burner_range=%.0f" % [
+			ten_mile_spl, ten_mile_game_db, jet._engine_player.max_distance,
+			jet._burner_player.max_distance])
+	var offline_camera_far := World.gameplay_camera_far_distance(
+		Gen.VIEW_BASE_DISTANCE, false)
+	var online_camera_far := World.gameplay_camera_far_distance(
+		Gen.VIEW_BASE_DISTANCE, true)
+	check("multiplayer camera sees ten-mile jets without expanding terrain",
+		offline_camera_far < FighterJet.TEN_MILES_METERS \
+			and online_camera_far >= FighterJet.LONG_RANGE_CAMERA_FAR \
+			and online_camera_far <= 30000.0 \
+			and is_equal_approx(Gen.VIEW_BASE_DISTANCE, 2200.0),
+		"offline=%.0f online=%.0f stream=%.0f" % [offline_camera_far,
+			online_camera_far, Gen.VIEW_BASE_DISTANCE])
+	# Exercise World's on-demand multiplayer path too: a client that never
+	# streamed this aircraft's origin still creates the remote jet from its first
+	# state packet, at the packet position, with the same far presentation.
+	const FAR_REMOTE_JET_ID := "v:far#3"
+	var far_remote_seat: Vector3 = p.cam.cam_pos() \
+		+ Vector3(0.0, 950.0, -FighterJet.TEN_MILES_METERS)
+	w.apply_remote_vehicle_state(79, Vehicle.Kind.JET, FAR_REMOTE_JET_ID,
+		far_remote_seat, 0.0, Vector3(0.0, 0.0, 0.88),
+		Vector3(0.0, 0.0, -180.0))
+	var spawned_far_jet: FighterJet = w.vehicle_by_id(
+		FAR_REMOTE_JET_ID) as FighterJet
+	var spawned_far_distance: float = spawned_far_jet.global_position.distance_to(
+		p.cam.cam_pos()) if spawned_far_jet else 0.0
+	if spawned_far_jet:
+		spawned_far_jet._update_distance_lod(spawned_far_distance)
+	check("first remote state spawns a ten-mile jet as a visible contact",
+		spawned_far_jet != null and spawned_far_jet.remote_controlled \
+			and spawned_far_jet.occupied_by_peer == 79 \
+			and spawned_far_distance > FighterJet.TEN_MILES_METERS \
+			and spawned_far_jet._far_silhouette.visible \
+			and not spawned_far_jet._detail_body.visible,
+		"spawned=%s remote=%s peer=%d distance=%.0f far=%s" % [
+			spawned_far_jet != null,
+			spawned_far_jet.remote_controlled if spawned_far_jet else false,
+			spawned_far_jet.occupied_by_peer if spawned_far_jet else 0,
+			spawned_far_distance,
+			spawned_far_jet._far_silhouette.visible \
+				if spawned_far_jet else false])
+	if spawned_far_jet:
+		w.vehicles.erase(FAR_REMOTE_JET_ID)
+		spawned_far_jet.queue_free()
+	jet._update_distance_lod(10.0)
+	check("near jet restores its detailed model and hides the far marker",
+		jet_detail_body.visible and not far_silhouette.visible)
 	jet.set_remote_controlled(false)
 	jet.spool = 0.0
 	jet.afterburner = false
@@ -527,6 +614,12 @@ func run(main) -> void:
 		"intensity=%.3f" % jeep_idle_exhaust)
 	check("jeep rider is planted on authored seat and controls",
 		rider_contract_ok(p, jeep))
+	check("American Jeep uses the vehicle-left driver seat and steering wheel",
+		jeep.seat_offset.x > 0.30 and jeep.rider_root_offset.x > 0.30 \
+			and jeep.fp_camera_offset.x > 0.30 \
+			and jeep._steering_wheel.position.x > 0.30,
+		"seat=%s root=%s wheel=%s" % [jeep.seat_offset,
+			jeep.rider_root_offset, jeep._steering_wheel.position])
 	main.hud._update_vehicle_cluster()
 	check("jeep has an accurate analog automatic-transmission cluster",
 		jeep.engine.auto_shift and main.hud.vehicle_tachometer.visible \
@@ -551,6 +644,36 @@ func run(main) -> void:
 	p.cam._apply_view_mode(CameraRig.ViewMode.SHOULDER)
 	check("leaving a vehicle cockpit restores a level chase horizon",
 		p.cam.global_basis.y.dot(Vector3.UP) > 0.999)
+	p.cam._process(1.0 / 60.0)
+	var jeep_chase_offset: Vector3 = p.cam.cam_pos() - jeep.seat_render_global()
+	check("vehicle chase camera is centered directly behind the machine",
+		absf(p.cam._arm.position.x) < 0.01 \
+			and jeep_chase_offset.normalized().dot(-jeep.global_basis.z) > 0.70,
+		"arm=%s offset=%s" % [p.cam._arm.position, jeep_chase_offset])
+	p.cam._apply_view_mode(CameraRig.ViewMode.FRONT)
+	var vehicle_front_blocked: bool = \
+		p.cam.view_mode == CameraRig.ViewMode.SHOULDER
+	var first_vehicle_cycle: int = p.cam.toggle_view()
+	# Camera following is intentionally smoothed; advance one representative
+	# render hitch window so this checks the final authored anchor, not the first
+	# interpolation sample after switching modes.
+	p.cam._process(0.25)
+	var expected_head: Vector3 = jeep.get_global_transform_interpolated() \
+		* jeep.fp_camera_offset
+	var head_camera_error: float = p.cam.cam_pos().distance_to(expected_head)
+	var second_vehicle_cycle: int = p.cam.toggle_view()
+	check("vehicle camera cycles only between centered chase and monkey head",
+		vehicle_front_blocked \
+			and first_vehicle_cycle == CameraRig.ViewMode.FIRST_PERSON \
+			and second_vehicle_cycle == CameraRig.ViewMode.SHOULDER \
+			and head_camera_error < 0.18 and not p.cam.front_view,
+		"blocked=%s cycles=%d/%d head_error=%.3f" % [
+			str(vehicle_front_blocked), first_vehicle_cycle, second_vehicle_cycle,
+			head_camera_error])
+	main.hud._process(0.0)
+	check("vehicle HUD names the centered chase/head camera pair",
+		main.hud.camera_badge.text.contains("CENTERED CHASE") \
+			and main.hud._vehicle_hint(jeep).contains("chase/head"))
 	jeep.global_basis = parked_jeep_basis
 	jeep.reset_physics_interpolation()
 
@@ -699,6 +822,8 @@ func run(main) -> void:
 
 	# --- dismount ------------------------------------------------------------
 	await dismount(p)
+	var jeep_park_position: Vector3 = jeep.global_position
+	var jeep_park_basis: Basis = jeep.global_basis
 	await sim(45)
 	check("E dismounts and restores the monkey",
 		p.vehicle == null and not p._collision_shape.disabled
@@ -706,10 +831,23 @@ func run(main) -> void:
 	check("released jeep parks with its brakes on",
 		jeep.driver == null and jeep.input_brake > 0.99
 		and jeep.input_handbrake
-		and Vector2(jeep.linear_velocity.x, jeep.linear_velocity.z).length() < 0.8
-		and absf(jeep.linear_velocity.y) < 3.5,
+		and jeep.freeze and jeep.sleeping \
+		and jeep.global_position.distance_to(jeep_park_position) < 0.015 \
+		and jeep.global_basis.y.dot(jeep_park_basis.y) > 0.999 \
+		and jeep.linear_velocity.length() < 0.01 \
+		and jeep.angular_velocity.length() < 0.01,
 		"brake=%.2f handbrake=%s velocity=%s" % [jeep.input_brake,
 			str(jeep.input_handbrake), jeep.linear_velocity])
+	var replicated_jeep_rest := [jeep.global_position, jeep.yaw_angle(),
+		jeep.state_aux().x, jeep.state_aux().y]
+	jeep.apply_rest_state(replicated_jeep_rest[0], replicated_jeep_rest[1],
+		replicated_jeep_rest[2], replicated_jeep_rest[3])
+	await sim(8)
+	check("replicated Jeep rest state rebuilds the same no-pop parking lock",
+		jeep.freeze and jeep.sleeping \
+			and jeep.global_position.distance_to(replicated_jeep_rest[0]) < 0.005 \
+			and jeep.linear_velocity.length() < 0.001 \
+			and jeep.angular_velocity.length() < 0.001)
 	check("parked Jeep stops spawning vapor after its plume clears",
 		jeep_outlet.target_intensity < 0.001 \
 		and jeep_outlet.intensity < 0.012 \
@@ -815,15 +953,29 @@ func run(main) -> void:
 		gathered_bike_left and gathered_bike_right)
 	check("bike HUD teaches the Ctrl wheelie",
 		main.hud._vehicle_hint(bike).contains("WHEELIE") \
-		and main.hud._vehicle_hint(bike).contains(Settings.binding_text(&"crouch")))
-	var bike_basis: Basis = bike.global_basis
-	bike.global_basis = Basis.from_euler(Vector3(-0.62,
-		bike_basis.get_euler(EULER_ORDER_YXZ).y, 0.0), EULER_ORDER_YXZ)
-	bike.input_throttle = 1.0
-	check("bike anti-loop detects nose-up throttle before drivetrain step",
-		bike.anti_loop_active())
-	bike.global_basis = bike_basis
-	bike.reset_physics_interpolation()
+		and main.hud._vehicle_hint(bike).contains(Settings.binding_text(&"crouch")) \
+		and main.hud._vehicle_hint(bike).contains("CHASE/HEAD"))
+	check("keyboard W holds a safe wheelie before sustained over-power loops it",
+		bike.wheelie_target_nose_angle(0.72) \
+			> bike.wheelie_target_nose_angle(0.35) + 0.20 \
+			and bike.wheelie_target_nose_angle(1.0, 0.0) < PI * 0.5 \
+			and bike.wheelie_target_nose_angle(1.0,
+				Motorcycle.WHEELIE_OVERPOWER_GRACE - 0.05) < PI * 0.5 \
+			and bike.wheelie_target_nose_angle(1.0,
+				Motorcycle.WHEELIE_OVERPOWER_FULL + 0.05) > PI * 0.5 \
+			and not bike.anti_loop_active())
+	var hill_normal := Vector3(0.0, 0.94, -0.342).normalized()
+	var hill_stand_basis: Basis = bike.kickstand_basis(
+		Vector3.FORWARD, hill_normal)
+	check("bike kickstand preserves supported hill pitch without a level snap",
+		hill_stand_basis.determinant() > 0.99 \
+			and hill_stand_basis.y.dot(hill_normal) > cos(0.13) \
+			and absf(hill_stand_basis.z.dot(hill_normal)) < 0.001 \
+			and absf(hill_stand_basis.get_euler(EULER_ORDER_YXZ).x) > 0.20,
+		"up=%.3f forward=%.4f pose=%s" % [
+			hill_stand_basis.y.dot(hill_normal),
+			hill_stand_basis.z.dot(hill_normal),
+			hill_stand_basis.get_euler(EULER_ORDER_YXZ)])
 	p.ti.dir = Vector2(0, -1)
 	await sim(120)
 	check("bike exhaust responds to real throttle and RPM",
@@ -853,6 +1005,32 @@ func run(main) -> void:
 		vmax > 44.0 and vmax < 52.0, "%.1f m/s (%.0f mph)" % [vmax,
 			vmax * 2.23694])
 	p.ti.sprint = false
+	# Steering and rider lean must remain live on momentum alone. Accelerate to a
+	# normal trail speed, completely release W, then hold D through the real input
+	# path and assert that the coasting machine still banks and changes heading.
+	neutral(p)
+	reset_bike_control_fixture(bike)
+	await sim(24)
+	for i in range(360):
+		if bike.forward_speed() >= 12.0:
+			break
+		p.ti.dir = Vector2(0, -1)
+		await sim(1)
+	var coast_origin: Vector3 = bike.global_position
+	var coast_right: Vector3 = -bike.global_basis.x.normalized()
+	var coast_start_speed: float = bike.forward_speed()
+	p.ti.dir = Vector2(1, 0)
+	await sim(55)
+	var coast_lean: float = bike.global_basis.get_euler(EULER_ORDER_YXZ).z
+	var coast_heading: float = bike.global_basis.z.normalized().dot(coast_right)
+	var coast_side: float = (bike.global_position - coast_origin).dot(coast_right)
+	check("bike keeps its steering and lean mechanics after W is released",
+		coast_start_speed > 9.0 and bike.input_throttle < 0.01 \
+			and bike.forward_speed() > 5.0 and coast_lean > 0.05 \
+			and coast_heading > 0.055 and coast_side > 0.15,
+		"speed %.1f→%.1f lean=%.2f heading=%.2f side=%.2f" % [
+			coast_start_speed, bike.forward_speed(), coast_lean, coast_heading,
+			coast_side])
 	# Reset the long accelerated top-speed run, then approach each manoeuvre at
 	# an ordinary trail-riding speed through the same real W input as gameplay.
 	neutral(p)
@@ -869,7 +1047,9 @@ func run(main) -> void:
 	# Ctrl is a one-frame trigger; the authored balance assist persists after the
 	# key is released. Hold A through the raised phase to prove the chassis barely
 	# changes heading while the front contact patch is airborne.
-	p.ti.dir = Vector2(-1, -1)
+	# Begin on the real binary W value. After the full-throttle grace sample, add
+	# a real normalized W+A diagonal to exercise restricted wheelie steering.
+	p.ti.dir = Vector2(0, -1)
 	p.ti.crouch_just = true
 	p.ti.crouch_held = true
 	await sim(1)
@@ -885,10 +1065,12 @@ func run(main) -> void:
 	var wheelie_start_yaw: float = bike.yaw_angle()
 	var maximum_wheelie_yaw_change := 0.0
 	for i in range(150):
+		if i == 20:
+			p.ti.dir = Vector2(-0.70710678, -0.70710678)
 		# Straighten before the settle phase so this fixture measures the wheelie,
 		# not a deliberate post-landing lowside after the assist releases.
-		if i == 80:
-			p.ti.dir = Vector2(0, -1)
+		if i == 85:
+			p.ti.dir = Vector2.ZERO
 		await sim(1)
 		var nose_up: float = -bike.global_basis.get_euler(EULER_ORDER_YXZ).x
 		peak_nose_up = maxf(peak_nose_up, nose_up)
@@ -915,7 +1097,7 @@ func run(main) -> void:
 	var rear_support_ratio := float(rear_supported_lifted_frames) \
 		/ maxf(float(lifted_frames), 1.0)
 	check("Ctrl raises and sustains a real motorcycle wheelie",
-		wheelie_triggered and peak_nose_up >= 0.42 and peak_nose_up < 0.64 \
+		wheelie_triggered and peak_nose_up >= 0.52 and peak_nose_up < 0.92 \
 			and peak_front_clearance >= 0.25 \
 			and longest_sustained_lift >= 45 and rear_support_ratio >= 0.80 \
 			and bike.driver == p,
@@ -1021,6 +1203,16 @@ func run(main) -> void:
 			bike.physics_recovery_count, bike.global_position,
 			bike.linear_velocity, bike.angular_velocity, pre_dismount_bike_pose,
 			str(pre_dismount_near_ground)])
+	var bike_park_position: Vector3 = bike.global_position
+	var bike_park_aux: Vector3 = bike.state_aux()
+	bike.apply_rest_state(bike_park_position, bike.yaw_angle(),
+		bike_park_aux.x, bike_park_aux.y)
+	await sim(8)
+	check("replicated bike rest state keeps the stand planted without a pop",
+		bike.freeze and bike.sleeping and bike._kickstand_engaged \
+			and bike.global_position.distance_to(bike_park_position) < 0.015 \
+			and bike.linear_velocity.length() < 0.001 \
+			and bike.angular_velocity.length() < 0.001)
 	var remounted_from_stand: bool = await mount(p, w, bike)
 	check("mounting retracts the bike stand before controls resume",
 		remounted_from_stand and not bike.freeze \
@@ -1177,6 +1369,31 @@ func run(main) -> void:
 	check("centering the flight dot restores straight-ahead pursuit",
 		flight_reticle.normalized_aim.length() < 0.03 \
 		and p.cam.vehicle_aim_direction().dot(jet.global_basis.z) > 0.999)
+	# Request exactly 4% of the ring regardless of the persisted mouse sensitivity:
+	# small enough for fine aim, but deterministically above the 1.8% caught-dot
+	# snap band.
+	var small_dot_pixels: float = 0.04 * p.cam.aircraft_aim_limit_radians() \
+		/ p.cam.effective_sensitivity()
+	p.cam.apply_look(Vector2(small_dot_pixels, 0.0))
+	var requested_small_dot: Vector2 = p.cam.aircraft_aim_normalized()
+	await sim(1)
+	var small_dot: Vector2 = p.cam.aircraft_aim_normalized()
+	var small_local_aim: Vector3 = jet.global_basis.inverse() \
+		* p.cam.vehicle_aim_direction()
+	check("small visible jet dots stay outside hands-off stabilization",
+		requested_small_dot.length() > 0.035 \
+			and requested_small_dot.length() < 0.045 \
+			and small_dot.length() > 0.018 and small_dot.length() < 0.08 \
+			and not jet._hands_off_flight(small_local_aim, false) \
+			and absf(jet._pursuit_roll_error(small_local_aim,
+				atan2(small_local_aim.y, maxf(small_local_aim.z, 0.05)))) > 0.005,
+		"requested=%.4f live=%.4f local=%.4f deadzone=%.4f roll=%.4f" % [
+			requested_small_dot.length(), small_dot.length(),
+			Vector2(small_local_aim.x, small_local_aim.y).length(),
+			FighterJet.HANDS_OFF_AIM_DEADZONE,
+			jet._pursuit_roll_error(small_local_aim,
+				atan2(small_local_aim.y, maxf(small_local_aim.z, 0.05)))])
+	p.cam.center_aircraft_aim()
 	check("jet HUD teaches the arrow pitch controls",
 		main.hud._vehicle_hint(jet).contains("NOSE UP") \
 		and main.hud._vehicle_hint(jet).contains("NOSE DOWN") \
@@ -1202,13 +1419,13 @@ func run(main) -> void:
 	var flight_aim: Vector3 = p.cam.vehicle_aim_direction()
 	var flight_cursor_before_front: Vector2 = p.cam.aircraft_aim_normalized()
 	p.cam._apply_view_mode(CameraRig.ViewMode.FRONT)
-	p.cam.apply_look(Vector2(100000.0, -100000.0))
 	main.hud._process(0.0)
-	check("front camera hides and cannot invisibly change the flight cursor",
+	check("fighter rejects the front camera and keeps the visible flight cursor",
 		p.cam.vehicle_aim_direction().dot(flight_aim) > 0.999 \
 		and p.cam.aircraft_aim_normalized().distance_to(
 			flight_cursor_before_front) < 0.001 \
-		and not flight_reticle.visible)
+		and p.cam.view_mode == CameraRig.ViewMode.SHOULDER \
+		and not p.cam.front_view and flight_reticle.visible)
 	# Cockpit presentation follows the aircraft attitude while the pursuit aim
 	# stays in world space. Roll the parked airframe between physics ticks so the
 	# assertion is deterministic and cannot disturb the takeoff run below.
@@ -1354,6 +1571,33 @@ func run(main) -> void:
 	check("altitude-scaled far plane feeds the pilot's view",
 		w.current_view_distance > 4000.0,
 		"%.0f m" % w.current_view_distance)
+	# Perturb a clean, fast jet into a noticeable bank, then let go of every
+	# steering channel. Neutral fly-by-wire should remove the bank rather than
+	# preserving a tiny roll rate until the aircraft flips itself.
+	p.ti.vehicle_pitch = 0.0
+	p.ti.dir = Vector2.ZERO
+	p.cam.center_aircraft_aim()
+	jet.global_basis = jet.global_basis.rotated(
+		jet.global_basis.z.normalized(), 0.38)
+	jet.angular_velocity = jet.global_basis.z * 0.22
+	jet.reset_physics_interpolation()
+	p.cam.center_aircraft_aim()
+	var hands_off_forward: Vector3 = jet.global_basis.z.normalized()
+	var hands_off_bank_before: float = absf(
+		jet.global_basis.get_euler(EULER_ORDER_YXZ).z)
+	await sim(150)
+	var hands_off_bank_after: float = absf(
+		jet.global_basis.get_euler(EULER_ORDER_YXZ).z)
+	check("neutral jet controls level the wings without a self-induced flip",
+		hands_off_bank_before > 0.25 \
+			and hands_off_bank_after < hands_off_bank_before * 0.50 \
+			and jet.global_basis.y.dot(Vector3.UP) > 0.88 \
+			and jet.global_basis.z.dot(hands_off_forward) > 0.80 \
+			and absf(jet._pitch_input) < 0.01 \
+			and absf(jet.input_steer) < 0.01,
+		"bank %.3f→%.3f up=%.3f heading=%.3f" % [hands_off_bank_before,
+			hands_off_bank_after, jet.global_basis.y.dot(Vector3.UP),
+			jet.global_basis.z.dot(hands_off_forward)])
 	# Release arrow assistance, place the mouse dot at the right edge, and prove
 	# this is a pursuit target rather than a cosmetic cursor or endless roll
 	# stick: the nose closes on its fixed world direction and the dot recentres.
@@ -1401,6 +1645,51 @@ func run(main) -> void:
 	check("aircraft aim reticle hides after leaving the jet",
 		not flight_reticle.visible)
 	neutral(p)
+	# Finish with the intentionally destructive motorcycle case so the defeated
+	# local player is not needed by later fixtures. Full throttle after Ctrl asks
+	# for an attitude beyond vertical; only a physically completed backward loop
+	# may trigger the lethal impact/ejection path.
+	var loop_mounted := await mount(p, w, bike)
+	if loop_mounted:
+		reset_bike_control_fixture(bike)
+		await sim(24)
+		for i in range(360):
+			if bike.forward_speed() >= 10.0:
+				break
+			p.ti.dir = Vector2(0, -1)
+			await sim(1)
+		p.health = MonkeyPlayer.MAX_HEALTH
+		# Deliberately leave revive/spawn protection active. The dedicated fatal-loop
+		# event must bypass it without weakening protection for ordinary collisions.
+		p._invulnerable_t = 30.0
+		p.ti.dir = Vector2(0, -1)
+		p.ti.crouch_just = true
+		p.ti.crouch_held = true
+		await sim(1)
+		p.ti.crouch_just = false
+		p.ti.crouch_held = false
+	var loop_peak_angle := 0.0
+	var loop_grace_survived := false
+	for i in range(360):
+		if p.defeated or p.vehicle == null:
+			break
+		p.ti.dir = Vector2(0, -1)
+		await sim(1)
+		loop_peak_angle = maxf(loop_peak_angle, atan2(
+			bike.global_basis.z.dot(Vector3.UP),
+			bike.global_basis.y.dot(Vector3.UP)))
+		if i == 75:
+			loop_grace_survived = p.vehicle == bike and not p.defeated \
+				and loop_peak_angle < PI * 0.5
+	check("over-accelerating a wheelie loops the bike and lethally ejects the monkey",
+		loop_mounted and loop_grace_survived \
+			and loop_peak_angle > deg_to_rad(92.0) \
+			and p.vehicle == null and bike.driver == null \
+			and p.defeated and p.health <= 0.0,
+		"mounted=%s grace=%s peak=%.1f° vehicle=%s driver=%s defeated=%s health=%.1f" % [
+			str(loop_mounted), str(loop_grace_survived),
+			rad_to_deg(loop_peak_angle), str(p.vehicle), str(bike.driver),
+			str(p.defeated), p.health])
 	check("all vehicle physics stayed finite without emergency recovery",
 		bike.physics_recovery_count == 0 and jeep.physics_recovery_count == 0 \
 			and boat.physics_recovery_count == 0 \

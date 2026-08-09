@@ -5,6 +5,7 @@ extends Node3D
 
 const SupplyHutScript = preload("res://scripts/supply_hut.gd")
 const ArenaPieceScript = preload("res://scripts/arena_piece.gd")
+const AirfieldHangarScript = preload("res://scripts/airfield_hangar.gd")
 
 static var _mat_ground: Material
 static var _mat_trunk: Material
@@ -30,6 +31,7 @@ var _collisions_built := false
 var _collisions_active := false
 var _supply_huts: Array[SupplyHut] = []
 var _arena_pieces: Array[ArenaPiece] = []
+var _airfield_hangars: Array[AirfieldHangar] = []
 var _details_pending := false
 var _detail_build_stage := 0
 var _pending_collected: Dictionary = {}
@@ -183,18 +185,20 @@ func finish_deferred_build_step() -> bool:
 		4:
 			_build_arena_pieces()
 		5:
-			_build_supply_huts()
+			_build_airfield_hangars()
 		6:
-			_build_vine_mesh()
+			_build_supply_huts()
 		7:
-			_build_bananas(_pending_collected)
+			_build_vine_mesh()
 		8:
+			_build_bananas(_pending_collected)
+		9:
 			if _pending_build_collisions:
 				_build_collisions()
-		9:
+		10:
 			_request_vehicle_spawns()
 	_detail_build_stage += 1
-	if _detail_build_stage > 9:
+	if _detail_build_stage > 10:
 		_details_pending = false
 		_pending_collected = {}
 		_pending_build_collisions = false
@@ -466,6 +470,8 @@ func _build_grass() -> void:
 		var h := Gen.height(x, z)
 		if h < Gen.WATER_Y + 0.15 or h > Gen.TREE_LINE:
 			continue
+		if Gen.point_on_road(x, z) or Gen.point_on_airstrip(x, z):
+			continue
 		var b := Basis(Vector3.UP, rng.randf() * TAU).scaled(Vector3.ONE * rng.randf_range(0.7, 1.5))
 		if not inside_structure:
 			xf.append(Transform3D(b, Vector3(x, h, z) - center))
@@ -559,6 +565,14 @@ func _build_arena_pieces() -> void:
 		_arena_pieces.append(piece)
 
 
+func _build_airfield_hangars() -> void:
+	for hangar_data in layout.get("airfield_hangars", []):
+		var hangar: AirfieldHangar = AirfieldHangarScript.new()
+		hangar.configure(hangar_data)
+		add_child(hangar)
+		_airfield_hangars.append(hangar)
+
+
 func _inside_structure_clearance(x: float, z: float) -> bool:
 	for structure in layout.get("structures", []):
 		var structure_pos: Vector3 = structure.get("pos", Vector3.ZERO)
@@ -571,6 +585,14 @@ func _inside_structure_clearance(x: float, z: float) -> bool:
 		var piece_radius := float(piece.get("clearance", 0.0))
 		if Vector2(x, z).distance_squared_to(
 				Vector2(piece_pos.x, piece_pos.z)) < piece_radius * piece_radius:
+			return true
+	for hangar in layout.get("airfield_hangars", []):
+		var hangar_pos: Vector3 = hangar.get("pos", Vector3.ZERO)
+		var hangar_radius := float(hangar.get("clearance",
+			Gen.AIRSTRIP_HANGAR_CLEARANCE))
+		if Vector2(x, z).distance_squared_to(
+				Vector2(hangar_pos.x, hangar_pos.z)) \
+				< hangar_radius * hangar_radius:
 			return true
 	return false
 
@@ -681,6 +703,12 @@ func _build_collisions() -> void:
 		if not is_instance_valid(piece):
 			continue
 		for body in piece.build_collisions():
+			_collision_bodies.append(body)
+
+	for hangar in _airfield_hangars:
+		if not is_instance_valid(hangar):
+			continue
+		for body in hangar.build_collisions():
 			_collision_bodies.append(body)
 
 

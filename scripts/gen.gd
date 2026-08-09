@@ -62,15 +62,36 @@ const BIOME_NAMES := {
 	Biome.HIGHLAND: "Cloud Highland",
 }
 
-const AIRSTRIP_LENGTH := 420.0
+const AIRSTRIP_ORIGINAL_LENGTH := 420.0
+const AIRSTRIP_SCALE := 3.0
+const AIRSTRIP_LENGTH := AIRSTRIP_ORIGINAL_LENGTH * AIRSTRIP_SCALE
 const AIRSTRIP_WIDTH := 26.0
 const AIRSTRIP_APRON_RADIUS := 30.0
 const AIRSTRIP_BLEND := 30.0
+const AIRSTRIP_HANGAR_COUNT := 6
+const AIRSTRIP_HANGAR_WIDTH := 18.0
+const AIRSTRIP_HANGAR_DEPTH := 22.0
+const AIRSTRIP_HANGAR_HEIGHT := 7.4
+const AIRSTRIP_HANGAR_SPACING := 25.0
+const AIRSTRIP_HANGAR_CLEARANCE := 15.5
+const AIRSTRIP_HANGAR_TAXI_GAP := 8.0
+const AIRSTRIP_HANGAR_PAD_MARGIN := 6.0
+
+# Seeded packed-dirt roads are part of the analytic height/color field rather
+# than separate meshes. That keeps collision, every visual LOD, the minimap,
+# and all network peers on exactly the same surface without replication.
+const ROAD_HALF_WIDTH := 4.8
+const ROAD_BLEND := 6.0
+const ROAD_POINT_SPACING := 18.0
+const ROAD_MAX_GRADE := 0.085
+const BASE_RELIEF_AMPLITUDE := 10.5
+const ROLLING_HILL_AMPLITUDE := 8.0
 
 var world_seed: int = 1337
 # Deterministic bush airstrip: a per-seed search picks the flattest,
 # driest, least mountainous strip corridor near the origin, then the height
-# field grades a 420 m runway plus parking apron into the jungle. Every
+# field grades a 1,260 m runway, parking apron, and six-bay hangar row into
+# the jungle. Every
 # client computes the identical placement from the seed alone.
 var airstrip_valid := false
 var airstrip_center := Vector2.ZERO
@@ -97,6 +118,8 @@ var _n_moisture := FastNoiseLite.new()
 var _n_hill := FastNoiseLite.new()
 var _n_mountain := FastNoiseLite.new()
 var _n_mountain_mask := FastNoiseLite.new()
+var _road_routes: Array = []
+var _roads_ready := false
 
 # vine registry: id -> {anchor, len, chunk, hidden, simulated, points}
 # `hidden` means a monkey currently owns the visual. `simulated` means a
@@ -111,6 +134,8 @@ func setup(seed_v: int) -> void:
 	vines.clear()
 	_vines_by_chunk.clear()
 	_debug_count = 0
+	_roads_ready = false
+	_road_routes.clear()
 	_n_base.seed = seed_v
 	_n_base.noise_type = FastNoiseLite.TYPE_SIMPLEX_SMOOTH
 	_n_base.frequency = 0.007
@@ -148,6 +173,7 @@ func setup(seed_v: int) -> void:
 	_n_mountain_mask.frequency = 0.00042
 	_locate_airstrip()
 	_locate_boat_dock()
+	_build_road_network()
 
 
 ## Score candidate runway corridors around the origin and keep the driest,
@@ -166,32 +192,47 @@ func _locate_airstrip() -> void:
 		var angle := TAU * float(angle_index) / 20.0
 		for radius_option in [205.0, 245.0, 290.0]:
 			var radius := float(radius_option)
-			var center := Vector2(cos(angle), sin(angle)) * radius
+			# Search from the original 420 m strip's centre, then push the new
+			# centre outward by half the added length. This keeps the accessible
+			# apron end in its established near-origin neighbourhood while the
+			# extra 840 m extends away from the duel arena.
+			var original_center := Vector2(cos(angle), sin(angle)) * radius
 			var heading := angle + PI * 0.5
 			var direction := Vector2(sin(heading), cos(heading))
+			if original_center.dot(direction) < 0.0:
+				direction = -direction
+				heading += PI
+			var center := original_center + direction \
+				* ((AIRSTRIP_LENGTH - AIRSTRIP_ORIGINAL_LENGTH) * 0.5)
+			var perpendicular := Vector2(direction.y, -direction.x)
 			var score := 0.0
 			var height_sum := 0.0
-			for s in range(-10, 11):
-				var p := center + direction * (float(s) * 22.0)
-				var mountain := mountain_influence(p.x, p.y)
-				var lake := lake_influence(p.x, p.y)
-				var h := height(p.x, p.y)
-				score += mountain * 34.0 + lake * 26.0 \
-					+ absf(h - 4.2) * 0.30
-				height_sum += clampf(h, WATER_Y + 2.2, 12.0)
+			# Sample the full 1,260 m length, including both runway shoulders.
+			# Twenty-nine longitudinal stations keep setup bounded while leaving
+			# less than one chunk between samples.
+			for s in range(-14, 15):
+				var along := AIRSTRIP_LENGTH * 0.5 * float(s) / 14.0
+				var center_height := 0.0
+				for across in [-0.42, 0.0, 0.42]:
+					var p := center + direction * along + perpendicular \
+						* (AIRSTRIP_WIDTH * float(across))
+					var mountain := mountain_influence(p.x, p.y)
+					var lake := lake_influence(p.x, p.y)
+					var h := height(p.x, p.y)
+					score += mountain * 34.0 + lake * 26.0 \
+						+ absf(h - 4.2) * 0.30
+					if across == 0.0:
+						center_height = h
+				height_sum += clampf(center_height, WATER_Y + 2.2, 12.0)
 			if score < best_score:
 				best_score = score
 				best_center = center
 				best_heading = heading
-				best_height = height_sum / 21.0
+				best_height = height_sum / 29.0
 	airstrip_center = best_center
 	airstrip_heading = best_heading
 	airstrip_elevation = clampf(best_height, WATER_Y + 2.2, 12.0)
 	_strip_dir = Vector2(sin(best_heading), cos(best_heading))
-	# Keep the apron end of the runway pointing back toward the origin.
-	if airstrip_center.dot(_strip_dir) < 0.0:
-		_strip_dir = -_strip_dir
-		airstrip_heading += PI
 	_strip_perp = Vector2(_strip_dir.y, -_strip_dir.x)
 	var reach := AIRSTRIP_LENGTH * 0.5 + AIRSTRIP_APRON_RADIUS \
 		+ AIRSTRIP_WIDTH + AIRSTRIP_BLEND + 24.0
@@ -232,6 +273,227 @@ func _locate_boat_dock() -> void:
 			return
 
 
+## Build a small useful road network after the seed-derived airfield and dock
+## have been located. Routes begin at the east arena approach/motor pool, arc
+## outside the protected duel bowl, then choose a gently bending outer line
+## that avoids lake basins and steep ridges where possible. Only these cached
+## points/elevations are consulted by height(), so chunk streaming order and
+## multiplayer authority never enter the result.
+func _build_road_network() -> void:
+	_roads_ready = false
+	_road_routes.clear()
+	if debug_world:
+		return
+	var hub := Vector2(43.0, 4.0)
+	_append_road_route("arena_motorpool", PackedVector2Array([
+		Vector2(34.0, 9.0), Vector2(38.0, 7.0), hub,
+	]))
+	var hub_elevation := 3.25
+	if not _road_routes.is_empty():
+		var hub_profile: PackedFloat32Array = _road_routes[0].elevations
+		hub_elevation = hub_profile[hub_profile.size() - 1]
+	if airstrip_valid:
+		_append_road_route("motorpool_airfield",
+			_outer_road_points(airstrip_apron_world(), 2101), hub_elevation)
+	if boat_dock_valid:
+		var dock := Vector2(boat_dock_pos.x, boat_dock_pos.z)
+		var toward_land := -dock.normalized()
+		var shore_entry := dock + toward_land * 10.0
+		# The boat rests several metres offshore. March toward the origin until
+		# the road endpoint is on reliably dry ground, leaving a short walk/down-
+		# ramp to the water rather than grading a road across the whole lake.
+		for step in range(1, 13):
+			var candidate := dock + toward_land * float(step * 4)
+			shore_entry = candidate
+			if height(candidate.x, candidate.y) > WATER_Y + 0.85:
+				break
+		# Stop the packed shoulder well inland: grading beneath the parked boat
+		# would turn its buoyancy probes into land supports. Also retain the duel
+		# bowl's protected perimeter if this seed puts its nearest lake close by.
+		shore_entry += toward_land * (ROAD_HALF_WIDTH + ROAD_BLEND + 2.0)
+		var radial := dock.normalized()
+		var dock_delta := wrapf(dock.angle() - hub.angle(), -PI, PI)
+		var tangent := Vector2(-radial.y, radial.x) \
+			* (-signf(dock_delta) if absf(dock_delta) > 0.001 else 1.0)
+		shore_entry += tangent * (ROAD_HALF_WIDTH + ROAD_BLEND + 10.0)
+		for dry_step in range(5):
+			if height(shore_entry.x, shore_entry.y) > WATER_Y + 0.85:
+				break
+			shore_entry += toward_land * 4.0
+		var minimum_radius := ARENA_RADIUS + 3.0
+		if shore_entry.length() < minimum_radius:
+			shore_entry = shore_entry.normalized() * minimum_radius
+		if shore_entry.distance_to(hub) > 34.0:
+			_append_road_route("motorpool_lake",
+				_outer_road_points(shore_entry, 2203), hub_elevation)
+	_roads_ready = not _road_routes.is_empty()
+
+
+## Route around the duel arena on a broad 56 m ring, then bend toward the
+## destination. Five deterministic bend candidates are scored against the raw
+## seed fields; this normally steers the road around water and severe relief
+## without any pathfinding or replicated state.
+func _outer_road_points(target: Vector2, salt: int) -> PackedVector2Array:
+	var hub := Vector2(43.0, 4.0)
+	var ring_radius := 56.0
+	var start_angle := hub.angle()
+	var target_angle := target.angle()
+	var angle_delta := wrapf(target_angle - start_angle, -PI, PI)
+	# Resolve the exactly-opposite tie from a seed-specific bit so both sides of
+	# the arena remain possible across worlds while a given world stays exact.
+	if absf(absf(angle_delta) - PI) < 0.0001:
+		angle_delta = PI if ((world_seed + salt) & 1) == 0 else -PI
+	var arc_steps := maxi(1, ceili(absf(angle_delta) / 0.34))
+	var points := PackedVector2Array([hub])
+	for step in range(arc_steps + 1):
+		var t := float(step) / float(arc_steps)
+		points.append(Vector2.from_angle(start_angle + angle_delta * t)
+			* ring_radius)
+	var outer_start: Vector2 = points[points.size() - 1]
+	var direct := target - outer_start
+	if direct.length() < 1.0:
+		points.append(target)
+		return points
+	var perpendicular := Vector2(-direct.y, direct.x).normalized()
+	var preferred_sign := 1.0 if ((world_seed * 31 + salt) & 1) == 0 else -1.0
+	var bend_candidates := PackedFloat32Array([
+		0.0, 18.0 * preferred_sign, -18.0 * preferred_sign,
+		36.0 * preferred_sign, -36.0 * preferred_sign,
+	])
+	var best_bend := 0.0
+	var best_score := INF
+	for bend in bend_candidates:
+		var score := 0.0
+		var previous := outer_start
+		var previous_height := height(previous.x, previous.y)
+		for sample_index in range(1, 21):
+			var t := float(sample_index) / 20.0
+			var candidate := outer_start.lerp(target, t) + perpendicular \
+				* float(bend) * sin(t * PI)
+			var candidate_height := height(candidate.x, candidate.y)
+			var sample_distance := maxf(candidate.distance_to(previous), 0.1)
+			var sample_grade := absf(candidate_height - previous_height) \
+				/ sample_distance
+			score += lake_influence(candidate.x, candidate.y) * 80.0 \
+				+ mountain_influence(candidate.x, candidate.y) * 14.0 \
+				+ maxf(sample_grade - ROAD_MAX_GRADE, 0.0) * 240.0
+			previous = candidate
+			previous_height = candidate_height
+		if score < best_score:
+			best_score = score
+			best_bend = float(bend)
+	var outer_steps := maxi(2, ceili(direct.length() / ROAD_POINT_SPACING))
+	for step in range(1, outer_steps + 1):
+		var t := float(step) / float(outer_steps)
+		points.append(outer_start.lerp(target, t) + perpendicular \
+			* best_bend * sin(t * PI))
+	return points
+
+
+## Cache a smoothed, maximum-grade longitudinal profile and a broadphase box.
+## The road is later blended laterally into the natural terrain, producing a
+## driveable crown without extra collision bodies or streaming seams.
+func _append_road_route(route_id: String, points: PackedVector2Array,
+		start_elevation_override := -INF) -> void:
+	if points.size() < 2:
+		return
+	var raw := PackedFloat32Array()
+	for point in points:
+		raw.append(maxf(height(point.x, point.y), WATER_Y + 0.92))
+	if is_finite(start_elevation_override):
+		raw[0] = float(start_elevation_override)
+	# Two inexpensive low-pass passes remove short noise spikes before the hard
+	# longitudinal grade limiter. The shared hub sample stays pinned so branches
+	# meet without a terrain step.
+	for _smoothing_pass in range(2):
+		var source := raw.duplicate()
+		for i in range(1, raw.size() - 1):
+			raw[i] = float(source[i - 1]) * 0.25 + float(source[i]) * 0.5 \
+				+ float(source[i + 1]) * 0.25
+	for i in range(1, raw.size()):
+		var run := maxf(points[i].distance_to(points[i - 1]), 0.1)
+		var maximum_delta := run * ROAD_MAX_GRADE
+		raw[i] = clampf(raw[i], raw[i - 1] - maximum_delta,
+			raw[i - 1] + maximum_delta)
+	var minimum := points[0]
+	var maximum := points[0]
+	for point in points:
+		minimum.x = minf(minimum.x, point.x)
+		minimum.y = minf(minimum.y, point.y)
+		maximum.x = maxf(maximum.x, point.x)
+		maximum.y = maxf(maximum.y, point.y)
+	var margin := ROAD_HALF_WIDTH + ROAD_BLEND + SUPPLY_HUT_CLEARANCE + 2.0
+	_road_routes.append({
+		"id": route_id,
+		"points": points,
+		"elevations": raw,
+		"bounds": Rect2(minimum - Vector2.ONE * margin,
+			maximum - minimum + Vector2.ONE * margin * 2.0),
+	})
+
+
+## Public deep copy for tests, navigation hints, and future map legends. No
+## caller can mutate the authoritative cached routes used by generation.
+func road_routes() -> Array:
+	return _road_routes.duplicate(true)
+
+
+## Closest analytic road sample. `grade` is 1 across the packed core and fades
+## through a six-metre shoulder; `distance` lets the color field draw two
+## darker wheel ruts while elevation remains evenly crowned.
+func road_surface_sample(x: float, z: float) -> Dictionary:
+	if not _roads_ready:
+		return {"grade": 0.0, "distance": INF, "elevation": 0.0,
+			"route_id": ""}
+	var point := Vector2(x, z)
+	var best_distance := INF
+	var best_elevation := 0.0
+	var best_route := ""
+	for route_value in _road_routes:
+		var route: Dictionary = route_value
+		var bounds: Rect2 = route.bounds
+		if not bounds.has_point(point):
+			continue
+		var points: PackedVector2Array = route.points
+		var elevations: PackedFloat32Array = route.elevations
+		for i in range(points.size() - 1):
+			var segment := points[i + 1] - points[i]
+			var length_squared := segment.length_squared()
+			if length_squared < 0.0001:
+				continue
+			var t := clampf((point - points[i]).dot(segment) / length_squared,
+				0.0, 1.0)
+			var nearest := points[i] + segment * t
+			var distance := point.distance_to(nearest)
+			if distance < best_distance:
+				best_distance = distance
+				best_elevation = lerpf(elevations[i], elevations[i + 1], t)
+				best_route = str(route.id)
+	if best_distance > ROAD_HALF_WIDTH + ROAD_BLEND:
+		return {"grade": 0.0, "distance": best_distance,
+			"elevation": best_elevation, "route_id": best_route}
+	return {
+		"grade": 1.0 - smoothstep(ROAD_HALF_WIDTH,
+			ROAD_HALF_WIDTH + ROAD_BLEND, best_distance),
+		"distance": best_distance,
+		"elevation": best_elevation,
+		"route_id": best_route,
+	}
+
+
+func road_grade(x: float, z: float) -> float:
+	return float(road_surface_sample(x, z).grade)
+
+
+func point_on_road(x: float, z: float) -> bool:
+	return road_grade(x, z) > 0.16
+
+
+func point_in_road_clearance(x: float, z: float, extra := 0.0) -> bool:
+	var sample := road_surface_sample(x, z)
+	return float(sample.distance) <= ROAD_HALF_WIDTH + ROAD_BLEND + extra
+
+
 ## 0..1 membership in the graded runway/apron footprint.
 func airstrip_grade(x: float, z: float) -> float:
 	if not airstrip_valid:
@@ -249,6 +511,16 @@ func airstrip_grade(x: float, z: float) -> float:
 	var apron_d := maxf(Vector2(u, v).distance_to(apron)
 		- AIRSTRIP_APRON_RADIUS, 0.0)
 	d = minf(d, apron_d)
+	# A rectangular hardstand joins all six open hangars to the runway. It is
+	# part of the same analytic grade/exclusion footprint, so every terrain LOD,
+	# collision chunk, and foliage pass agrees on the concrete-clear interior.
+	var hangar_pad := airstrip_hangar_pad_local()
+	var hangar_pad_center := hangar_pad.get_center()
+	var hangar_du := maxf(absf(u - hangar_pad_center.x)
+		- hangar_pad.size.x * 0.5, 0.0)
+	var hangar_dv := maxf(absf(v - hangar_pad_center.y)
+		- hangar_pad.size.y * 0.5, 0.0)
+	d = minf(d, Vector2(hangar_du, hangar_dv).length())
 	return 1.0 - smoothstep(0.0, AIRSTRIP_BLEND, d)
 
 
@@ -260,6 +532,67 @@ func airstrip_apron_local() -> Vector2:
 func airstrip_apron_world() -> Vector2:
 	var apron := airstrip_apron_local()
 	return airstrip_center + _strip_dir * apron.x + _strip_perp * apron.y
+
+
+## Six deterministic open-front hangars run parallel to the near end of the
+## strip. Local +X follows the runway, local +Z points away from it, and each
+## jet faces local -Z through the open door. IDs and transforms depend only on
+## the seed-derived airstrip transform, making chunk order irrelevant.
+func airstrip_hangar_layout() -> Array:
+	if not airstrip_valid:
+		return []
+	var defs: Array = []
+	var first_u := -AIRSTRIP_LENGTH * 0.5 + 84.0
+	var hangar_v := AIRSTRIP_WIDTH * 0.5 + AIRSTRIP_HANGAR_TAXI_GAP \
+		+ AIRSTRIP_HANGAR_DEPTH * 0.5
+	var hangar_yaw := airstrip_heading + PI * 0.5
+	var jet_yaw := hangar_yaw + PI
+	for i in range(AIRSTRIP_HANGAR_COUNT):
+		var local := Vector2(first_u + float(i) * AIRSTRIP_HANGAR_SPACING,
+			hangar_v)
+		var world := airstrip_center + _strip_dir * local.x \
+			+ _strip_perp * local.y
+		# Keep the complete aircraft visibly behind the threshold while leaving
+		# enough rear clearance for its nozzle and exhaust plume.
+		var jet_world := world - _strip_perp * 0.8
+		defs.append({
+			"kind": "airfield_hangar",
+			"id": "h:strip#%d" % i,
+			"index": i,
+			"pos": Vector3(world.x, airstrip_elevation, world.y),
+			"yaw": hangar_yaw,
+			"size": Vector3(AIRSTRIP_HANGAR_WIDTH,
+				AIRSTRIP_HANGAR_HEIGHT, AIRSTRIP_HANGAR_DEPTH),
+			"clearance": AIRSTRIP_HANGAR_CLEARANCE,
+			"jet_id": "v:strip#jet-%d" % i,
+			"jet_pos": Vector3(jet_world.x, airstrip_elevation, jet_world.y),
+			"jet_yaw": jet_yaw,
+		})
+	return defs
+
+
+func airstrip_hangar_chunk_layout(cx: int, cz: int) -> Array:
+	var defs: Array = []
+	for hangar in airstrip_hangar_layout():
+		var pos: Vector3 = hangar.pos
+		if floori(pos.x / CHUNK) == cx and floori(pos.z / CHUNK) == cz:
+			defs.append(hangar)
+	return defs
+
+
+func airstrip_hangar_pad_local() -> Rect2:
+	var first_u := -AIRSTRIP_LENGTH * 0.5 + 84.0
+	var last_u := first_u + float(AIRSTRIP_HANGAR_COUNT - 1) \
+		* AIRSTRIP_HANGAR_SPACING
+	var minimum_u := first_u - AIRSTRIP_HANGAR_WIDTH * 0.5 \
+		- AIRSTRIP_HANGAR_PAD_MARGIN
+	var maximum_u := last_u + AIRSTRIP_HANGAR_WIDTH * 0.5 \
+		+ AIRSTRIP_HANGAR_PAD_MARGIN
+	var minimum_v := AIRSTRIP_WIDTH * 0.5
+	var maximum_v := AIRSTRIP_WIDTH * 0.5 + AIRSTRIP_HANGAR_TAXI_GAP \
+		+ AIRSTRIP_HANGAR_DEPTH + AIRSTRIP_HANGAR_PAD_MARGIN
+	return Rect2(Vector2(minimum_u, minimum_v),
+		Vector2(maximum_u - minimum_u, maximum_v - minimum_v))
 
 
 func point_on_airstrip(x: float, z: float) -> bool:
@@ -302,9 +635,9 @@ func mountain_influence(x: float, z: float) -> float:
 
 
 func _height_with_lake(x: float, z: float, lake: float) -> float:
-	var h := _n_base.get_noise_2d(x, z) * 9.0 \
+	var h := _n_base.get_noise_2d(x, z) * BASE_RELIEF_AMPLITUDE \
 		+ _n_detail.get_noise_2d(x, z) * 1.3 + 3.2 \
-		+ _n_hill.get_noise_2d(x, z) * 5.5
+		+ _n_hill.get_noise_2d(x, z) * ROLLING_HILL_AMPLITUDE
 	# Mountains rise before the lake blend so basins carve fjord-like shores
 	# through the foothills; scaling by (1 - lake) keeps peaks off lake beds.
 	var mountain := mountain_influence(x, z)
@@ -319,6 +652,16 @@ func _height_with_lake(x: float, z: float, lake: float) -> float:
 	# spawn meadow: smoothly guarantee dry, gentle ground near the world origin
 	var blend := exp(-(x * x + z * z) / 650.0)
 	h = lerpf(h, maxf(h, 2.4), blend)
+	# Connected packed-dirt routes flatten only their driveable crown and blend
+	# through soft shoulders. The profile was cached from the same seed fields at
+	# setup and capped at a realistic 8.5% grade, so cars remain useful even as
+	# the surrounding jungle gains substantially stronger rolling relief.
+	var road := road_surface_sample(x, z)
+	var road_strength := float(road.grade)
+	if road_strength > 0.0:
+		var road_floor := float(road.elevation) \
+			+ _n_detail.get_noise_2d(x * 0.61, z * 0.61) * 0.018
+		h = lerpf(h, road_floor, road_strength)
 	# Grade the authored duel bowl and every arena prop footprint onto one gentle
 	# fighting surface. Outside 35 m it blends back into the exact procedural
 	# terrain over 11 m, so there is no hard rim or visible chunk seam.
@@ -412,6 +755,17 @@ func ground_color(h: float, x: float, z: float) -> Color:
 		c = c.lerp(Color(0.83, 0.87, 0.91), snow_band)
 	if jit > 0.42:
 		c = c.darkened(0.22)
+	# Warm compacted soil plus twin darker tyre ruts. Because this color is
+	# analytic, the same roads remain visible in near terrain, horizon/skyline/
+	# stratos tiers, and the CPU-baked minimap without additional draw calls.
+	var road := road_surface_sample(x, z)
+	var road_strength := float(road.grade)
+	if road_strength > 0.12:
+		var dirt := Color(0.39 + jit * 0.025, 0.285, 0.16)
+		var rut_distance := absf(float(road.distance) - ROAD_HALF_WIDTH * 0.43)
+		var rut := 1.0 - smoothstep(0.18, 0.62, rut_distance)
+		dirt = dirt.darkened(rut * 0.16)
+		c = c.lerp(dirt, smoothstep(0.12, 0.78, road_strength))
 	# Packed-dirt runway/apron surface, baked into every tier and the minimap.
 	var strip := airstrip_grade(x, z)
 	if strip > 0.3:
@@ -621,7 +975,7 @@ func chunk_layout(cx: int, cz: int, include_decorations := true) -> Dictionary:
 	if debug_world:
 		return {"trees": [], "bananas": [], "rocks": [], "foliage": [],
 			"structures": [], "arena_pieces": [], "arena_id": "",
-			"biome": Biome.RAINFOREST}
+			"airfield_hangars": [], "biome": Biome.RAINFOREST}
 	var trees: Array = []
 	var bananas: Array = []
 	var rocks: Array = []
@@ -629,6 +983,7 @@ func chunk_layout(cx: int, cz: int, include_decorations := true) -> Dictionary:
 	var structures: Array = []
 	var arena_chunk := arena_chunk_layout(cx, cz)
 	var arena_pieces: Array = arena_chunk.get("pieces", [])
+	var airfield_hangars: Array = airstrip_hangar_chunk_layout(cx, cz)
 	var tree_points: Array[Vector2] = []
 	var x0 := cx * CHUNK
 	var z0 := cz * CHUNK
@@ -643,6 +998,7 @@ func chunk_layout(cx: int, cz: int, include_decorations := true) -> Dictionary:
 	structures.append_array(arena_chunk.get("supply_huts", []))
 	var occupied_clearances := structures.duplicate()
 	occupied_clearances.append_array(arena_pieces)
+	occupied_clearances.append_array(airfield_hangars)
 
 	# hero grove trees that land inside this chunk
 	if cx >= -1 and cx <= 0 and cz >= -1 and cz <= 0:
@@ -683,8 +1039,8 @@ func chunk_layout(cx: int, cz: int, include_decorations := true) -> Dictionary:
 			continue
 		if local_height > TREE_LINE:
 			continue  # bare rock and snow above the canopy line
-		if point_on_airstrip(px, pz):
-			continue  # nothing grows through packed runway dirt
+		if point_on_airstrip(px, pz) or point_on_road(px, pz):
+			continue  # nothing grows through packed runway or road dirt
 		tree_points.append(point)
 		var generated_tree := _make_tree(rng, Vector3(px, 0, pz), 0.0,
 			local_biome, include_decorations)
@@ -697,7 +1053,8 @@ func chunk_layout(cx: int, cz: int, include_decorations := true) -> Dictionary:
 	if not include_decorations:
 		return {"trees": trees, "bananas": [], "rocks": [], "foliage": [],
 			"structures": structures, "arena_pieces": arena_pieces,
-			"arena_id": str(arena_chunk.get("id", "")), "biome": center_biome}
+			"arena_id": str(arena_chunk.get("id", "")),
+			"airfield_hangars": airfield_hangars, "biome": center_biome}
 
 	# bananas: canopy-top rewards plus arcs floating between trees to guide swings
 	var nb := rng.randi_range(2, 4)
@@ -725,7 +1082,8 @@ func chunk_layout(cx: int, cz: int, include_decorations := true) -> Dictionary:
 		if height(rx, rz) > WATER_Y + 0.4 and Vector2(rx, rz).length() > 12.0:
 			var rock_radius := rng.randf_range(0.8, 1.9)
 			if not _point_in_structure_clearance(Vector2(rx, rz),
-					occupied_clearances) and not point_on_airstrip(rx, rz):
+					occupied_clearances) and not point_on_airstrip(rx, rz) \
+					and not point_on_road(rx, rz):
 				rocks.append({"pos": Vector3(rx, height(rx, rz), rz), "r": rock_radius})
 
 	# Dense, collision-free understory is cheap to draw as three MultiMeshes.
@@ -756,7 +1114,7 @@ func chunk_layout(cx: int, cz: int, include_decorations := true) -> Dictionary:
 			continue
 		if fh > TREE_LINE:
 			continue  # no undergrowth on the bare rock and snow bands
-		if point_on_airstrip(fx, fz):
+		if point_on_airstrip(fx, fz) or point_on_road(fx, fz):
 			continue
 		var kind := 0
 		if fb == Biome.WETLAND:
@@ -782,6 +1140,7 @@ func chunk_layout(cx: int, cz: int, include_decorations := true) -> Dictionary:
 	return {"trees": trees, "bananas": bananas, "rocks": rocks,
 		"foliage": foliage, "structures": structures,
 		"arena_pieces": arena_pieces,
+		"airfield_hangars": airfield_hangars,
 		"arena_id": str(arena_chunk.get("id", "")), "biome": center_biome}
 
 
@@ -833,7 +1192,8 @@ func _supply_hut_layout(cx: int, cz: int) -> Dictionary:
 		maximum_height = maxf(maximum_height, float(sample))
 	if minimum_height < WATER_Y + 0.72 or maximum_height - minimum_height > 1.05:
 		return {}
-	if point_on_airstrip(px, pz):
+	if point_on_airstrip(px, pz) \
+			or point_in_road_clearance(px, pz, SUPPLY_HUT_CLEARANCE):
 		return {}
 
 	var ammo_kind := rng.randi_range(SUPPLY_AMMO_REVOLVER, SUPPLY_AMMO_SNIPER)
@@ -904,7 +1264,7 @@ func biome_foliage_color(biome: int, shade: float) -> Color:
 
 
 ## Deterministic vehicle spawn definitions for one chunk. Curated machines sit
-## at the origin motor pool, on the airstrip apron, and at the nearest lake
+## at the origin motor pool, inside the six airfield hangars, and at the nearest lake
 ## dock; rare wilderness finds use their own RNG salt so adding them never
 ## reshuffles any existing layout. World spawns each id at most once per
 ## session, so re-streamed chunks cannot duplicate a driven-away machine.
@@ -913,6 +1273,10 @@ const VEHICLE_BIKE := 0
 const VEHICLE_JEEP := 1
 const VEHICLE_BOAT := 2
 const VEHICLE_JET := 3
+# Network ingress may resolve an infinite-world vehicle lazily from its stable
+# chunk id. Keep the lookup inside the same world envelope enforced by Net so a
+# hostile id cannot turn one seat request into unbounded noise-field work.
+const VEHICLE_MAX_CHUNK_COORDINATE := 20834
 
 func vehicle_layout(cx: int, cz: int) -> Array:
 	if debug_world:
@@ -928,11 +1292,12 @@ func vehicle_layout(cx: int, cz: int) -> Array:
 			"pos": Vector3(44.0, height(44.0, 2.0), 2.0),
 			"yaw": atan2(1.0, -0.1)})
 	if airstrip_valid:
-		var apron := airstrip_apron_world()
-		if floori(apron.x / CHUNK) == cx and floori(apron.y / CHUNK) == cz:
-			defs.append({"kind": VEHICLE_JET, "id": "v:strip#jet",
-				"pos": Vector3(apron.x, airstrip_elevation, apron.y),
-				"yaw": airstrip_heading})
+		for hangar in airstrip_hangar_layout():
+			var jet_pos: Vector3 = hangar.jet_pos
+			if floori(jet_pos.x / CHUNK) == cx \
+					and floori(jet_pos.z / CHUNK) == cz:
+				defs.append({"kind": VEHICLE_JET, "id": hangar.jet_id,
+					"pos": jet_pos, "yaw": hangar.jet_yaw})
 	if boat_dock_valid:
 		if floori(boat_dock_pos.x / CHUNK) == cx \
 				and floori(boat_dock_pos.z / CHUNK) == cz:
@@ -945,7 +1310,8 @@ func vehicle_layout(cx: int, cz: int) -> Array:
 	var pz := float(cz) * CHUNK + rng.randf_range(6.0, CHUNK - 6.0)
 	var kind_roll := rng.randf()
 	var yaw := rng.randf() * TAU
-	if Vector2(px, pz).length() < 150.0 or point_on_airstrip(px, pz):
+	if Vector2(px, pz).length() < 150.0 or point_on_airstrip(px, pz) \
+			or point_on_road(px, pz):
 		return defs
 	var h := height(px, pz)
 	var biome := biome_at_height(px, pz, h)
@@ -965,6 +1331,58 @@ func vehicle_layout(cx: int, cz: int) -> Array:
 		defs.append({"kind": VEHICLE_BOAT, "id": "v:%d,%d#0" % [cx, cz],
 			"pos": Vector3(px, WATER_Y, pz), "yaw": yaw})
 	return defs
+
+
+## Resolve one stable generated vehicle id back to the authoritative definition
+## for the current seed. This is deliberately narrower than `vehicle_layout`:
+## curated ids are matched explicitly, while wilderness ids must encode their
+## exact canonical owning chunk and must actually win that chunk's seeded roll.
+## Admin-delivered and test-only ids are not generated world definitions.
+func vehicle_definition_by_id(vehicle_id: String) -> Dictionary:
+	if debug_world or vehicle_id.is_empty():
+		return {}
+	match vehicle_id:
+		"v:pool#bike":
+			return {"kind": VEHICLE_BIKE, "id": vehicle_id,
+				"pos": Vector3(41.5, height(41.5, 6.0), 6.0),
+				"yaw": atan2(1.0, 0.15)}
+		"v:pool#jeep":
+			return {"kind": VEHICLE_JEEP, "id": vehicle_id,
+				"pos": Vector3(44.0, height(44.0, 2.0), 2.0),
+				"yaw": atan2(1.0, -0.1)}
+		"v:dock#boat":
+			if boat_dock_valid:
+				return {"kind": VEHICLE_BOAT, "id": vehicle_id,
+					"pos": boat_dock_pos, "yaw": boat_dock_yaw}
+			return {}
+	if vehicle_id.begins_with("v:strip#jet-"):
+		for hangar in airstrip_hangar_layout():
+			if str(hangar.jet_id) == vehicle_id:
+				return {"kind": VEHICLE_JET, "id": vehicle_id,
+					"pos": hangar.jet_pos, "yaw": hangar.jet_yaw}
+		return {}
+	if not vehicle_id.begins_with("v:") or not vehicle_id.ends_with("#0"):
+		return {}
+	var separator := vehicle_id.find("#", 2)
+	if separator < 0:
+		return {}
+	var coordinate_text := vehicle_id.substr(2, separator - 2)
+	var coordinates := coordinate_text.split(",", false)
+	if coordinates.size() != 2 or not coordinates[0].is_valid_int() \
+			or not coordinates[1].is_valid_int():
+		return {}
+	var cx := int(coordinates[0])
+	var cz := int(coordinates[1])
+	if coordinate_text != "%d,%d" % [cx, cz] \
+			or cx < -VEHICLE_MAX_CHUNK_COORDINATE \
+			or cx > VEHICLE_MAX_CHUNK_COORDINATE \
+			or cz < -VEHICLE_MAX_CHUNK_COORDINATE \
+			or cz > VEHICLE_MAX_CHUNK_COORDINATE:
+		return {}
+	for definition in vehicle_layout(cx, cz):
+		if str(definition.get("id", "")) == vehicle_id:
+			return definition.duplicate(true)
+	return {}
 
 
 ## Decorative skyline-tier tree crowns for one 48 m chunk: a deliberately
@@ -991,7 +1409,7 @@ func skyline_tree_layout(cx: int, cz: int) -> Array:
 		var h := height(px, pz)
 		if h < WATER_Y + 0.6 or h > TREE_LINE:
 			continue
-		if point_on_airstrip(px, pz):
+		if point_on_airstrip(px, pz) or point_on_road(px, pz):
 			continue
 		var biome := biome_at_height(px, pz, h)
 		if density_roll > _tree_density(biome) * 0.82:
@@ -1011,6 +1429,8 @@ func skyline_tree_layout(cx: int, cz: int) -> Array:
 ## tree silhouette. Purely a function of existing deterministic fields.
 func canopy_cover(h: float, x: float, z: float) -> float:
 	if debug_world:
+		return 0.0
+	if point_on_road(x, z) or point_on_airstrip(x, z):
 		return 0.0
 	if h < WATER_Y + 0.5 or h > TREE_LINE:
 		return 0.0

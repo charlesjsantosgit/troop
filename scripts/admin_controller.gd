@@ -3,7 +3,8 @@ extends Node
 ## The single place every admin verb funnels through — the F8 panel and slash
 ## commands both call these methods, so UI and chat can never drift apart.
 ## Local-target actions apply immediately; remote targets go through
-## Net.admin_command, which the server re-validates against its token list.
+## Net.admin_command, which the server re-validates against its proven-key
+## admin grant list.
 
 var main: Node
 var world: Node3D
@@ -25,6 +26,7 @@ func configure(owner_main: Node, owner_world: Node3D,
 	world = owner_world
 	chat = chat_box
 	Net.admin_action.connect(_on_remote_admin_action)
+	Net.admin_notice.connect(feedback)
 
 
 func _player() -> MonkeyPlayer:
@@ -111,11 +113,17 @@ func spawn_vehicle(kind_word: String) -> bool:
 	var forward := Vector3(sin(p.rig.yaw_angle() + PI), 0.0,
 		cos(p.rig.yaw_angle() + PI))
 	var spot := p.global_position + forward * 5.5
-	var v: Vehicle = world.spawn_vehicle(kinds[query],
-		"v:admin#%d-%d" % [Net.local_id(), _admin_vehicle_serial], spot,
-		atan2(forward.x, forward.z))
-	feedback("%s delivered — E to %s." % [v.display_name(),
-		v.mount_verb().to_lower()])
+	var vehicle_id := "v:admin#%d-%d" % [Net.local_id(), _admin_vehicle_serial]
+	var vehicle_kind := int(kinds[query])
+	var spawn_yaw := atan2(forward.x, forward.z)
+	if not Net.register_admin_vehicle(vehicle_id, vehicle_kind, spot, spawn_yaw):
+		feedback("Vehicle delivery could not be registered with the authority.")
+		return false
+	# The authority's spawn signal creates the node on every peer, including this
+	# one. Waiting for that signal prevents a rejected asynchronous request from
+	# leaving a client-only ghost machine behind.
+	feedback("%s delivery requested — it will appear in front of you." % \
+		Vehicle.KIND_NAMES[vehicle_kind].capitalize())
 	return true
 
 
@@ -147,7 +155,7 @@ func teleport_to_vehicle_spot(query: String) -> bool:
 			var apron := Gen.airstrip_apron_world()
 			p.admin_teleport(Vector3(apron.x + 5.0,
 				Gen.airstrip_elevation + 0.6, apron.y + 5.0))
-			feedback("Airstrip apron — the jet is parked beside you; the "
+			feedback("Airstrip apron — six jets wait in the nearby hangars; the "
 				+ "runway runs %d m." % int(Gen.AIRSTRIP_LENGTH))
 		"pool":
 			var pool_height := Gen.height(40.0, 4.0)
@@ -253,25 +261,46 @@ func teleport_to_player(peer_id: int) -> void:
 
 
 func kick_player(peer_id: int, reason := "Kicked by admin") -> void:
-	Net.admin_command("kick", {"target": peer_id, "reason": reason})
+	var clean_reason: String = str(reason).left(Net.MAX_CHAT_LENGTH)
+	Net.admin_command("kick", {"target": peer_id, "reason": clean_reason})
 	feedback("Kicked %s." % _peer_name(peer_id))
 
 
 func ban_player(peer_id: int, minutes: int) -> void:
+	minutes = clampi(minutes, 1, Net.MAX_BAN_MINUTES)
 	Net.admin_command("ban", {"target": peer_id, "minutes": minutes})
 	feedback("Banned %s from the public canopy for %d minutes." % [
 		_peer_name(peer_id), minutes])
 
 
+func grant_admin(peer_id: int) -> void:
+	if peer_id == Net.local_id():
+		feedback("Choose another connected player to grant admin.")
+		return
+	Net.admin_command("grant_admin", {"target": peer_id})
+
+
+func revoke_admin(peer_id: int) -> void:
+	if peer_id == Net.local_id():
+		feedback("You cannot revoke your own active admin session.")
+		return
+	Net.admin_command("revoke_admin", {"target": peer_id})
+
+
 func set_time(hour: float) -> void:
-	if world:
-		world.set_time_of_day_override(fmod(hour, 24.0))
-		feedback("Time set to %02d:%02d." % [int(hour) % 24,
-			int(fmod(hour, 1.0) * 60.0)])
+	var normalized := wrapf(hour, 0.0, 24.0)
+	if Net.active:
+		Net.admin_command("set_time", {"hour": normalized})
+	elif world:
+		world.set_time_of_day_override(normalized)
+		feedback("Time set to %02d:%02d." % [int(normalized),
+			int(fmod(normalized, 1.0) * 60.0)])
 
 
 func clear_time() -> void:
-	if world:
+	if Net.active:
+		Net.admin_command("clear_time", {})
+	elif world:
 		world.clear_time_of_day_override()
 		feedback("Clock released back to the shared cycle.")
 
@@ -317,7 +346,7 @@ func spawn_monkey(kind: String) -> bool:
 
 
 func announce(text: String) -> void:
-	Net.admin_command("announce", {"text": text})
+	Net.admin_command("announce", {"text": text.left(Net.MAX_CHAT_LENGTH)})
 
 
 # ---- remote-applied actions (this client is the target) --------------------
@@ -366,6 +395,7 @@ func run_command(text: String) -> void:
 			feedback("/vehicle <bike|jeep|boat|jet> — deliver any machine")
 			feedback("/time <hour|clear> — set or release the clock")
 			feedback("/kick <player> · /ban <player> <minutes>")
+			feedback("/admin <exact-player|peer-id> · /unadmin <exact-player|peer-id>")
 			feedback("/say <text> — server-wide announcement")
 			feedback("F8 opens the same commands as buttons.")
 		"kill":
@@ -397,8 +427,10 @@ func run_command(text: String) -> void:
 		"time":
 			if parts.size() > 1 and parts[1] == "clear":
 				clear_time()
-			elif parts.size() > 1:
+			elif parts.size() > 1 and parts[1].is_valid_float():
 				set_time(float(parts[1]))
+			else:
+				feedback("Usage: /time <0-23.99|clear>")
 		"kick":
 			var target := _find_peer_by_name(parts[1] if parts.size() > 1 else "")
 			if target != 0:
@@ -410,6 +442,24 @@ func run_command(text: String) -> void:
 			if target != 0:
 				ban_player(target,
 					int(parts[2]) if parts.size() > 2 else 60)
+			else:
+				feedback("No such player.")
+		"admin", "grantadmin":
+			var target := _find_peer_for_admin_grant(
+				parts[1] if parts.size() > 1 else "")
+			if target > 0:
+				grant_admin(target)
+			elif target < 0:
+				feedback("Ambiguous player — use an exact name or peer ID from F8.")
+			else:
+				feedback("No such player.")
+		"unadmin", "revokeadmin":
+			var target := _find_peer_for_admin_grant(
+				parts[1] if parts.size() > 1 else "")
+			if target > 0:
+				revoke_admin(target)
+			elif target < 0:
+				feedback("Ambiguous player — use an exact name or peer ID from F8.")
 			else:
 				feedback("No such player.")
 		"say", "announce":
@@ -446,6 +496,32 @@ func _find_peer_by_name(query: String) -> int:
 		if str(Net.names[peer_id]).to_lower().begins_with(query.to_lower()):
 			return peer_id
 	return 0
+
+
+## Admin identity changes require an unambiguous target. A decimal peer ID is
+## exact; names accept an exact case-insensitive match or one unique prefix.
+## -1 means ambiguous so the command can explain how to disambiguate.
+func _find_peer_for_admin_grant(query: String) -> int:
+	var clean := query.strip_edges()
+	if clean.is_empty():
+		return 0
+	if clean.is_valid_int():
+		var peer_id := int(clean)
+		return peer_id if Net.names.has(peer_id) else 0
+	var lowered := clean.to_lower()
+	var exact: Array[int] = []
+	var prefixes: Array[int] = []
+	for peer_id in Net.names:
+		var candidate := str(Net.names[peer_id]).to_lower()
+		if candidate == lowered:
+			exact.append(int(peer_id))
+		elif candidate.begins_with(lowered):
+			prefixes.append(int(peer_id))
+	if exact.size() == 1:
+		return exact[0]
+	if exact.size() > 1 or prefixes.size() > 1:
+		return -1
+	return prefixes[0] if prefixes.size() == 1 else 0
 
 
 func _peer_name(peer_id: int) -> String:
