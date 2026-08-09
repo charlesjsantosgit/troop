@@ -1704,6 +1704,11 @@ func run(main) -> void:
 	var jet_chase_direction_before_mouse: Vector3 = -p.cam.cam_basis().z
 	p.cam.apply_look(Vector2(105.0, -62.0))
 	await sim(2)
+	# Physics-only headless runners may batch both fixed ticks before the
+	# render-driven CameraRig receives its next process callback. Refresh the
+	# presentation once so this assertion samples the documented camera lead,
+	# not platform-dependent frame scheduling.
+	p.cam._process(1.0 / 60.0)
 	main.hud._process(0.0)
 	var moderate_flight_aim: Vector2 = p.cam.aircraft_aim_normalized()
 	var jet_chase_direction_after_mouse: Vector3 = -p.cam.cam_basis().z
