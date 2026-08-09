@@ -2,28 +2,28 @@
 
 importer="texture"
 type="CompressedTexture2D"
-uid="uid://hygsk00gsr82"
-path="res://.godot/imported/pangaea_earth_4k.jpg-f9beb057ba4a967f286492d2ceeae8cc.ctex"
+uid="uid://iliyfl834fww"
+path="res://.godot/imported/satellite_microdetail_overlay.png-646afc6691cac4196e08555a89f15ad1.ctex"
 metadata={
 "vram_texture": false
 }
 
 [deps]
 
-source_file="res://assets/textures/pangaea_earth_4k.jpg"
-dest_files=["res://.godot/imported/pangaea_earth_4k.jpg-f9beb057ba4a967f286492d2ceeae8cc.ctex"]
+source_file="res://assets/textures/satellite_microdetail_overlay.png"
+dest_files=["res://.godot/imported/satellite_microdetail_overlay.png-646afc6691cac4196e08555a89f15ad1.ctex"]
 
 [params]
 
 compress/mode=0
-compress/high_quality=true
-compress/lossy_quality=0.92
+compress/high_quality=false
+compress/lossy_quality=0.7
 compress/uastc_level=0
 compress/rdo_quality_loss=0.0
 compress/hdr_compression=1
 compress/normal_map=0
 compress/channel_pack=0
-mipmaps/generate=true
+mipmaps/generate=false
 mipmaps/limit=-1
 roughness/mode=0
 roughness/src_normal=""

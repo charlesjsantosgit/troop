@@ -4,6 +4,8 @@ extends Control
 ## Gen fields as the terrain instead of a second camera; distant zooms use
 ## imported 4K equirectangular atlases wrapped onto interactive globes. Local
 ## tile baking remains incremental and keeps a strict per-frame sampling budget.
+## A transparent satellite micro-detail plate gives every new tile crisp natural
+## texture immediately while the low-frequency live terrain mask refines.
 
 signal opened
 signal closed
@@ -13,16 +15,20 @@ enum CelestialBody { EARTH, MOON }
 
 const EARTH_CIRCUMFERENCE_FALLBACK := 40_075_016.686
 const MOON_CIRCUMFERENCE_M := 10_921_000.0
-const TILE_PX := 160
+const TILE_PX := 320
 const TILE_METERS_PER_PX := [2.0, 8.0, 32.0, 128.0, 512.0, 2048.0,
 	8192.0]
-const CACHE_TILE_LIMIT := 144
+const CACHE_TILE_LIMIT := 64
 const LOCAL_BAKE_SAMPLES_PER_FRAME := 64
+const LOCAL_SAMPLES_PER_TILE_TURN := 12
 # Kept as a compatibility diagnostic: imported atlases perform zero runtime
 # terrain samples, so the actual value reported each frame is always zero.
 const GLOBE_BAKE_SAMPLES_PER_FRAME := 64
 const BAKE_TIME_BUDGET_USEC := 1800
-const LOCAL_PREVIEW_GRIDS := [2, 4, 8, 20, 40, 80, 160]
+# Thirty-two live samples across a 320 px tile preserve coast, biome, height and
+# road silhouettes. Fine satellite texture comes from the shared overlay below,
+# avoiding the old 34,284 expensive Gen samples per tile.
+const LOCAL_PREVIEW_GRIDS := [2, 4, 8, 16, 32]
 const GLOBE_ATLAS_SIZE := Vector2i(4096, 2048)
 const MOON_ATLAS_SIZE := Vector2i(4096, 2048)
 const GLOBE_LONGITUDE_STEPS := 96
@@ -31,6 +37,8 @@ const EARTH_ATLAS: Texture2D = preload(
 	"res://assets/textures/pangaea_earth_4k.jpg")
 const MOON_ATLAS: Texture2D = preload(
 	"res://assets/textures/lunar_surface_4k.jpg")
+const SATELLITE_DETAIL_OVERLAY: Texture2D = preload(
+	"res://assets/textures/satellite_microdetail_overlay.png")
 const MOON_LIGHT_SCREEN := Vector3(-0.42, -0.30, 0.855)
 const MIN_VIEW_SPAN_M := 320.0
 const GLOBE_BLEND_START_FRACTION := 0.075
@@ -77,8 +85,10 @@ var _bake_queue: Array[String] = []
 var _required_keys: Dictionary = {}
 var _touch_serial := 0
 var _last_baked_samples := 0
+var _last_local_texture_uploads := 0
 var _baked_seed := -1
 var _active_tier := 0
+var _satellite_detail_image: Image
 
 # Both globe atlases are imported once and shared through Godot's resource
 # cache. They never invoke Gen or allocate/copy an 8.4-million-pixel Image at
@@ -814,24 +824,44 @@ func _cache_key(tier: int, tile_key: Vector2i) -> String:
 
 
 func _create_tile(cache_key: String, tier: int, tile_key: Vector2i) -> void:
-	var image := Image.create(TILE_PX, TILE_PX, false, Image.FORMAT_RGB8)
-	var tile_world := float(TILE_METERS_PER_PX[tier]) * TILE_PX
-	# One representative color prevents a black hole immediately. Coarse-to-fine
-	# passes begin on the shared frame budget, so opening a 4K map never performs
-	# hundreds of synchronous samples.
-	var representative := _map_sample((Vector2(tile_key) + Vector2(0.5, 0.5))
-		* tile_world, float(TILE_METERS_PER_PX[tier]) * TILE_PX)
-	image.fill(representative.color)
+	# RGBA matches the low-alpha satellite overlay, allowing native blend_rect
+	# calls with no per-sample format conversion.
+	var image := _initial_satellite_tile(tier, tile_key)
 	_tiles[cache_key] = {
 		"tier": tier,
 		"key": tile_key,
 		"image": image,
 		"texture": ImageTexture.create_from_image(image),
-		"stage": 0,
+		# The cheap shared-edge overview already supplies the 2x2 stage. Live
+		# refinement begins at 4x4 with roads, foliage and local terrain detail.
+		"stage": 1,
 		"sample_cursor": 0,
+		"stage_image": Image.create(LOCAL_PREVIEW_GRIDS[1] + 1,
+			LOCAL_PREVIEW_GRIDS[1] + 1, false, Image.FORMAT_RGBA8),
+		"stage_ready": false,
+		"pending_image": null,
 		"touch": _touch_serial,
 	}
 	_bake_queue.append(cache_key)
+
+
+## Build a coherent first frame from nine inexpensive whole-planet samples.
+## Including tile edges makes adjacent images agree before live local queries
+## begin, so a newly opened or quickly panned map never shows flat tile blocks.
+func _initial_satellite_tile(tier: int, tile_key: Vector2i) -> Image:
+	var tile_world := float(TILE_METERS_PER_PX[tier]) * TILE_PX
+	var origin := Vector2(tile_key) * tile_world
+	var grid := int(LOCAL_PREVIEW_GRIDS[0])
+	var overview := Image.create(grid + 1, grid + 1, false, Image.FORMAT_RGBA8)
+	for sample_z in range(grid + 1):
+		for sample_x in range(grid + 1):
+			var fraction := Vector2(sample_x, sample_z) / float(grid)
+			var sample := _planet_overview_sample(origin + fraction * tile_world)
+			overview.set_pixel(sample_x, sample_z, sample.color)
+	overview.resize(TILE_PX, TILE_PX, Image.INTERPOLATE_LANCZOS)
+	_stamp_satellite_detail(overview, Rect2i(0, 0, TILE_PX, TILE_PX),
+		Vector2i(tile_key.x * TILE_PX, tile_key.y * TILE_PX))
+	return overview
 
 
 func _prioritize_bakes() -> void:
@@ -842,6 +872,24 @@ func _prioritize_bakes() -> void:
 			current.append(cache_key)
 		else:
 			rest.append(cache_key)
+	# Refine the centre of the view first. It is the point beneath the cursor
+	# during wheel zoom, so the place the player is inspecting reaches its live
+	# coastline/road pass before off-screen cache padding.
+	current.sort_custom(func(a: String, b: String):
+		if not _tiles.has(a) or not _tiles.has(b):
+			return a < b
+		var a_tile: Dictionary = _tiles[a]
+		var b_tile: Dictionary = _tiles[b]
+		# Give every visible tile a smooth shared-edge preview before spending
+		# samples on a finer centre tile. Distance breaks ties within one stage.
+		if int(a_tile.stage) != int(b_tile.stage):
+			return int(a_tile.stage) < int(b_tile.stage)
+		var a_world := (Vector2(a_tile.key) + Vector2(0.5, 0.5)) \
+			* float(TILE_METERS_PER_PX[int(a_tile.tier)]) * TILE_PX
+		var b_world := (Vector2(b_tile.key) + Vector2(0.5, 0.5)) \
+			* float(TILE_METERS_PER_PX[int(b_tile.tier)]) * TILE_PX
+		return a_world.distance_squared_to(_center) \
+			< b_world.distance_squared_to(_center))
 	current.append_array(rest)
 	_bake_queue = current
 
@@ -867,50 +915,92 @@ func _evict_tiles() -> void:
 
 
 func _bake_local_samples(maximum_samples: int) -> void:
+	_last_local_texture_uploads = 0
 	var deadline := Time.get_ticks_usec() + BAKE_TIME_BUDGET_USEC
-	var dirty: Dictionary = {}
 	while _last_baked_samples < maximum_samples \
 			and Time.get_ticks_usec() < deadline and not _bake_queue.is_empty():
 		var cache_key: String = _bake_queue.pop_front()
 		if not _tiles.has(cache_key):
 			continue
 		var tile: Dictionary = _tiles[cache_key]
-		var turn_samples := mini(4, maximum_samples - _last_baked_samples)
+		# Work in short turns so every visible tile gets its smooth first pass in a
+		# few frames. Textures upload only when a complete grid stage resolves.
+		var turn_samples := mini(LOCAL_SAMPLES_PER_TILE_TURN,
+			maximum_samples - _last_baked_samples)
 		for _sample_index in range(turn_samples):
 			if _bake_tile_sample(tile):
 				break
 			_last_baked_samples += 1
-			dirty[cache_key] = true
 			if Time.get_ticks_usec() >= deadline:
 				break
-		if int(tile.stage) < LOCAL_PREVIEW_GRIDS.size():
+		if int(tile.stage) < LOCAL_PREVIEW_GRIDS.size() \
+				and not bool(tile.stage_ready):
 			_bake_queue.append(cache_key)
-	for cache_key in dirty:
+	_commit_coherent_local_stage()
+
+
+## Hold finished tile images until every visible tile at the same refinement
+## level is ready. Publishing a stage together removes the temporary checkerboard
+## that otherwise appears when adjacent satellite tiles finish on nearby frames.
+func _commit_coherent_local_stage() -> void:
+	if _required_keys.is_empty():
+		return
+	var target_stage := LOCAL_PREVIEW_GRIDS.size()
+	for cache_key in _required_keys:
 		if _tiles.has(cache_key):
-			var dirty_tile: Dictionary = _tiles[cache_key]
-			(dirty_tile.texture as ImageTexture).update(dirty_tile.image)
+			target_stage = mini(target_stage, int(_tiles[cache_key].stage))
+	if target_stage >= LOCAL_PREVIEW_GRIDS.size():
+		return
+	for cache_key in _required_keys:
+		if not _tiles.has(cache_key):
+			return
+		var candidate: Dictionary = _tiles[cache_key]
+		if int(candidate.stage) == target_stage \
+				and not bool(candidate.stage_ready):
+			return
+	for cache_key in _required_keys:
+		var tile: Dictionary = _tiles[cache_key]
+		if int(tile.stage) != target_stage:
+			continue
+		var pending: Image = tile.pending_image
+		if not pending or pending.is_empty():
+			continue
+		tile.image = pending
+		(tile.texture as ImageTexture).update(pending)
+		_last_local_texture_uploads += 1
+		tile.pending_image = null
+		tile.stage_ready = false
+		tile.stage = target_stage + 1
+		tile.sample_cursor = 0
+		if int(tile.stage) < LOCAL_PREVIEW_GRIDS.size():
+			var next_grid := int(LOCAL_PREVIEW_GRIDS[int(tile.stage)]) + 1
+			tile.stage_image = Image.create(next_grid, next_grid, false,
+				Image.FORMAT_RGBA8)
+			var queued_key := str(cache_key)
+			if not _bake_queue.has(queued_key):
+				_bake_queue.append(queued_key)
 
 
 ## Returns true after the final resolution was already complete.
 func _bake_tile_sample(tile: Dictionary) -> bool:
 	var stage := int(tile.stage)
-	if stage >= LOCAL_PREVIEW_GRIDS.size():
+	if stage >= LOCAL_PREVIEW_GRIDS.size() or bool(tile.stage_ready):
 		return true
 	var tier: int = tile.tier
 	var tile_key: Vector2i = tile.key
 	var source_mpp := float(TILE_METERS_PER_PX[tier])
 	var tile_world := source_mpp * TILE_PX
 	var origin := Vector2(tile_key) * tile_world
-	var image: Image = tile.image
 	var grid := int(LOCAL_PREVIEW_GRIDS[stage])
+	var sample_size := grid + 1
 	var cursor := int(tile.sample_cursor)
-	var sample_x := cursor % grid
-	var sample_z := floori(float(cursor) / float(grid))
-	var block_px := int(TILE_PX / grid)
-	var fraction := (Vector2(sample_x, sample_z) + Vector2(0.5, 0.5)) \
-		/ float(grid)
+	var sample_x := cursor % sample_size
+	var sample_z := floori(float(cursor) / float(sample_size))
+	# Include both tile edges. Adjacent tiles therefore sample the exact same
+	# boundary coordinates, eliminating seams after smooth upscaling.
+	var fraction := Vector2(sample_x, sample_z) / float(grid)
 	var point := origin + fraction * tile_world
-	var sample := _map_sample(point, source_mpp * block_px)
+	var sample := _map_sample(point, tile_world / float(grid))
 	var color: Color = sample.color
 	if not bool(sample.get("water", false)):
 		var canopy := float(sample.get("tree_cover", 0.0))
@@ -921,15 +1011,61 @@ func _bake_tile_sample(tile: Dictionary) -> bool:
 		if road > 0.12:
 			color = color.lerp(Color("9a7342"),
 				smoothstep(0.12, 0.8, road) * 0.72)
-	image.fill_rect(Rect2i(sample_x * block_px, sample_z * block_px,
-		block_px, block_px), color)
+	var stage_image: Image = tile.stage_image
+	stage_image.set_pixel(sample_x, sample_z, color)
 	cursor += 1
-	if cursor >= grid * grid:
-		tile.stage = stage + 1
+	if cursor >= sample_size * sample_size:
+		# Reconstruct the low-frequency live terrain mask smoothly, then stamp the
+		# high-frequency satellite plate exactly once for this refinement stage.
+		var refined := stage_image.duplicate()
+		refined.resize(TILE_PX, TILE_PX, Image.INTERPOLATE_LANCZOS)
+		_stamp_satellite_detail(refined, Rect2i(0, 0, TILE_PX, TILE_PX),
+			Vector2i(tile_key.x * TILE_PX, tile_key.y * TILE_PX))
+		tile.pending_image = refined
+		tile.stage_ready = true
 		tile.sample_cursor = 0
 	else:
 		tile.sample_cursor = cursor
 	return false
+
+
+## Blend a generated, photoreal overhead luminance plate over a live terrain
+## color block. The PNG stores black/white detail at low alpha, so Image's native
+## C++ blend keeps the procedural biome hue while adding canopy, stone and soil
+## structure without another terrain query per output pixel.
+func _stamp_satellite_detail(destination: Image, destination_rect: Rect2i,
+		world_pixel_origin: Vector2i) -> void:
+	if not _satellite_detail_image:
+		_satellite_detail_image = SATELLITE_DETAIL_OVERLAY.get_image()
+	if not _satellite_detail_image or _satellite_detail_image.is_empty():
+		return
+	var overlay_size := _satellite_detail_image.get_size()
+	if overlay_size.x <= 0 or overlay_size.y <= 0:
+		return
+	var written_y := 0
+	while written_y < destination_rect.size.y:
+		var source_y := posmod(world_pixel_origin.y + written_y, overlay_size.y)
+		var copy_h := mini(destination_rect.size.y - written_y,
+			overlay_size.y - source_y)
+		var written_x := 0
+		while written_x < destination_rect.size.x:
+			var source_x := posmod(world_pixel_origin.x + written_x,
+				overlay_size.x)
+			var copy_w := mini(destination_rect.size.x - written_x,
+				overlay_size.x - source_x)
+			destination.blend_rect(_satellite_detail_image,
+				Rect2i(source_x, source_y, copy_w, copy_h),
+				destination_rect.position + Vector2i(written_x, written_y))
+			written_x += copy_w
+		written_y += copy_h
+
+
+static func local_samples_per_complete_tile() -> int:
+	var samples := 0
+	for grid in LOCAL_PREVIEW_GRIDS:
+		var shared_edge_grid := int(grid) + 1
+		samples += shared_edge_grid * shared_edge_grid
+	return samples
 
 
 static func _pixel_hash(x: int, y: int) -> float:
@@ -1421,6 +1557,7 @@ func cache_diagnostics() -> Dictionary:
 		"queue": _bake_queue.size(),
 		"required": _required_keys.size(),
 		"last_local_samples": _last_baked_samples,
+		"last_local_texture_uploads": _last_local_texture_uploads,
 		"atlas_stage": _globe_stage,
 		"atlas_cursor": _globe_sample_cursor,
 		"last_atlas_samples": _last_globe_baked_samples,

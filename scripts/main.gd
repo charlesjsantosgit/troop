@@ -2092,11 +2092,10 @@ func _do_shot(args: Array) -> void:
 		else:
 			hud.world_map._target_span_m = 8000.0
 			hud.world_map._view_span_m = 8000.0
-		# Let the production per-frame baker fill the compact globe atlas. The Moon
-		# uses a deliberately finer progressive atlas than Earth, so its deterministic
-		# fixture gets enough frames to reach the fully refined crater pass. Local
-		# view intentionally retains progressive tile loading in this fixture.
-		var atlas_settle_frames := 360 if what == "world-map-moon" else 160
+		# Celestial atlases are imported and ready immediately. The close view gets
+		# enough frames to exercise progressive live-terrain refinement; globe shots
+		# need only a few frames for layout and their one cached sphere draw.
+		var atlas_settle_frames := 160 if what == "world-map" else 12
 		for i in range(atlas_settle_frames):
 			await RenderingServer.frame_post_draw
 		var world_map_image := get_viewport().get_texture().get_image()

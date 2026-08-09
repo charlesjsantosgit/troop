@@ -1,5 +1,32 @@
 # TROOP changelog
 
+## 0.4.3 — SATELLITE MAP
+
+This content-only patch replaces the blocky close world-map zoom with a sharper,
+more natural satellite presentation while substantially reducing the work needed
+to refine each visible tile.
+
+### Photoreal map zoom and faster refinement
+
+- Close map tiles are now 320 px and receive a crisp, photoreal overhead terrain
+  detail layer immediately instead of appearing as flat colored squares.
+- Live biome, ocean, coast, mountain, foliage, and road colors reconstruct through
+  smooth shared-edge grids, removing the visible square seams between map samples
+  and neighboring tiles.
+- A complete close tile now needs at most **1,493** terrain samples, down from
+  **34,284**, while the first useful passes appear within a fraction of that work.
+- Texture uploads happen only after a complete refinement stage and remain bounded
+  per frame, avoiding the repeated GPU uploads that made zooming feel sluggish.
+- Earth and Moon retain their 4096x2048 imagery with high-quality compression and
+  mipmaps, so the space-to-ground transition stays sharp without distant aliasing.
+
+### Automatic Windows delivery
+
+- Multiplayer protocol remains **9**, matching TROOP 0.4.2 and the public server.
+- This release is a signed content-pack update with `requires_installer=false`.
+  TROOP 0.4.2 downloads it automatically and activates it after a safe restart;
+  Windows players do not need to open Setup for this patch.
+
 ## 0.4.2 — MOON WALK FIX
 
 This patch fixes the lunar touchdown state that could leave a monkey planted on

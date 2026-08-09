@@ -93,6 +93,17 @@ func run(main) -> void:
 	_check(uhd_requested.size() <= WorldMap.CACHE_TILE_LIMIT,
 		"4K view coarsens instead of allocating unbounded tiles",
 		"tier=%d keys=%d" % [uhd_tier, uhd_requested.size()])
+	_check(WorldMap.TILE_PX >= 320 and requested.size() <= 32,
+		"close map uses large sharp tiles instead of a pixelated tile swarm",
+		"tile_px=%d hd_keys=%d" % [WorldMap.TILE_PX, requested.size()])
+	_check(WorldMap.local_samples_per_complete_tile() <= 1500,
+		"satellite-detail tile needs at most 1,500 live terrain samples",
+		"samples=%d" % WorldMap.local_samples_per_complete_tile())
+	_check(WorldMap.BAKE_TIME_BUDGET_USEC <= 1800,
+		"progressive map refinement has a 1.8 ms per-frame CPU ceiling")
+	var detail_image := WorldMap.SATELLITE_DETAIL_OVERLAY.get_image()
+	_check(detail_image != null and detail_image.get_size() == Vector2i(512, 512),
+		"close map has a reusable 512px photoreal satellite detail plate")
 
 	var atlas: WorldMap = main.hud.world_map
 	_check(atlas != null and not atlas.is_open(),
@@ -215,6 +226,9 @@ func run(main) -> void:
 	_check(int(local_diag.last_local_samples) <=
 		WorldMap.LOCAL_BAKE_SAMPLES_PER_FRAME,
 		"local terrain bake work is frame bounded", str(local_diag))
+	_check(int(local_diag.last_local_texture_uploads) <= int(local_diag.required),
+		"coherent stage reveal uploads each visible tile at most once",
+		str(local_diag))
 	_check(int(local_diag.tiles) <= maxi(WorldMap.CACHE_TILE_LIMIT,
 		int(local_diag.required)), "local tile cache is globally bounded",
 		str(local_diag))
@@ -237,9 +251,10 @@ func run(main) -> void:
 	_check(atlas._globe_texture != null \
 			and atlas._globe_texture.get_width() == 4096 \
 			and atlas._globe_texture.get_height() == 2048 \
+			and atlas._globe_texture.get_image().has_mipmaps() \
 			and atlas._globe_texture == WorldMap.shared_earth_texture() \
 			and atlas._globe_texture == SpaceVoyageVisuals.shared_earth_texture(),
-		"world map and voyage share the imported 4096x2048 Pangaea atlas")
+		"world map and voyage share a mipmapped 4096x2048 Pangaea atlas")
 	var voyage_visuals: SpaceVoyageVisuals = \
 		main.expedition_manager.rocket.voyage_visuals
 	var voyage_earth_mesh := voyage_visuals.earth_visual.mesh as SphereMesh
@@ -284,9 +299,10 @@ func run(main) -> void:
 	_check(atlas._moon_texture != null \
 			and atlas._moon_texture.get_width() == 4096 \
 			and atlas._moon_texture.get_height() == 2048 \
+			and atlas._moon_texture.get_image().has_mipmaps() \
 			and atlas._moon_texture == WorldMap.shared_moon_texture() \
 			and atlas._moon_texture == SpaceVoyageVisuals.shared_moon_texture(),
-		"world map and voyage share the imported 4096x2048 lunar atlas")
+		"world map and voyage share a mipmapped 4096x2048 lunar atlas")
 	var cached_moon_texture_id := atlas._moon_texture.get_instance_id()
 	atlas.focus_moon()
 	_check(atlas._moon_texture.get_instance_id() == cached_moon_texture_id \
