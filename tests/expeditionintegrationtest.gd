@@ -344,8 +344,80 @@ func _run() -> void:
 		"local lunar arrival integrates suit, oxygen tank, and space inventory")
 	_check(is_equal_approx(player.environment_gravity_mps2,
 			moon_script.LUNAR_GRAVITY) and not world.earth_streaming_enabled() \
-			and manager.moon_world.visible,
+			and manager.moon_world.visible \
+			and is_equal_approx(player.safe_margin,
+				player.LUNAR_COLLISION_SAFE_MARGIN),
 		"realm transition applies 1.62 m/s² and pauses Earth streaming")
+	# A realm transition is not playable merely because gravity and presentation
+	# changed. Run the real CharacterBody controller and prove ordinary W input
+	# crosses solid lunar ground on foot. Enable the fixture's
+	# physics subtree while keeping its deliberately incomplete streaming loop
+	# stopped, so this exercises CharacterBody-to-StaticBody contact without
+	# pulling unrelated world generation into the integration gate.
+	world.process_mode = Node.PROCESS_MODE_ALWAYS
+	world.set_process(false)
+	world.set_physics_process(false)
+	player.process_mode = Node.PROCESS_MODE_ALWAYS
+	await physics_frame
+	var landing_ground_y: float = manager.moon_world.global_position.y \
+		+ manager.moon_world.height_at(player.global_position.x,
+			player.global_position.z)
+	var lunar_ground_query: PhysicsRayQueryParameters3D = \
+		PhysicsRayQueryParameters3D.create(
+		Vector3(player.global_position.x, landing_ground_y + 4.0,
+			player.global_position.z),
+		Vector3(player.global_position.x, landing_ground_y - 4.0,
+			player.global_position.z), 1, [player.get_rid(), manager.rocket.get_rid()])
+	var lunar_ground_hit: Dictionary = player.get_world_3d().direct_space_state \
+		.intersect_ray(lunar_ground_query)
+	_check(not lunar_ground_hit.is_empty() \
+			and lunar_ground_hit.get("collider") == manager.moon_world.terrain_body,
+		"lunar landing pad exposes solid ground to character physics",
+		str(lunar_ground_hit))
+	var lunar_shape_probe := PhysicsShapeQueryParameters3D.new()
+	lunar_shape_probe.shape = player._collision_shape.shape
+	lunar_shape_probe.transform = player._collision_shape.global_transform
+	lunar_shape_probe.motion = Vector3.DOWN * 2.0
+	lunar_shape_probe.collision_mask = 1
+	lunar_shape_probe.exclude = [player.get_rid(), manager.rocket.get_rid()]
+	var lunar_cast_result: PackedFloat32Array = player.get_world_3d() \
+		.direct_space_state.cast_motion(lunar_shape_probe)
+	var lunar_capsule_can_reach_ground := lunar_cast_result.size() == 2 \
+		and lunar_cast_result[0] < 1.0
+	_check(lunar_capsule_can_reach_ground,
+		"lunar landing floor accepts the monkey capsule, not only ray queries",
+		"cast=%s" % [lunar_cast_result])
+	var lunar_walk_start := Vector2(player.global_position.x,
+		player.global_position.z)
+	# Cross the flat pad and continue onto the generated height field. This keeps
+	# the regression from passing on the dedicated touchdown contact alone.
+	# The monkey lands on the rocket's +X side, so continue outward instead of
+	# walking back into the capsule hull and mistaking that solid obstacle for a
+	# movement lock.
+	player.ti.dir = Vector2(1.0, 0.0)
+	var lunar_floor_frames := 0
+	for frame in range(240):
+		await physics_frame
+		if player.is_on_floor():
+			lunar_floor_frames += 1
+	player.ti.dir = Vector2.ZERO
+	var lunar_walk_finish := Vector2(player.global_position.x,
+		player.global_position.z)
+	_check(not player.expedition_locked and not player._collision_shape.disabled \
+			and player.collision_layer == 1 and player.collision_mask == 1 \
+			and lunar_floor_frames > 30 \
+			and lunar_walk_start.distance_to(lunar_walk_finish) > 12.0,
+		"touchdown releases the cabin lock and the monkey can walk on lunar ground",
+		"locked=%s collider_disabled=%s layer=%d mask=%d floor_frames=%d state=%d y=%.3f ground=%.3f vy=%.3f moved=%.3f start=%s finish=%s" % [
+			player.expedition_locked, player._collision_shape.disabled,
+			player.collision_layer, player.collision_mask, lunar_floor_frames,
+			player.state, player.global_position.y,
+			manager.moon_world.global_position.y + manager.moon_world.height_at(
+				player.global_position.x, player.global_position.z), player.velocity.y,
+			lunar_walk_start.distance_to(lunar_walk_finish),
+			lunar_walk_start, lunar_walk_finish])
+	player.process_mode = Node.PROCESS_MODE_INHERIT
+	world.process_mode = Node.PROCESS_MODE_DISABLED
 	var remote_suit: Node = world.puppets[2].get_node_or_null(
 		"SpaceSuitSystem")
 	_check(remote_suit != null and remote_suit.get_script() == suit_script \
