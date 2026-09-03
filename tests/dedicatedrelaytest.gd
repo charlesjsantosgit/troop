@@ -12,6 +12,10 @@ const TEST_SEED := 778899
 const TEST_POSITION := Vector3(10.0, 12.0, 20.0)
 const TEST_BANANA := "b:relay#1"
 const TEST_CHEST := "s:relay#1"
+const VOICE_ACK_PREFIX := "RELAY-VOICE-ACK:"
+const VOICE_ACK_DEADLINE_SECONDS := 2.0
+const VOICE_RETRY_SECONDS := 0.1
+const VOICE_MAX_RETRIES := 20
 
 var net: Node
 var role := ""
@@ -26,6 +30,7 @@ var states := 0
 var saw_chat := false
 var saw_bullet := false
 var saw_voice := false
+var saw_voice_ack := false
 var saw_banana := false
 var saw_chest := false
 var saw_sender_leave := false
@@ -82,12 +87,13 @@ func _run() -> void:
 		return
 	if role == "receiver":
 		net.peer_state.connect(_on_state)
-		net.chat_received.connect(_on_chat)
 		net.bullet_fired.connect(_on_bullet)
 		net.voice_packet.connect(_on_voice)
 		net.banana_taken.connect(_on_banana)
 		net.supply_chest_claimed.connect(_on_chest)
 		net.peer_left.connect(_on_peer_left)
+	if role in ["receiver", "sender"]:
+		net.chat_received.connect(_on_chat)
 	if role == "reject-version":
 		root.get_node("Updater")._base_version = "0.0.0-fixture-incompatible"
 	var join_error: int = net.join(address, "Relay-" + role, port)
@@ -159,10 +165,26 @@ func _send_checks() -> void:
 		if sequence >= 6:
 			net.send_voice(sequence + 71, packet)
 		await create_timer(0.05).timeout
+	# Unreliable voice can be dropped immediately before disconnect. Retry at a
+	# bounded 10 Hz until the receiver confirms its first valid packet over the
+	# existing reliable chat relay; this adds no test-only production RPC.
+	var voice_sequence := STATE_PACKETS + 71
+	var voice_retries := 0
+	var voice_ack_deadline := Time.get_ticks_msec() \
+		+ roundi(VOICE_ACK_DEADLINE_SECONDS * 1000.0)
+	while not saw_voice_ack and voice_retries < VOICE_MAX_RETRIES \
+			and Time.get_ticks_msec() < voice_ack_deadline:
+		net.send_voice(voice_sequence, packet)
+		voice_sequence += 1
+		voice_retries += 1
+		await create_timer(VOICE_RETRY_SECONDS).timeout
+	if not saw_voice_ack:
+		_finish(false, "voice acknowledgment timeout retries=%d" % voice_retries)
+		return
 	await create_timer(0.4).timeout
 	_finish(net.collected.has(TEST_BANANA) \
 		and int(net.claimed_supply_chests.get(TEST_CHEST, 0)) == net.local_id(),
-		"movement=%d chat=true bullet=true voice=true claims_acknowledged=true" % STATE_PACKETS)
+		"movement=%d chat=true bullet=true voice=true voice_ack=true claims_acknowledged=true" % STATE_PACKETS)
 
 
 func _on_roster() -> void:
@@ -189,6 +211,9 @@ func _on_chat(peer_id: int, _sender_name: String, message: String,
 		from_admin: bool) -> void:
 	if peer_id != net.local_id() and message == "RELAY-CHECK" and not from_admin:
 		saw_chat = true
+	elif role == "sender" and peer_id != net.local_id() and not from_admin \
+			and message == VOICE_ACK_PREFIX + str(net.local_id()):
+		saw_voice_ack = true
 
 
 func _on_bullet(peer_id: int, _origin: Vector3, _velocity: Vector3,
@@ -201,9 +226,12 @@ func _on_bullet(peer_id: int, _origin: Vector3, _velocity: Vector3,
 func _on_voice(peer_id: int, sequence: int, payload: PackedByteArray) -> void:
 	if sequence == 76:
 		_finish(false, "malformed voice was relayed")
-	elif peer_id != net.local_id() and sequence >= 77 and sequence < STATE_PACKETS + 71 \
+	elif peer_id != net.local_id() and sequence >= 77 \
+			and sequence < STATE_PACKETS + 71 + VOICE_MAX_RETRIES \
 			and VoiceCodec.is_valid_packet(payload):
-		saw_voice = true
+		if not saw_voice:
+			saw_voice = true
+			net.send_chat(VOICE_ACK_PREFIX + str(peer_id))
 
 
 func _on_banana(banana_id: String) -> void:

@@ -102,6 +102,7 @@ jobs:
           "$GODOT_BIN" --headless --path . --script res://tests/updatetest.gd
           "$GODOT_BIN" --headless --path . --script res://tests/voicetest.gd
           "$GODOT_BIN" --headless --path . --script res://tests/netsecuritytest.gd
+          "$GODOT_BIN" --headless --path . --script res://tests/netrostertest.gd
           "$GODOT_BIN" --headless --path . --quit-after 1200 -- renderbackendtest
           python3 tests/run_dedicated_relay.py --godot "$GODOT_BIN" --project .
           "$GODOT_BIN" --headless --path . res://scenes/main.tscn \

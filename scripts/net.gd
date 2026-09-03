@@ -1163,10 +1163,20 @@ func cl_rejected(reason: String) -> void:
 
 @rpc("authority", "call_remote", "reliable", 0)
 func cl_roster(new_names: Dictionary, new_scores: Dictionary) -> void:
+	# The reliable roster and transport disconnect notification may arrive in
+	# either order. Capture departures before the new snapshot erases
+	# the evidence needed by _on_peer_disconnected(). That handler already
+	# removes names when transport wins, so neither order emits twice.
+	var departed: Array[int] = []
+	for peer_id in names:
+		if not new_names.has(peer_id):
+			departed.append(int(peer_id))
 	names = new_names
 	scores = new_scores
 	roster_changed.emit()
 	score_changed.emit()
+	for peer_id in departed:
+		peer_left.emit(peer_id)
 
 
 @rpc("authority", "call_remote", "reliable", 0)

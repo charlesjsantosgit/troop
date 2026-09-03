@@ -11,13 +11,13 @@ Do not disable school security controls to install or connect.
    computer. The content `.pck` is for the updater, not a standalone game.
 3. Close any running copy of TROOP and install it. On a Mac, copy TROOP.app to
    Applications. Windows Setup installs for your user without a game server.
-4. Launch the installed game and check that its menu shows **0.4.7**. Existing
+4. Launch the installed game and check that its menu shows **0.4.8**. Existing
    **0.4.5** installations can download this compatible update automatically and
    apply it on restart. Earlier installations need the full installer once for
    updater bootstrap 2 and multiplayer protocol 11.
 
-The server and all classmates must run **0.4.7**. A running 0.4.5 client cannot
-join the 0.4.7 server until its update activates, even though both use protocol 11.
+The server and all classmates must run **0.4.8**. A running 0.4.5 client cannot
+join the 0.4.8 server until its update activates, even though both use protocol 11.
 
 No Godot installation, GitHub account, home server, or router port forwarding is
 needed. Windows on ARM, Chromebooks, browsers, and phones are not verified targets.
