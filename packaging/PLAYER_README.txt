@@ -26,8 +26,8 @@ the next launch. TROOP verifies the signature, exact file size, and SHA-256
 digest before it loads any downloaded code. Engine or installer-level changes
 still require the normal Windows installer or macOS disk-image flow.
 
-TROOP 0.4.7 is an automatic content update for existing 0.4.5 installations.
-Earlier versions need the full installer. Confirm 0.4.7 on the menu. Compatible
+TROOP 0.4.8 is an automatic content update for existing 0.4.5 installations.
+Earlier versions need the full installer. Confirm 0.4.8 on the menu. Compatible
 content updates remain automatic.
 
 Multiplayer

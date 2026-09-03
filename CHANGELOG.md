@@ -1,10 +1,11 @@
 # TROOP changelog
 
-## 0.4.7 — SMOOTHER ONLINE JOINING
+## 0.4.8 — SMOOTHER ONLINE JOINING
 
-The 0.4.6 candidate was not published. The performance measurements below were
-collected with that candidate; 0.4.7 preserves its gameplay code and updates
-release-check diagnostics and version metadata.
+The 0.4.6 and 0.4.7 candidates were not published. The performance measurements
+below were collected with the 0.4.6 candidate. Version 0.4.8 retains that staged
+entry implementation and adds the peer-departure ordering fix and release-check
+diagnostic updates.
 
 ### Online loading and gameplay responsiveness
 
@@ -19,6 +20,8 @@ release-check diagnostics and version metadata.
 - Discard stale combat effects during loading, and activate live expedition
   callbacks only when gameplay is ready so incoming packets cannot steal the
   loading camera.
+- Handle roster updates and transport disconnects in either order so
+  player-departure notifications and cleanup are not missed.
 - Tested repeat joins in the installed Mac release engine reached gameplay in
   about 3.4 seconds with a maximum measured frame gap of 215 ms. A completely
   fresh graphics cache produced a 2.4–4.5-second first-use sky shader pause in
@@ -33,7 +36,7 @@ release-check diagnostics and version metadata.
 - TROOP 0.4.5 downloads this signed content update automatically and activates
   it on restart; no engine upgrade or new installer is required for 0.4.5 users.
 - Multiplayer remains protocol **11**, but connection checks still require the
-  same game version: the public server and every classmate must run **0.4.7**.
+  same game version: the public server and every classmate must run **0.4.8**.
   Older installations still need the full installer to obtain updater bootstrap
   2 and protocol 11.
 
