@@ -1,5 +1,34 @@
 # TROOP changelog
 
+## 0.4.6 — SMOOTHER ONLINE JOINING
+
+### Online loading and gameplay responsiveness
+
+- Keep the connection screen visible while the jungle, Moon, rocket and HUD
+  load in stages. The connection button becomes **CANCEL CONNECTION**; canceled
+  or failed attempts cannot resume later and overwrite a new session.
+- Share identical graphics shaders across monkey colors and effects while
+  preserving independent material colors and uniforms.
+- Build rocket geometry and terrain collision from CPU geometry instead of
+  repeatedly waiting for graphics-buffer readbacks. Collision geometry and
+  the rocket's appearance are unchanged.
+- Discard stale combat effects during loading, and activate live expedition
+  callbacks only when gameplay is ready so incoming packets cannot steal the
+  loading camera.
+- Tested repeat joins in the installed Mac release engine reached gameplay in
+  about 3.4 seconds with a maximum measured frame gap of 215 ms. A completely
+  fresh graphics cache still produced a 2.4-second first-use sky shader pause;
+  this release does not eliminate every cold shader-compilation hitch.
+
+### Compatible automatic update
+
+- TROOP 0.4.5 downloads this signed content update automatically and activates
+  it on restart; no engine upgrade or new installer is required for 0.4.5 users.
+- Multiplayer remains protocol **11**, but connection checks still require the
+  same game version: the public server and every classmate must run **0.4.6**.
+  Older installations still need the full installer to obtain updater bootstrap
+  2 and protocol 11.
+
 ## 0.4.5 — REUSABLE LUNAR SHIP
 
 This release brings the local lunar ship, colony, and planetary presentation

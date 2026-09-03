@@ -79,6 +79,8 @@ either one.
 Version 0.4.5 uses bootstrap 2, protocol 11, and `requires_installer=true`.
 Keep `minimum_bootstrap` at least 2 for later compatible content releases so an
 older executable cannot skip the required project/bootstrap installer migration.
+Version 0.4.6 keeps the same engine, bootstrap and protocol and sets
+`requires_installer=false`; it is a compatible content update for 0.4.5.
 
 1. Set `application/config/version` in `project.godot` to the new numeric
    version (`major.minor.patch`, with an optional fourth numeric component).

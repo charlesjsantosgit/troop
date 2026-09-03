@@ -28,6 +28,10 @@ var key := Vector2i.ZERO
 var layout: Dictionary = {}
 var _vine_mi: MeshInstance3D
 var _terrain_mesh: ArrayMesh
+## Retain the tiny CPU lattice until collision is requested. Reading it back
+## from ArrayMesh forces the renderer to finish queued work on every new tile.
+var _terrain_collision_vertices := PackedVector3Array()
+var _terrain_collision_cells := 0
 var _terrain_instance: MeshInstance3D
 var _terrain_coarse := false
 var _terrain_has_water := false
@@ -55,6 +59,7 @@ const TREE_LOW_BEGIN := 60.0
 const TREE_LOD_MARGIN := 12.0
 const FOLIAGE_VARIANT_COUNT := 3
 const COARSE_TERRAIN_CELLS := 1
+const TERRAIN_COLLISION_SNAP := 0.0001
 
 
 static func _init_mats() -> void:
@@ -372,6 +377,8 @@ func _on_vine_changed(k: Vector2i) -> void:
 func _build_terrain(coarse := false) -> void:
 	_terrain_coarse = coarse
 	var cells := COARSE_TERRAIN_CELLS if coarse else Gen.CELLS
+	_terrain_collision_cells = cells
+	_terrain_collision_vertices.resize((cells + 1) * (cells + 1))
 	var x0 := key.x * Gen.CHUNK
 	var z0 := key.y * Gen.CHUNK
 	var cell := Gen.CHUNK / float(cells)
@@ -390,7 +397,11 @@ func _build_terrain(coarse := false) -> void:
 			_terrain_has_water = _terrain_has_water \
 				or h < Gen.WATER_Y + 0.05
 			st.set_color(visual.color)
-			st.add_vertex(Vector3(x, h, z))
+			var point := Vector3(x, h, z)
+			st.add_vertex(point)
+			# Match TriangleMesh::create's snapping and indexed face order.
+			_terrain_collision_vertices[iz * (cells + 1) + ix] = point.snappedf(
+				TERRAIN_COLLISION_SNAP)
 	for iz in range(cells):
 		for ix in range(cells):
 			var p00 := iz * (cells + 1) + ix
@@ -896,8 +907,23 @@ func _build_collisions() -> void:
 
 	var terrain_body := StaticBody3D.new()
 	var terrain_cs := CollisionShape3D.new()
-	var terrain_shape := _terrain_mesh.create_trimesh_shape()
+	var terrain_shape := ConcavePolygonShape3D.new()
+	var faces := PackedVector3Array()
+	var cells := _terrain_collision_cells
+	faces.resize(cells * cells * 6)
+	var face_index := 0
+	for iz in range(cells):
+		for ix in range(cells):
+			var p00 := iz * (cells + 1) + ix
+			var p10 := p00 + 1
+			var p01 := p00 + cells + 1
+			var p11 := p01 + 1
+			for index in [p00, p10, p11, p00, p11, p01]:
+				faces[face_index] = _terrain_collision_vertices[index]
+				face_index += 1
+	terrain_shape.set_faces(faces)
 	terrain_shape.backface_collision = true
+	_terrain_collision_vertices = PackedVector3Array()
 	terrain_cs.shape = terrain_shape
 	terrain_body.add_child(terrain_cs)
 	add_child(terrain_body)

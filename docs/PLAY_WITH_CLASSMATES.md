@@ -11,8 +11,13 @@ Do not disable school security controls to install or connect.
    computer. The content `.pck` is for the updater, not a standalone game.
 3. Close any running copy of TROOP and install it. On a Mac, copy TROOP.app to
    Applications. Windows Setup installs for your user without a game server.
-4. Launch the installed game and check that its menu shows **0.4.5**. This release
-   needs the full installer once; previous versions cannot join protocol 11.
+4. Launch the installed game and check that its menu shows **0.4.6**. Existing
+   **0.4.5** installations can download this compatible update automatically and
+   apply it on restart. Earlier installations need the full installer once for
+   updater bootstrap 2 and multiplayer protocol 11.
+
+The server and all classmates must run **0.4.6**. A running 0.4.5 client cannot
+join the 0.4.6 server until its update activates, even though both use protocol 11.
 
 No Godot installation, GitHub account, home server, or router port forwarding is
 needed. Windows on ARM, Chromebooks, browsers, and phones are not verified targets.
@@ -22,6 +27,9 @@ The macOS build includes Apple Silicon and Intel executables.
 
 - Choose a recognizable player name, then **PLAY ONLINE**. Everyone joins the
   same public world at `troop-public-canopy.fly.dev`; it is not a private class room.
+- The loading screen shows the current setup stage. **CANCEL CONNECTION** safely
+  returns to the menu if you need to retry. A fresh graphics cache can still
+  cause a short first-use shader pause; subsequent joins reuse that cache.
 - The dedicated server has a **24-player connection limit**. That is a configured
   cap, not a guarantee of performance with 24 players on every device or network.
 - Hold **T** to speak to nearby players; release it to stop. Voice is proximity
@@ -36,8 +44,9 @@ The macOS build includes Apple Silicon and Intel executables.
 
 ## If someone cannot connect
 
-- Check the menu version first. An update-required message means the installed
-  client and server use different protocols; install the latest official build.
+- Check the menu version first. An update-required message means the client and
+  server differ in game version or protocol. On 0.4.5, let the automatic update
+  finish and restart; on earlier versions, install the latest official build.
 - The game needs outbound **UDP 30623**. Some school networks block game traffic;
   a successful browser download does not prove that multiplayer is allowed.
 - Ask school IT whether the game, its public host, and that outbound port are

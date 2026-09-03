@@ -26,9 +26,9 @@ the next launch. TROOP verifies the signature, exact file size, and SHA-256
 digest before it loads any downloaded code. Engine or installer-level changes
 still require the normal Windows installer or macOS disk-image flow.
 
-TROOP 0.4.5 is a one-time full installer update. Close the running game before
-installing it, then confirm 0.4.5 on the menu. Future compatible content updates
-remain automatic.
+TROOP 0.4.6 is an automatic content update for existing 0.4.5 installations.
+Earlier versions need the full installer. Confirm 0.4.6 on the menu. Compatible
+content updates remain automatic.
 
 Multiplayer
 -----------

@@ -97,8 +97,8 @@ textures for readable globe and voyage views.
 
 ## What's new in 0.4 — ONE SMALL STEP
 
-Current source version: **0.4.5**, using **multiplayer protocol 11**.
-Matching client and server builds are required.
+Current source version: **0.4.6**, using **multiplayer protocol 11**.
+Clients and server must use the same game version and multiplayer protocol.
 
 - **The generated wilderness is now a circumnavigable planet.** TROOP's
   deterministic playable sphere is **40,077,312 m around**, within a few
@@ -246,8 +246,8 @@ while solo play is paused, while you are away from the Moon, or while the game i
 closed. Test/capture modes use fresh state without reading or writing your colony.
 Network colonies are personal, host-owned session ledgers: harvests, spending,
 range checks, and one-time rewards are validated by the host. This source build
-uses network protocol 11; matching clients and servers are required. The public
-hosted release has not been redeployed by this local change.
+uses network protocol 11; the public server and every client must run the same
+game version and protocol.
 
 ```bash
 godot --path . -- moon                 # direct solo expedition
@@ -504,7 +504,10 @@ Bananas float along swing arcs; collect them for score (synced).
 
 For a quick download, setup, and connection checklist, see
 [Playing with classmates](docs/PLAY_WITH_CLASSMATES.md). The current release is
-**0.4.5 / protocol 11** and requires a one-time full installer update.
+**0.4.6 / protocol 11**. Version 0.4.5 can receive this content update
+automatically; earlier installations require the full installer. Restart after
+the update is ready and confirm **0.4.6** before joining the 0.4.6 server. All
+classmates must activate the same version, even though the protocol is unchanged.
 
 Worldwide multiplayer uses a headless ENet authority on UDP **30623**. Clients
 rebuild identical jungle geometry from its seed while the server validates and
@@ -790,6 +793,20 @@ godot --headless --path . res://scenes/main.tscn --quit-after 6000 -- seasontest
 godot --headless --path . res://scenes/main.tscn --quit-after 6000 -- combattest
 godot --headless --path . res://scenes/main.tscn --quit-after 6000 -- pausetest
 godot --headless --path . res://scenes/main.tscn --quit-after 8000 -- entrytest
+godot --headless --path . -- joincancellationtest
+godot --headless --path . -- moonstagedsetuptest
+godot --headless --path . -- rocketstagedsetuptest
+godot --headless --path . -- visualshadercachetest
+godot --headless --path . --script res://tests/worldstagedbuildtest.gd
+godot --headless --path . --script res://tests/scopeshadercachetest.gd
+godot --headless --path . --script res://tests/netjoinperformancetest.gd
+# Real menu -> ENet -> Earth + Moon + rocket + HUD, isolated from installed saves:
+python3 tests/run_join_entry.py --godot godot --project . --headless --warm-restart
+# Run alone on the GPU: wall-clock frame gaps include first-use graphics work.
+python3 tests/run_join_entry.py --godot godot --project . --rendered --warm-restart
+# Verify the installed release engine using a disposable, re-signed app copy:
+python3 tests/run_join_entry.py --godot godot --project . --rendered \
+  --native-app /Applications/TROOP.app --warm-restart
 godot --headless --path . res://scenes/main.tscn --quit-after 6000 -- aitest
 godot --headless --path . res://scenes/main.tscn --quit-after 20000 -- debugtest
 godot --headless --path . res://scenes/main.tscn --quit-after 90000 -- vehicletest

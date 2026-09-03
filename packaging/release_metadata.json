@@ -2,7 +2,7 @@
   "godot_compatibility": "4.7",
   "minimum_bootstrap": 2,
   "network_protocol": 11,
-  "release_title": "TROOP 0.4.5 \u2014 REUSABLE LUNAR SHIP",
-  "notes": "TROOP 0.4.5 adds a reusable four-seat lunar ship, powered return landings, lunar colonies and merchants, smoother planetary presentation and steadier first-person cameras. Multiplayer uses protocol 11 and the matching public server. Install this full update once to receive the new protocol settings and safer updater bootstrap; future compatible content updates remain automatic.",
-  "requires_installer": true
+  "release_title": "TROOP 0.4.6 \u2014 SMOOTHER ONLINE JOINING",
+  "notes": "TROOP 0.4.6 fixes the major online-entry stalls with staged loading, shared graphics shaders and terrain collisions that no longer wait for GPU readbacks. Connections can be canceled and retried safely. Existing 0.4.5 installations receive this compatible content update automatically and apply it on restart. The very first join with a fresh graphics cache can still briefly pause for shader compilation. Multiplayer remains protocol 11.",
+  "requires_installer": false
 }

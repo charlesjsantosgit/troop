@@ -81,6 +81,21 @@ const SKY_UPDATE_STEP := 0.50
 const CLOCK_RESYNC_STEP := 1.0
 const CALENDAR_CHECK_STEP := 60.0
 const MOON_SKY_ENERGY := 3.8
+enum BuildStage {
+	NOT_STARTED,
+	SHARED_RESOURCES,
+	ENVIRONMENT,
+	WATER,
+	LIGHTS,
+	MARKER,
+	PARTICLES,
+	VEHICLES,
+	COMPLETE,
+}
+const BUILD_STAGE_LABELS := [
+	"not_started", "shared_resources", "environment", "water", "lights",
+	"marker", "particles", "vehicles", "complete",
+]
 
 static var _muzzle_mesh: SphereMesh
 static var _muzzle_material: StandardMaterial3D
@@ -217,6 +232,12 @@ var _sun_daylight_energy := 1.34
 var _moon_daylight_energy := 0.14
 var _lunar_shadow_quality_active := false
 var _earth_shadow_filter_quality := 2
+var _build_stage := BuildStage.NOT_STARTED
+var _build_last_step_usec := 0
+var _build_vehicle_definitions: Dictionary = {}
+var _build_vehicle_queue: Array[String] = []
+var _build_vehicle_cursor := 0
+var _network_transient_effects_enabled := true
 
 
 ## Bounded altitude-to-horizon curve used by runtime streaming. The square root
@@ -286,7 +307,97 @@ static func loaded_stratos_edge_coverage(loaded: Dictionary, focus_xz: Vector2,
 	return radius
 
 
+## Preserve the original synchronous API for solo play and deterministic tests.
+## Online entry uses begin_build()/build_step() while its loading UI renders.
 func build() -> void:
+	begin_build()
+	while not build_step():
+		pass
+
+
+## Begin a staged world build without allocating any renderer-heavy resources.
+## The authoritative vehicle snapshot is copied into a de-duplicated queue, and
+## its live registration signal is connected first so definitions arriving
+## while the loading screen advances cannot fall into the snapshot/signal gap.
+func begin_build() -> void:
+	if _build_stage != BuildStage.NOT_STARTED:
+		return
+	_build_stage = BuildStage.SHARED_RESOURCES
+	opened_supply_huts = Net.claimed_supply_chests.duplicate()
+	if not Net.vehicle_spawn_registered.is_connected(
+			_on_vehicle_spawn_registered):
+		Net.vehicle_spawn_registered.connect(_on_vehicle_spawn_registered)
+	# Vehicles restored early in the queue must still receive seat/rest changes
+	# while later vehicles are loading. For queued vehicles these handlers are
+	# harmless; spawn_vehicle() reads their latest authoritative state instead.
+	if not Net.vehicle_claimed.is_connected(_on_vehicle_claimed):
+		Net.vehicle_claimed.connect(_on_vehicle_claimed)
+	if not Net.vehicle_released.is_connected(_on_vehicle_released):
+		Net.vehicle_released.connect(_on_vehicle_released)
+	for vehicle_id in Net.vehicle_spawn_definitions:
+		var definition: Dictionary = Net.vehicle_spawn_definitions[vehicle_id]
+		_queue_build_vehicle(str(vehicle_id), int(definition.get("kind", -1)),
+			definition.get("pos", Vector3.ZERO),
+			float(definition.get("yaw", 0.0)))
+
+
+## Execute one coherent construction stage. Vehicle restoration is additionally
+## bounded to one authoritative vehicle per call. Returns true only after every
+## stage and every vehicle that arrived during construction has completed.
+func build_step() -> bool:
+	if _build_stage == BuildStage.NOT_STARTED:
+		begin_build()
+	if _build_stage == BuildStage.COMPLETE:
+		_build_last_step_usec = 0
+		return true
+	var started := Time.get_ticks_usec()
+	match _build_stage:
+		BuildStage.SHARED_RESOURCES:
+			_build_shared_resources()
+			_build_stage = BuildStage.ENVIRONMENT
+		BuildStage.ENVIRONMENT:
+			_build_environment()
+			_build_stage = BuildStage.WATER
+		BuildStage.WATER:
+			if _build_water():
+				_build_stage = BuildStage.LIGHTS
+		BuildStage.LIGHTS:
+			_build_lights()
+			_build_stage = BuildStage.MARKER
+		BuildStage.MARKER:
+			_build_marker()
+			_build_stage = BuildStage.PARTICLES
+		BuildStage.PARTICLES:
+			_build_particles()
+			_build_stage = BuildStage.VEHICLES
+		BuildStage.VEHICLES:
+			_restore_one_build_vehicle()
+			if _build_vehicle_queue.is_empty():
+				_finish_build()
+	_build_last_step_usec = Time.get_ticks_usec() - started
+	return _build_stage == BuildStage.COMPLETE
+
+
+func is_build_complete() -> bool:
+	return _build_stage == BuildStage.COMPLETE
+
+
+func build_stage_name() -> String:
+	if _build_stage == BuildStage.WATER and water_fx:
+		return "water_" + water_fx.setup_stage_name()
+	return BUILD_STAGE_LABELS[clampi(_build_stage, 0,
+		BUILD_STAGE_LABELS.size() - 1)]
+
+
+func build_progress() -> float:
+	return float(_build_stage) / float(BuildStage.COMPLETE)
+
+
+func build_last_step_usec() -> int:
+	return _build_last_step_usec
+
+
+func _build_shared_resources() -> void:
 	RenderingServer.directional_shadow_atlas_set_size(2048, true)
 	_prepare_combat_fx()
 	BananaBullet.prepare_resources()
@@ -298,13 +409,24 @@ func build() -> void:
 		Gen.STRATOS_NEAR_FADE)
 	Visuals.set_stratos_view_radius(current_view_distance)
 	time_of_day_hours = Net.authoritative_cycle_hour()
-	water_fx = WaterFX.new()
-	water_fx.name = "WaterFX"
-	water_fx.setup(Gen.WATER_Y)
-	add_child(water_fx)
+
+
+func _build_water() -> bool:
+	if water_fx == null:
+		water_fx = WaterFX.new()
+		water_fx.name = "WaterFX"
+		water_fx.begin_setup(Gen.WATER_Y)
+		add_child(water_fx)
+	return water_fx.setup_step()
+
+
+func _build_environment() -> void:
+	var phase_started := Time.get_ticks_usec()
 	var env := Environment.new()
 	_environment = env
 	_celestial_sky = CelestialSky.new()
+	_trace_environment_phase("celestial_resources", phase_started)
+	phase_started = Time.get_ticks_usec()
 	var sky_mat := _celestial_sky.get_material()
 	_sky_material = sky_mat
 	var sky := Sky.new()
@@ -351,11 +473,24 @@ func build() -> void:
 	env.adjustment_brightness = 0.96
 	env.adjustment_contrast = 1.13
 	env.adjustment_saturation = 1.0
+	_trace_environment_phase("environment_settings", phase_started)
+	phase_started = Time.get_ticks_usec()
 	Visuals.stratos_ground_material()
+	_trace_environment_phase("stratos_material", phase_started)
+	phase_started = Time.get_ticks_usec()
 	var we := WorldEnvironment.new()
 	we.environment = env
 	add_child(we)
+	_trace_environment_phase("environment_attach", phase_started)
 
+
+func _trace_environment_phase(phase: String, started: int) -> void:
+	if OS.get_environment("TROOP_JOIN_PROFILE") == "1":
+		print("JOIN_ENV_PHASE %s ms=%.3f" % [phase,
+			float(Time.get_ticks_usec() - started) / 1000.0])
+
+
+func _build_lights() -> void:
 	var sun := DirectionalLight3D.new()
 	_sun = sun
 	sun.rotation_degrees = Vector3(-40, -34, 0)
@@ -385,6 +520,8 @@ func build() -> void:
 	add_child(moon)
 	_apply_day_night(true)
 
+
+func _build_marker() -> void:
 	var mk_mat := StandardMaterial3D.new()
 	mk_mat.albedo_color = Color(0.75, 1.0, 0.35, 0.9)
 	mk_mat.emission_enabled = true
@@ -402,6 +539,8 @@ func build() -> void:
 	_marker.visible = false
 	add_child(_marker)
 
+
+func _build_particles() -> void:
 	_particles = GPUParticles3D.new()
 	var pm := ParticleProcessMaterial.new()
 	pm.emission_shape = ParticleProcessMaterial.EMISSION_SHAPE_BOX
@@ -430,28 +569,72 @@ func build() -> void:
 	_particles.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	add_child(_particles)
 
-	# A joining client receives this authoritative snapshot before World exists.
-	# Copying it before chunks stream makes already-claimed huts register open.
+
+func _finish_build() -> void:
+	# Refresh the authoritative chest snapshot after the staged window so a
+	# claim delivered between begin_build() and runtime signal connection is not
+	# lost. Chunks have not streamed yet, so there is no live hut to reconcile.
 	opened_supply_huts = Net.claimed_supply_chests.duplicate()
-	Net.banana_taken.connect(_on_banana_taken)
-	Net.supply_chest_claimed.connect(_on_supply_chest_claimed)
-	Net.vine_released.connect(_on_vine_released)
-	Net.bullet_fired.connect(_on_network_bullet)
-	Net.melee_swung.connect(_on_network_melee)
-	Net.peer_defeated.connect(_on_peer_defeated)
-	Net.vehicle_spawn_registered.connect(_on_vehicle_spawn_registered)
-	Net.vehicle_claimed.connect(_on_vehicle_claimed)
-	Net.vehicle_released.connect(_on_vehicle_released)
-	Net.cycle_hour_changed.connect(_on_shared_cycle_hour_changed)
-	# Dynamic admin deliveries are authority-owned world citizens. Existing peers
-	# receive this signal immediately; late joiners receive the same definitions
-	# in cl_world before their World node is built.
-	for vehicle_id in Net.vehicle_spawn_definitions:
-		var definition: Dictionary = Net.vehicle_spawn_definitions[vehicle_id]
-		_on_vehicle_spawn_registered(str(vehicle_id),
-			int(definition.get("kind", -1)),
-			definition.get("pos", Vector3.ZERO),
-			float(definition.get("yaw", 0.0)))
+	_connect_runtime_signals()
+	_build_stage = BuildStage.COMPLETE
+
+
+func _connect_runtime_signals() -> void:
+	var bindings := [
+		[Net.banana_taken, _on_banana_taken],
+		[Net.supply_chest_claimed, _on_supply_chest_claimed],
+		[Net.vine_released, _on_vine_released],
+		[Net.bullet_fired, _on_network_bullet],
+		[Net.melee_swung, _on_network_melee],
+		[Net.peer_defeated, _on_peer_defeated],
+		[Net.vehicle_claimed, _on_vehicle_claimed],
+		[Net.vehicle_released, _on_vehicle_released],
+		[Net.cycle_hour_changed, _on_shared_cycle_hour_changed],
+	]
+	for binding in bindings:
+		var source: Signal = binding[0]
+		var callback: Callable = binding[1]
+		if not source.is_connected(callback):
+			source.connect(callback)
+
+
+## Online entry disables these short-lived presentations until gameplay starts.
+## Discard events instead of replaying stale shots/deaths/vines when the paused
+## build becomes active. Persistent claims and vehicle snapshots stay live, and
+## ordinary gameplay pauses never implicitly change this explicit entry gate.
+func set_network_transient_effects_enabled(enabled: bool) -> void:
+	_network_transient_effects_enabled = enabled
+
+
+func _queue_build_vehicle(vid: String, kind: int, pos: Vector3,
+		yaw: float) -> void:
+	if vid.is_empty() or kind < Vehicle.Kind.BIKE or kind > Vehicle.Kind.JET:
+		return
+	if vehicles.has(vid):
+		return
+	var already_queued := _build_vehicle_definitions.has(vid)
+	_build_vehicle_definitions[vid] = {
+		"kind": kind, "pos": pos, "yaw": yaw,
+	}
+	if not already_queued:
+		_build_vehicle_queue.append(vid)
+
+
+func _restore_one_build_vehicle() -> void:
+	# Indexing rather than pop_front keeps queue bookkeeping constant-time even
+	# for a large snapshot. Each call consumes at most one definition, including
+	# stale entries, so an interrupted/replayed registration cannot add a spike.
+	if _build_vehicle_cursor < _build_vehicle_queue.size():
+		var vid: String = _build_vehicle_queue[_build_vehicle_cursor]
+		_build_vehicle_cursor += 1
+		var definition: Dictionary = _build_vehicle_definitions.get(vid, {})
+		_build_vehicle_definitions.erase(vid)
+		if not definition.is_empty() and not vehicles.has(vid):
+			spawn_vehicle(int(definition.kind), vid, definition.get("pos", Vector3.ZERO),
+				float(definition.get("yaw", 0.0)))
+	if _build_vehicle_cursor >= _build_vehicle_queue.size():
+		_build_vehicle_queue.clear()
+		_build_vehicle_cursor = 0
 
 
 func set_expensive_effects(enabled: bool) -> void:
@@ -899,6 +1082,9 @@ func _on_vehicle_claimed(vid: String, claimant_id: int) -> void:
 
 func _on_vehicle_spawn_registered(vid: String, kind: int, pos: Vector3,
 		yaw: float) -> void:
+	if _build_stage != BuildStage.NOT_STARTED and _build_stage != BuildStage.COMPLETE:
+		_queue_build_vehicle(vid, kind, pos, yaw)
+		return
 	if kind >= Vehicle.Kind.BIKE and kind <= Vehicle.Kind.JET \
 			and vehicle_by_id(vid) == null:
 		spawn_vehicle(kind, vid, pos, yaw)
@@ -1031,6 +1217,8 @@ func remove_puppet(peer_id: int) -> void:
 
 func _on_peer_defeated(peer_id: int, pos: Vector3, yaw: float,
 		death_velocity: Vector3, impulse: Vector3, headshot: bool) -> void:
+	if not _network_transient_effects_enabled:
+		return
 	if puppets.has(peer_id) and is_instance_valid(puppets[peer_id]):
 		puppets[peer_id].begin_defeat(pos, yaw, death_velocity, impulse,
 			headshot)
@@ -1046,6 +1234,8 @@ func claim_vine(id: String) -> void:
 
 func _on_vine_released(id: String, hand: Vector3, release_velocity: Vector3,
 		length: float, shape: PackedVector3Array) -> void:
+	if not _network_transient_effects_enabled:
+		return
 	if not Gen.vines.has(id):
 		return
 	claim_vine(id)
@@ -1152,6 +1342,8 @@ func perform_melee(shooter: Node3D, origin: Vector3, direction: Vector3,
 func _on_network_bullet(shooter_id: int, origin: Vector3,
 		initial_velocity: Vector3, damage: float, headshot_rule: bool,
 		play_fx: bool, weapon_kind: int) -> void:
+	if not _network_transient_effects_enabled:
+		return
 	var shooter: Node3D
 	if local_player and shooter_id == local_player.peer_id:
 		shooter = local_player
@@ -1181,6 +1373,8 @@ func _on_network_bullet(shooter_id: int, origin: Vector3,
 
 func _on_network_melee(shooter_id: int, origin: Vector3,
 		direction: Vector3, combo: int) -> void:
+	if not _network_transient_effects_enabled:
+		return
 	var shooter: Node3D
 	if local_player and shooter_id == local_player.peer_id:
 		shooter = local_player
@@ -1469,6 +1663,8 @@ static func gameplay_camera_far_distance(streamed_distance: float,
 
 
 func _process(dt: float) -> void:
+	if not is_build_complete():
+		return
 	_t += dt
 	_update_day_night(dt)
 	if _earth_streaming_enabled:

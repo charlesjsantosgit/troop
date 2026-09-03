@@ -8,6 +8,23 @@ const MAX_SHADER_RIPPLES := 8
 const RING_POOL_SIZE := 18
 const FOAM_POOL_SIZE := 20
 const SPRAY_POOL_SIZE := 8
+const MESH_POOL_BUILD_BATCH_SIZE := 4
+enum SetupStage {
+	NOT_STARTED,
+	WATER_MATERIAL,
+	RING_RESOURCES,
+	RINGS,
+	FOAM_RESOURCES,
+	FOAMS,
+	SPRAY_RESOURCES,
+	SPRAYS,
+	AUDIO,
+	COMPLETE,
+}
+const SETUP_STAGE_LABELS := [
+	"not_started", "material", "ring_resources", "rings", "foam_resources",
+	"foams", "spray_resources", "sprays", "audio", "complete",
+]
 
 const RING_SHADER := """
 shader_type spatial;
@@ -75,6 +92,11 @@ void fragment() {
 }
 """
 
+# Shader source never changes with the world or an individual splash. Keep the
+# programs alive across cancel/rejoin; each pool slot still owns its uniforms.
+static var _ring_shader: Shader
+static var _foam_shader: Shader
+
 var water_level := 0.55
 var _rings: Array[Dictionary] = []
 var _foams: Array[Dictionary] = []
@@ -89,6 +111,11 @@ var _quality_scale := 0.72
 var _water_material: ShaderMaterial
 var _water_loop: AudioStreamPlayer
 var _loop_target_db := -60.0
+var _setup_stage := SetupStage.NOT_STARTED
+var _ring_mesh: QuadMesh
+var _foam_mesh: QuadMesh
+var _spray_gradient: GradientTexture1D
+var _spray_mesh: QuadMesh
 
 
 func setup(level: float) -> void:
@@ -96,12 +123,66 @@ func setup(level: float) -> void:
 
 
 func _ready() -> void:
-	_water_material = Visuals.water_material()
-	_build_ring_pool()
-	_build_foam_pool()
-	_build_spray_pool()
-	_build_water_loop()
-	_upload_shader_ripples()
+	# Existing standalone callers retain fully-ready pools when add_child()
+	# returns. Online World construction opts into staging before adding us.
+	if _setup_stage != SetupStage.NOT_STARTED:
+		return
+	begin_setup(water_level)
+	while not setup_step():
+		pass
+
+
+## Opt into staged construction before add_child(). No GPU resources are
+## created here; callers advance setup_step() once per displayed loading frame.
+func begin_setup(level: float) -> void:
+	water_level = level
+	if _setup_stage == SetupStage.NOT_STARTED:
+		_setup_stage = SetupStage.WATER_MATERIAL
+
+
+## One resource family, at most four mesh nodes, or one spray emitter per call.
+## Full materials, pool sizes and emission settings match synchronous _ready().
+func setup_step() -> bool:
+	if _setup_stage == SetupStage.NOT_STARTED:
+		begin_setup(water_level)
+	match _setup_stage:
+		SetupStage.WATER_MATERIAL:
+			_water_material = Visuals.water_material()
+			_setup_stage = SetupStage.RING_RESOURCES
+		SetupStage.RING_RESOURCES:
+			_prepare_ring_resources()
+			_setup_stage = SetupStage.RINGS
+		SetupStage.RINGS:
+			_build_ring_pool_step()
+			if _rings.size() == RING_POOL_SIZE:
+				_setup_stage = SetupStage.FOAM_RESOURCES
+		SetupStage.FOAM_RESOURCES:
+			_prepare_foam_resources()
+			_setup_stage = SetupStage.FOAMS
+		SetupStage.FOAMS:
+			_build_foam_pool_step()
+			if _foams.size() == FOAM_POOL_SIZE:
+				_setup_stage = SetupStage.SPRAY_RESOURCES
+		SetupStage.SPRAY_RESOURCES:
+			_prepare_spray_resources()
+			_setup_stage = SetupStage.SPRAYS
+		SetupStage.SPRAYS:
+			_build_one_spray()
+			if _sprays.size() == SPRAY_POOL_SIZE:
+				_setup_stage = SetupStage.AUDIO
+		SetupStage.AUDIO:
+			_build_water_loop()
+			_upload_shader_ripples()
+			_setup_stage = SetupStage.COMPLETE
+	return is_setup_complete()
+
+
+func is_setup_complete() -> bool:
+	return _setup_stage == SetupStage.COMPLETE
+
+
+func setup_stage_name() -> String:
+	return SETUP_STAGE_LABELS[_setup_stage]
 
 
 func _exit_tree() -> void:
@@ -110,6 +191,8 @@ func _exit_tree() -> void:
 
 
 func _process(dt: float) -> void:
+	if not is_setup_complete():
+		return
 	_clock += dt
 	_update_rings(dt)
 	_update_foam(dt)
@@ -146,6 +229,8 @@ func exit_splash(position: Vector3, velocity := Vector3.ZERO,
 ## Side is -1 for left and +1 for right and only adds subtle sonic variation.
 func stroke(position: Vector3, velocity := Vector3.ZERO, side := 0,
 		intensity := 0.65) -> void:
+	if not is_setup_complete():
+		return
 	var strength := clampf(intensity, 0.15, 1.25)
 	var flat_velocity := Vector3(velocity.x, 0.0, velocity.z)
 	_emit_spray(position, flat_velocity + Vector3.UP * 0.7, strength * 0.55)
@@ -174,7 +259,7 @@ func kick(position: Vector3, velocity := Vector3.ZERO, intensity := 0.42) -> voi
 ## the shared water shader so nearby surface vertices lift under the crest.
 func emit_ripple(position: Vector3, strength := 0.55, max_radius := 2.0,
 		duration := 1.35) -> void:
-	if _rings.is_empty():
+	if not is_setup_complete() or _rings.is_empty():
 		return
 	var item: Dictionary = _rings[_ring_cursor]
 	_ring_cursor = (_ring_cursor + 1) % _rings.size()
@@ -200,6 +285,8 @@ func emit_ripple(position: Vector3, strength := 0.55, max_radius := 2.0,
 ## wake patches, so frame rate changes do not alter wake density.
 func update_swimmer(actor_key: Variant, position: Vector3, velocity: Vector3,
 		active: bool, intensity := 1.0) -> void:
+	if not is_setup_complete():
+		return
 	if not active:
 		_swimmers.erase(actor_key)
 		return
@@ -234,6 +321,8 @@ func remove_swimmer(actor_key: Variant) -> void:
 
 ## Controls the non-spatial water movement bed heard by the local player.
 func set_listener_swimming(active: bool, speed := 0.0) -> void:
+	if not is_setup_complete():
+		return
 	if active:
 		_loop_target_db = lerpf(-30.0, -22.0, clampf(speed / 7.0, 0.0, 1.0))
 		_water_loop.pitch_scale = lerpf(0.92, 1.08, clampf(speed / 7.0, 0.0, 1.0))
@@ -245,6 +334,8 @@ func set_listener_swimming(active: bool, speed := 0.0) -> void:
 
 func _emit_splash(position: Vector3, velocity: Vector3, intensity: float,
 		sound_name: String, ripple_radius: float, foam_size: float) -> void:
+	if not is_setup_complete():
+		return
 	var strength := clampf(intensity, 0.2, 1.5)
 	var flat_velocity := Vector3(velocity.x, 0.0, velocity.z)
 	_emit_spray(position, velocity, strength)
@@ -256,18 +347,22 @@ func _emit_splash(position: Vector3, velocity: Vector3, intensity: float,
 		randf_range(0.94, 1.06), 48.0)
 
 
-func _build_ring_pool() -> void:
-	var shader := Shader.new()
-	shader.code = RING_SHADER
-	var mesh := QuadMesh.new()
-	mesh.size = Vector2(2.0, 2.0)
-	mesh.orientation = PlaneMesh.FACE_Y
-	for i in range(RING_POOL_SIZE):
+func _prepare_ring_resources() -> void:
+	if not _ring_shader:
+		_ring_shader = Shader.new()
+		_ring_shader.code = RING_SHADER
+	_ring_mesh = QuadMesh.new()
+	_ring_mesh.size = Vector2(2.0, 2.0)
+	_ring_mesh.orientation = PlaneMesh.FACE_Y
+
+
+func _build_ring_pool_step() -> void:
+	for i in range(mini(MESH_POOL_BUILD_BATCH_SIZE, RING_POOL_SIZE - _rings.size())):
 		var material := ShaderMaterial.new()
-		material.shader = shader
+		material.shader = _ring_shader
 		material.render_priority = 2
 		var node := MeshInstance3D.new()
-		node.mesh = mesh
+		node.mesh = _ring_mesh
 		node.material_override = material
 		node.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 		node.visibility_range_end = 72.0
@@ -288,18 +383,22 @@ func _build_ring_pool() -> void:
 		})
 
 
-func _build_foam_pool() -> void:
-	var shader := Shader.new()
-	shader.code = FOAM_SHADER
-	var mesh := QuadMesh.new()
-	mesh.size = Vector2(2.0, 2.0)
-	mesh.orientation = PlaneMesh.FACE_Y
-	for i in range(FOAM_POOL_SIZE):
+func _prepare_foam_resources() -> void:
+	if not _foam_shader:
+		_foam_shader = Shader.new()
+		_foam_shader.code = FOAM_SHADER
+	_foam_mesh = QuadMesh.new()
+	_foam_mesh.size = Vector2(2.0, 2.0)
+	_foam_mesh.orientation = PlaneMesh.FACE_Y
+
+
+func _build_foam_pool_step() -> void:
+	for i in range(mini(MESH_POOL_BUILD_BATCH_SIZE, FOAM_POOL_SIZE - _foams.size())):
 		var material := ShaderMaterial.new()
-		material.shader = shader
+		material.shader = _foam_shader
 		material.render_priority = 3
 		var node := MeshInstance3D.new()
-		node.mesh = mesh
+		node.mesh = _foam_mesh
 		node.material_override = material
 		node.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 		node.visibility_range_end = 62.0
@@ -318,7 +417,7 @@ func _build_foam_pool() -> void:
 		})
 
 
-func _build_spray_pool() -> void:
+func _prepare_spray_resources() -> void:
 	var gradient := Gradient.new()
 	gradient.offsets = PackedFloat32Array([0.0, 0.58, 1.0])
 	gradient.colors = PackedColorArray([
@@ -326,8 +425,8 @@ func _build_spray_pool() -> void:
 		Color(0.54, 0.92, 0.88, 0.72),
 		Color(0.38, 0.78, 0.78, 0.0),
 	])
-	var gradient_texture := GradientTexture1D.new()
-	gradient_texture.gradient = gradient
+	_spray_gradient = GradientTexture1D.new()
+	_spray_gradient.gradient = gradient
 	# A generated radial alpha mask keeps the billboard's corners transparent;
 	# the non-square quad turns the soft disc into a small falling droplet.
 	var mask_gradient := Gradient.new()
@@ -352,36 +451,38 @@ func _build_spray_pool() -> void:
 	droplet_material.vertex_color_use_as_albedo = true
 	droplet_material.albedo_color = Color(0.72, 0.98, 0.94, 0.9)
 	droplet_material.albedo_texture = droplet_mask
-	var droplet_mesh := QuadMesh.new()
-	droplet_mesh.size = Vector2(0.046, 0.092)
-	droplet_mesh.material = droplet_material
-	for i in range(SPRAY_POOL_SIZE):
-		var process_material := ParticleProcessMaterial.new()
-		process_material.emission_shape = ParticleProcessMaterial.EMISSION_SHAPE_SPHERE
-		process_material.emission_sphere_radius = 0.13
-		process_material.direction = Vector3.UP
-		process_material.spread = 48.0
-		process_material.gravity = Vector3(0.0, -8.6, 0.0)
-		process_material.initial_velocity_min = 1.25
-		process_material.initial_velocity_max = 3.6
-		process_material.scale_min = 0.48
-		process_material.scale_max = 1.28
-		process_material.color_ramp = gradient_texture
-		var particles := GPUParticles3D.new()
-		particles.process_material = process_material
-		particles.draw_pass_1 = droplet_mesh
-		particles.amount = 18
-		particles.lifetime = 0.72
-		particles.one_shot = true
-		particles.explosiveness = 0.96
-		particles.randomness = 0.48
-		particles.local_coords = false
-		particles.fixed_fps = 30
-		particles.visibility_aabb = AABB(Vector3(-5.0, -3.0, -5.0),
-			Vector3(10.0, 8.0, 10.0))
-		particles.emitting = false
-		add_child(particles)
-		_sprays.append(particles)
+	_spray_mesh = QuadMesh.new()
+	_spray_mesh.size = Vector2(0.046, 0.092)
+	_spray_mesh.material = droplet_material
+
+
+func _build_one_spray() -> void:
+	var process_material := ParticleProcessMaterial.new()
+	process_material.emission_shape = ParticleProcessMaterial.EMISSION_SHAPE_SPHERE
+	process_material.emission_sphere_radius = 0.13
+	process_material.direction = Vector3.UP
+	process_material.spread = 48.0
+	process_material.gravity = Vector3(0.0, -8.6, 0.0)
+	process_material.initial_velocity_min = 1.25
+	process_material.initial_velocity_max = 3.6
+	process_material.scale_min = 0.48
+	process_material.scale_max = 1.28
+	process_material.color_ramp = _spray_gradient
+	var particles := GPUParticles3D.new()
+	particles.process_material = process_material
+	particles.draw_pass_1 = _spray_mesh
+	particles.amount = 18
+	particles.lifetime = 0.72
+	particles.one_shot = true
+	particles.explosiveness = 0.96
+	particles.randomness = 0.48
+	particles.local_coords = false
+	particles.fixed_fps = 30
+	particles.visibility_aabb = AABB(Vector3(-5.0, -3.0, -5.0),
+		Vector3(10.0, 8.0, 10.0))
+	particles.emitting = false
+	add_child(particles)
+	_sprays.append(particles)
 
 
 func _build_water_loop() -> void:
@@ -393,7 +494,7 @@ func _build_water_loop() -> void:
 
 
 func _emit_spray(position: Vector3, velocity: Vector3, intensity: float) -> void:
-	if _sprays.is_empty():
+	if not is_setup_complete() or _sprays.is_empty():
 		return
 	var particles: GPUParticles3D = _sprays[_spray_cursor]
 	_spray_cursor = (_spray_cursor + 1) % _sprays.size()
@@ -415,7 +516,8 @@ func _emit_spray(position: Vector3, velocity: Vector3, intensity: float) -> void
 
 func _emit_foam(position: Vector3, velocity: Vector3, width: float, length: float,
 		duration: float) -> void:
-	if _foams.is_empty() or (_quality_scale < 0.55 and _event_serial % 2 == 1):
+	if not is_setup_complete() or _foams.is_empty() \
+			or (_quality_scale < 0.55 and _event_serial % 2 == 1):
 		return
 	var item: Dictionary = _foams[_foam_cursor]
 	_foam_cursor = (_foam_cursor + 1) % _foams.size()

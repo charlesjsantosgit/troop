@@ -16,6 +16,27 @@ const READOUT_COLOR := Color(0.80, 1.0, 0.70, 0.96)
 const HOLD_COLOR := Color(1.0, 0.78, 0.20, 0.96)
 const TARGET_COLOR := Color(1.0, 0.08, 0.035, 1.0)
 
+const VIGNETTE_SHADER := """
+shader_type canvas_item;
+render_mode unshaded;
+
+uniform vec2 viewport_size = vec2(1600.0, 900.0);
+uniform float aperture_radius = 395.0;
+
+void fragment() {
+	vec2 pixel = (UV - vec2(0.5)) * viewport_size;
+	float radial = length(pixel);
+	float outside = smoothstep(aperture_radius - 1.5, aperture_radius + 1.5, radial);
+	float edge = smoothstep(aperture_radius * 0.70, aperture_radius, radial)
+		* (1.0 - outside) * 0.20;
+	float alpha = clamp(outside + edge, 0.0, 1.0);
+	COLOR = vec4(0.001, 0.004, 0.002, alpha);
+}
+"""
+
+# Recreated HUDs share only immutable source, never viewport/aperture uniforms.
+static var _vignette_shader: Shader
+
 var _active := false
 var _magnification := 2.5
 var _range_m := 0.0
@@ -34,26 +55,11 @@ func _ready() -> void:
 	_vignette.set_anchors_preset(Control.PRESET_FULL_RECT)
 	_vignette.show_behind_parent = true
 	_vignette.color = Color.WHITE
-	var shader := Shader.new()
-	shader.code = """
-shader_type canvas_item;
-render_mode unshaded;
-
-uniform vec2 viewport_size = vec2(1600.0, 900.0);
-uniform float aperture_radius = 395.0;
-
-void fragment() {
-	vec2 pixel = (UV - vec2(0.5)) * viewport_size;
-	float radial = length(pixel);
-	float outside = smoothstep(aperture_radius - 1.5, aperture_radius + 1.5, radial);
-	float edge = smoothstep(aperture_radius * 0.70, aperture_radius, radial)
-		* (1.0 - outside) * 0.20;
-	float alpha = clamp(outside + edge, 0.0, 1.0);
-	COLOR = vec4(0.001, 0.004, 0.002, alpha);
-}
-"""
+	if not _vignette_shader:
+		_vignette_shader = Shader.new()
+		_vignette_shader.code = VIGNETTE_SHADER
 	_vignette_material = ShaderMaterial.new()
-	_vignette_material.shader = shader
+	_vignette_material.shader = _vignette_shader
 	_vignette.material = _vignette_material
 	add_child(_vignette)
 	_sync_geometry()

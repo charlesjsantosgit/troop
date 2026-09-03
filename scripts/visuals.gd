@@ -6,6 +6,10 @@ extends RefCounted
 static var _shared: Dictionary = {}
 static var _foliage: Dictionary = {}
 static var _fur: Dictionary = {}
+## Shader source is immutable after construction. Share the program, not the
+## ShaderMaterial: colors, seasons and LOD handoffs remain per-material uniforms.
+## A caller that needs to edit shader code must create its own Shader instead.
+static var _shaders_by_source: Dictionary = {}
 static var _far_focus := Vector2(INF, INF)
 static var _skyline_near_fade := Gen.SKYLINE_NEAR_FADE
 static var _stratos_near_fade := Gen.STRATOS_NEAR_FADE
@@ -1036,8 +1040,11 @@ void fragment() {
 
 
 static func _material(code: String, params := {}) -> ShaderMaterial:
-	var shader := Shader.new()
-	shader.code = code
+	var shader: Shader = _shaders_by_source.get(code)
+	if shader == null:
+		shader = Shader.new()
+		shader.code = code
+		_shaders_by_source[code] = shader
 	var material := ShaderMaterial.new()
 	material.shader = shader
 	for key in params:
