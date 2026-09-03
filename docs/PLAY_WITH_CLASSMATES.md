@@ -9,15 +9,17 @@ Do not disable school security controls to install or connect.
 1. Open the [official TROOP download page](https://github.com/charlesjsantosgit/troop/releases/latest).
 2. Download the **Windows x86_64 Setup.exe** or **macOS universal.dmg** for your
    computer. The content `.pck` is for the updater, not a standalone game.
-3. Close any running copy of TROOP and install it. On a Mac, copy TROOP.app to
-   Applications. Windows Setup installs for your user without a game server.
-4. Launch the installed game and check that its menu shows **0.4.9**. Existing
-   **0.4.5** installations can download this compatible update automatically and
-   apply it on restart. Earlier installations need the full installer once for
-   updater bootstrap 2 and multiplayer protocol 11.
+3. **0.4.10 needs the full installer once, even if you have 0.4.9.** Close every
+   running copy of TROOP before installing. On a Mac, replace the old TROOP.app
+   in Applications and launch that copy. Windows Setup installs for your user
+   without a game server.
+4. Check that the installed game's menu shows **0.4.10**. This installs the
+   startup fixes and updater bootstrap **3**; a content-only restart cannot
+   update the renderer startup or the updater that runs before the content pack.
+   Future compatible content updates remain automatic.
 
-The server and all classmates must run **0.4.9**. A running 0.4.5 client cannot
-join the 0.4.9 server until its update activates, even though both use protocol 11.
+The server and all classmates must run **0.4.10**. Older clients cannot join the
+0.4.10 server, even though multiplayer protocol **11** is unchanged.
 
 No Godot installation, GitHub account, home server, or router port forwarding is
 needed. Windows on ARM, Chromebooks, browsers, and phones are not verified targets.
@@ -27,10 +29,11 @@ The macOS build includes Apple Silicon and Intel executables.
 
 - Choose a recognizable player name, then **PLAY ONLINE**. Everyone joins the
   same public world at `troop-public-canopy.fly.dev`; it is not a private class room.
-- The loading screen shows the current setup stage. **CANCEL CONNECTION** safely
-  returns to the menu if you need to retry. A fresh graphics cache can still
-  cause a several-second first-use shader pause; subsequent joins reuse that cache,
-  although smaller single-frame hitches can still occur.
+- The loading screen shows the current setup stage. **CANCEL CONNECTION** or
+  **Esc** safely returns to the menu if you need to retry. The 0.4.10 startup
+  changes substantially shortened fresh-cache startup in local M4 Mac testing;
+  M1/Tahoe has not been directly tested. A smaller startup/menu hitch and
+  first-use gameplay shader pauses remain; this is not hitch-free on every Mac.
 - The dedicated server has a **24-player connection limit**. That is a configured
   cap, not a guarantee of performance with 24 players on every device or network.
 - Hold **T** to speak to nearby players; release it to stop. Voice is proximity
@@ -46,8 +49,9 @@ The macOS build includes Apple Silicon and Intel executables.
 ## If someone cannot connect
 
 - Check the menu version first. An update-required message means the client and
-  server differ in game version or protocol. On 0.4.5, let the automatic update
-  finish and restart; on earlier versions, install the latest official build.
+  server differ in game version or protocol. For 0.4.10, download and open the
+  full installer, close TROOP, and replace the old installation; restarting an
+  older content pack alone does not install this release's startup fixes.
 - The game needs outbound **UDP 30623**. Some school networks block game traffic;
   a successful browser download does not prove that multiplayer is allowed.
 - Ask school IT whether the game, its public host, and that outbound port are

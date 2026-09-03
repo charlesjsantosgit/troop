@@ -379,6 +379,8 @@ func _enter_online_world(pname: String, seed_v: int,
 		attempt := -1) -> bool:
 	if attempt < 0:
 		attempt = _join_attempt
+	if not await _prepare_gameplay_textures(attempt):
+		return false
 	var phase_started := Time.get_ticks_usec()
 	Gen.setup(seed_v)
 	_trace_join_phase("seed", phase_started)
@@ -503,6 +505,72 @@ func _join_entry_current(attempt: int, entry_world: Variant) -> bool:
 func _set_join_status(message: String) -> void:
 	if status_label and is_instance_valid(status_label):
 		status_label.text = message
+
+
+## Gameplay atlases must not upload while autoload dependencies are parsed.
+## Start them only after the menu has actually had a chance to draw, and never
+## wait synchronously for an unfinished threaded resource on the UI thread.
+func _warm_menu_textures(menu_root: Control) -> void:
+	await get_tree().process_frame
+	await get_tree().process_frame
+	if not is_instance_valid(menu_root) or menu != menu_root or mode != "menu":
+		return
+	if SharedTextureCache.request_all() != OK:
+		return
+	while is_instance_valid(menu_root) and menu == menu_root \
+			and not SharedTextureCache.is_ready():
+		if SharedTextureCache.poll() != OK:
+			return
+		await get_tree().process_frame
+
+
+func _prepare_gameplay_textures(attempt: int) -> bool:
+	_set_join_status("Preparing graphics assets… You can cancel while these load.")
+	await get_tree().process_frame
+	if attempt != _join_attempt:
+		return false
+	if SharedTextureCache.request_all() != OK:
+		return false
+	var deadline := Time.get_ticks_msec() + 45000
+	while attempt == _join_attempt and Time.get_ticks_msec() < deadline:
+		if SharedTextureCache.poll() != OK:
+			return false
+		if SharedTextureCache.is_ready():
+			return true
+		await get_tree().process_frame
+	return false
+
+
+func _begin_menu_offline(destination: String) -> void:
+	if _join_in_progress:
+		return
+	_join_attempt += 1
+	var attempt := _join_attempt
+	var pname := _pname()
+	_join_in_progress = true
+	mode = "loading"
+	_set_join_button_busy(true)
+	if is_instance_valid(_online_button):
+		_online_button.text = "CANCEL LOADING"
+	var ready := await _prepare_gameplay_textures(attempt)
+	if attempt != _join_attempt:
+		return
+	_join_in_progress = false
+	_set_join_button_busy(false)
+	if not ready:
+		mode = "menu"
+		_set_join_status("Graphics assets could not load. Please restart TROOP and try again.")
+		return
+	match destination:
+		"solo":
+			mode = "solo"
+			_close_menu()
+			_start_solo(pname, randi() % 1000000, 2)
+		"debugworld":
+			_close_menu()
+			_start_debug_world(pname)
+		"moon":
+			_start_moon_world(pname)
 
 
 func _spawn_one_entry_puppet() -> bool:
@@ -901,6 +969,7 @@ func _set_join_button_busy(busy: bool) -> void:
 		if is_instance_valid(button):
 			button.disabled = busy
 	if _online_button and is_instance_valid(_online_button):
+		_online_button.disabled = not busy and _public_server_host().is_empty()
 		_online_button.text = ("CANCEL CONNECTION" if busy else
 			"PLAY ONLINE · PUBLIC CANOPY")
 
@@ -1287,10 +1356,7 @@ func _show_menu() -> void:
 		"Instant match against Captain Peel in a fresh jungle",
 		Color("88cf3f"), Color("bdf06b"))
 	_offline_buttons.append(solo)
-	solo.pressed.connect(func():
-		mode = "solo"
-		_close_menu()
-		_start_solo(_pname(), randi() % 1000000, 2))
+	solo.pressed.connect(func(): _begin_menu_offline("solo"))
 
 	_online_button = _menu_action_card(play_column, "PLAY ONLINE · PUBLIC CANOPY",
 		"Managed dedicated server · push-to-talk T · no port forwarding",
@@ -1305,15 +1371,13 @@ func _show_menu() -> void:
 		"Flat playground: parkour · rope garden · regenerating robot range",
 		Color("6b5d33"), Color("9a8850"))
 	_offline_buttons.append(debug_b)
-	debug_b.pressed.connect(func():
-		_close_menu()
-		_start_debug_world(_pname()))
+	debug_b.pressed.connect(func(): _begin_menu_offline("debugworld"))
 
 	var moon_b := _menu_action_card(play_column, "MOON EXPEDITION",
 		"Grow cheese · trade with Muenster · build your lunar farm",
 		Color("46566e"), Color("9dc5ed"))
 	_offline_buttons.append(moon_b)
-	moon_b.pressed.connect(func(): _start_moon_world(_pname()))
+	moon_b.pressed.connect(func(): _begin_menu_offline("moon"))
 
 	var setup_column := VBoxContainer.new()
 	setup_column.add_theme_constant_override("separation", 10)
@@ -1441,6 +1505,7 @@ func _show_menu() -> void:
 
 	add_child(menu)
 	call_deferred("_refresh_menu_scale")
+	_warm_menu_textures(menu)
 	# The updater already checks on boot and every six hours; a menu visit is
 	# rare and user-initiated, so force past the throttle to keep the footer
 	# chip honest about what the latest release actually is.
@@ -1695,6 +1760,14 @@ func _return_to_main_menu() -> void:
 	_teardown_session_ui()
 	Gen.debug_world = false
 	_show_menu()
+
+
+func _input(e: InputEvent) -> void:
+	# Loading must remain cancelable even while the name field or another menu
+	# control has keyboard focus and would consume Escape before unhandled input.
+	if e.is_action_pressed("menu") and _join_in_progress:
+		_cancel_join()
+		get_viewport().set_input_as_handled()
 
 
 func _unhandled_input(e: InputEvent) -> void:

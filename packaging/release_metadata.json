@@ -1,8 +1,8 @@
 {
   "godot_compatibility": "4.7",
-  "minimum_bootstrap": 2,
+  "minimum_bootstrap": 3,
   "network_protocol": 11,
-  "release_title": "TROOP 0.4.9 \u2014 SMOOTHER ONLINE JOINING",
-  "notes": "TROOP 0.4.9 fixes the major online-entry stalls with staged loading, shared graphics shaders and terrain collisions that no longer wait for GPU readbacks. Connections can be canceled and retried safely. Player-departure notifications and cleanup now handle roster updates and disconnects in either order. Existing 0.4.5 installations receive this compatible content update automatically and apply it on restart. A fresh graphics cache can still pause for several seconds while shaders compile, and smaller single-frame hitches remain possible afterward. Multiplayer remains protocol 11; the server and every player must activate version 0.4.9.",
-  "requires_installer": false
+  "release_title": "TROOP 0.4.10 \u2014 FASTER MAC STARTUP",
+  "notes": "TROOP 0.4.10 ships precompiled Metal engine shaders and loads shared gameplay textures after the menu draws. Local M4/macOS 27 testing showed much faster fresh-cache startup, but M1/Tahoe acceptance is still pending and a roughly 535 ms menu hitch remains under investigation. Update requests now keep the menu responsive when a server stalls, and Escape cancels loading even while the name field has focus. This is a one-time FULL INSTALLER update, including for 0.4.9: the renderer and Updater bootstrap initialize before a hot content pack can replace them. Download the 0.4.10 installer, close TROOP, replace the old app, and confirm 0.4.10 on the menu. Future compatible content updates remain automatic. Multiplayer stays on protocol 11; the server and every player must use 0.4.10.",
+  "requires_installer": true
 }

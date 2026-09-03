@@ -46,8 +46,9 @@ static var _lunar_rock_material: StandardMaterial3D
 static var _lunar_rock_mesh: SphereMesh
 static var _lunar_rock_vertices := PackedVector3Array()
 static var _earth_halo_material: StandardMaterial3D
-const LUNAR_MICRODETAIL: Texture2D = preload(
-	"res://assets/textures/satellite_microdetail_overlay.png")
+static var LUNAR_MICRODETAIL: Texture2D:
+	get:
+		return SharedTextureCache.get_texture(SharedTextureCache.MICRODETAIL_PATH)
 
 const LUNAR_CAP_SHADER := """
 shader_type spatial;

@@ -26,9 +26,15 @@ the next launch. TROOP verifies the signature, exact file size, and SHA-256
 digest before it loads any downloaded code. Engine or installer-level changes
 still require the normal Windows installer or macOS disk-image flow.
 
-TROOP 0.4.9 is an automatic content update for existing 0.4.5 installations.
-Earlier versions need the full installer. Confirm 0.4.9 on the menu. Compatible
-content updates remain automatic.
+TROOP 0.4.10 requires the FULL INSTALLER once, including when updating 0.4.9.
+Download the offered 0.4.10 installer, close every running copy of TROOP, and
+install it. On a Mac, replace the old TROOP.app in Applications, then launch
+that copy. Confirm 0.4.10 on the menu. This installs the startup fixes and
+updater bootstrap 3; future compatible content updates remain automatic.
+
+The startup changes were measured on an M4 Mac, not an M1. M1/Tahoe acceptance
+is still pending, and occasional startup/menu hitches remain under investigation.
+Escape or the cancel button returns to the menu while graphics assets load.
 
 Multiplayer
 -----------

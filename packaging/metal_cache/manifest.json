@@ -1,0 +1,400 @@
+{
+  "engine_version": "4.7.stable.official.5b4e0cb0f",
+  "files": [
+    {
+      "path": "BestFitNormalShaderRD/be7b506fb0d08c29b4041710889c21056b8092619f3689131a6dd641e054ad29/8305c75c1294a9f00656f0f14344bb8bedcfe4e7.metal.cache",
+      "sha256": "85a81ca2646f9105821e524659c464e2707313b97c4dac4ff141fcab027183f3",
+      "size": 4264
+    },
+    {
+      "path": "BlitShaderRD/60730ff5d181828d793048b679aedf660ec932db990c939f300e8875dc43b3cf/8305c75c1294a9f00656f0f14344bb8bedcfe4e7.metal.cache",
+      "sha256": "9be6e94bbff4511a9d76c9c8fe349286f3320e949865ba4bc17751f6df6bfff6",
+      "size": 42796
+    },
+    {
+      "path": "BokehDofShaderRD/9eecad1b8d87d91c2928400706561caf4a8a604a0ce721538bb779a2bc51f876/8305c75c1294a9f00656f0f14344bb8bedcfe4e7.metal.cache",
+      "sha256": "70deafdf8781417ac2702a9c992f2d9fd1c99742bf1131172cd52cd1bd0553a3",
+      "size": 30912
+    },
+    {
+      "path": "CanvasOcclusionShaderRD/c5cf7e62fd49f618cfdba96629de618a1b26be203d90def17606a90a4e91cf73/8305c75c1294a9f00656f0f14344bb8bedcfe4e7.metal.cache",
+      "sha256": "0eb3ec20e727c60791285e6644e73cb27f23ed73bd70db5ae3dfb2ac88e33f30",
+      "size": 22960
+    },
+    {
+      "path": "CanvasSdfShaderRD/cf39877e178c34ede4db342bbf1779a27125701d45df76cb3d07ef7c626416f2/8305c75c1294a9f00656f0f14344bb8bedcfe4e7.metal.cache",
+      "sha256": "690e67eb782abdbdc4b41c9757d9938d63cdc1bb680df7f68cc8299159d0fdfc",
+      "size": 26748
+    },
+    {
+      "path": "CanvasShaderRD/9bdc1125c86af67021aafde8760184618f2961034b221ad5dbe673034858b1f3/8305c75c1294a9f00656f0f14344bb8bedcfe4e7.metal.cache",
+      "sha256": "30d7310fa3c9b215c75274a7fa3f73f00ebda62133c0dae39d1ece6c64c6e50e",
+      "size": 160920
+    },
+    {
+      "path": "CanvasShaderRD/9bdc1125c86af67021aafde8760184618f2961034b221ad5dbe673034858b1f3/89e0c5a264d1558e7bc2ca0dc3d0afd834fbe7b6.metal.cache",
+      "sha256": "9d4173ec3a9aedbffc362f78a47217c19ec9e2055b226a73021199cfebf6e2c1",
+      "size": 94528
+    },
+    {
+      "path": "CanvasShaderRD/9bdc1125c86af67021aafde8760184618f2961034b221ad5dbe673034858b1f3/8f9335de72e837eeead40640cc01fddc5baf5a7c.metal.cache",
+      "sha256": "ee3b5a50bb8f22656e3eab8ad89317b49e043d4a81e15acbbe58bd5596b56d67",
+      "size": 93672
+    },
+    {
+      "path": "ClusterDebugShaderRD/d789d0a9a9c2a2b0b6fd18239e92cf44cf6a09f2b3a70fd374d173d50a4be406/8305c75c1294a9f00656f0f14344bb8bedcfe4e7.metal.cache",
+      "sha256": "612cdb40af8052f590637530c846043d5e02a10f2e2e81efda2eba447a6bdd17",
+      "size": 7560
+    },
+    {
+      "path": "ClusterRenderShaderRD/1e2e9d959bf97d9428c9bb1d0d014213ffbef36cd795e288cb779c418d8f8370/8305c75c1294a9f00656f0f14344bb8bedcfe4e7.metal.cache",
+      "sha256": "5805e56c8cd09be0380ba9daf8ad86ae3f7d93b5a508d35528cc72ace2364006",
+      "size": 24104
+    },
+    {
+      "path": "ClusterStoreShaderRD/b1853594c81af4c5dfa70c4136296237d07308f5349bba4d05aaa78ab1522328/8305c75c1294a9f00656f0f14344bb8bedcfe4e7.metal.cache",
+      "sha256": "de9d5778b2bb487559656abfecc8f80ff9c9f363a003264ae2db6f1ca353a52f",
+      "size": 6028
+    },
+    {
+      "path": "CopyShaderRD/06416dbb331f92a2c651ac0fcedf5ba066aafc28e591c899ee8a8f8d9167a537/8305c75c1294a9f00656f0f14344bb8bedcfe4e7.metal.cache",
+      "sha256": "60c6fcd03afaac7974bea690d4226e5e6c79f6474efe390c96f88833d792eecb",
+      "size": 74456
+    },
+    {
+      "path": "CopyToFbShaderRD/516ca1db49f0c89dd5ba5b5f4bb3c26316beafa783d4ea24b25e254d8fc1c428/8305c75c1294a9f00656f0f14344bb8bedcfe4e7.metal.cache",
+      "sha256": "95cc6eb948f028240e17a78d936c7907ee6e3ed9059bfe68336dccf8821dae7a",
+      "size": 36856
+    },
+    {
+      "path": "CubeToDpShaderRD/e83b3bb7481a3ffcfdeab999671e26d0ae4d08e0fd57c3368f137e22ad78a1e9/8305c75c1294a9f00656f0f14344bb8bedcfe4e7.metal.cache",
+      "sha256": "10622cce905338636e09c686023d3e2e277db5682780cb93b70426f3d47c25d5",
+      "size": 8412
+    },
+    {
+      "path": "CubeToOctmapShaderRD/0a8d46601d323eeb200276345183d0f1446febb4d2b0a580f23bde0fe45e85fa/8305c75c1294a9f00656f0f14344bb8bedcfe4e7.metal.cache",
+      "sha256": "51e992de0f48b7aab198f34ae82da7c04cbdbe0a1799c48d145149fd81102b33",
+      "size": 8140
+    },
+    {
+      "path": "Fsr2AccumulatePassShaderRD/7e3388306b8b814b99d86d08901cb85411ed7874055da2a9ac7169350663fb24/8305c75c1294a9f00656f0f14344bb8bedcfe4e7.metal.cache",
+      "sha256": "d0b526be438520179be7fc3722d7a1acfddb46b423f240bf834d3f1954e16e3a",
+      "size": 107688
+    },
+    {
+      "path": "Fsr2AutogenReactivePassShaderRD/15ad4238e088069ce62513ace17fccddc0a031c33651859b6182b345c260417d/8305c75c1294a9f00656f0f14344bb8bedcfe4e7.metal.cache",
+      "sha256": "2c5b531ca845af22bcbdc4a6073c2330c4e4d2fadda6180c3f2cbce831a9947d",
+      "size": 11988
+    },
+    {
+      "path": "Fsr2DepthClipPassShaderRD/636f74877424985a3491c9f4aacd1e6a3bc5e7c47be7f5154bd8dbe63a109a6b/8305c75c1294a9f00656f0f14344bb8bedcfe4e7.metal.cache",
+      "sha256": "0619a6a62244e689071792bd23bab254d6d9995e17ab24264589f6ed3b4454cd",
+      "size": 33412
+    },
+    {
+      "path": "Fsr2LockPassShaderRD/e1f2a67ded37287c61ec8c8e1a93c5ef2f559e6cf8d3ee502740645f0ffb656e/8305c75c1294a9f00656f0f14344bb8bedcfe4e7.metal.cache",
+      "sha256": "2980961eccd27a20b95150e7fb07db4a641a82ec28c5f56926117f9b7d97c341",
+      "size": 15548
+    },
+    {
+      "path": "Fsr2RcasPassShaderRD/0a53240e7518f90b514d903b4572aedbe9103d60b7d67bc733918003c5971ca1/8305c75c1294a9f00656f0f14344bb8bedcfe4e7.metal.cache",
+      "sha256": "94527e54e81607b343258379f641aac3ee7a231e569cd45d3a0b65bcf9db030b",
+      "size": 11744
+    },
+    {
+      "path": "Fsr2TcrAutogenPassShaderRD/688ab227efbf4151af5ade3b8ebcdde4ec62216e405d7f11e51afb3fe8ad183f/8305c75c1294a9f00656f0f14344bb8bedcfe4e7.metal.cache",
+      "sha256": "057c2fe052f7996ebaf70feb07e80ea59cd69eda44c2883e73e2362a38d05b65",
+      "size": 24544
+    },
+    {
+      "path": "FsrUpscaleShaderRD/9cc3728a0cf1dd7347aee49fe0cbe3009047f904f8dfbbe122c3ae35395cd1a6/8305c75c1294a9f00656f0f14344bb8bedcfe4e7.metal.cache",
+      "sha256": "cc9704310878b942d8137e6a7cbeefeab9965a4a1223c8c378cbb598a4683770",
+      "size": 47052
+    },
+    {
+      "path": "GiShaderRD/d0db97061545374c4aad77fca934cb9bd70afea09ec5692aab7313678fd68fca/8305c75c1294a9f00656f0f14344bb8bedcfe4e7.metal.cache",
+      "sha256": "2d6029149e6d8b71c6de0befe7371cc5afbbe82357fab84545e8b91d2131feac",
+      "size": 110416
+    },
+    {
+      "path": "IntegrateDfgShaderRD/03e8c42f8cb7dde55d058fc79333416ad18fb6bd87bd1fb5d9a6ad14651ddaed/8305c75c1294a9f00656f0f14344bb8bedcfe4e7.metal.cache",
+      "sha256": "fac8a42ff13a0ebb196ab2fb8aa68b81c8fe5688807704701a38e9c690197353",
+      "size": 6372
+    },
+    {
+      "path": "LuminanceReduceShaderRD/9f184666cb5c22b85364514685d89dda5bb3f1b85537ad6d60d04e41af01af01/8305c75c1294a9f00656f0f14344bb8bedcfe4e7.metal.cache",
+      "sha256": "25e4aad2de06e56d454e3bc64bb3c49e1d8e8c4689c5b6d216d692466a582fe8",
+      "size": 15664
+    },
+    {
+      "path": "MotionVectorsShaderRD/50b078842febfa35329120080e7954028fe9c0f19ee8582e6d69667cc29f6f8c/8305c75c1294a9f00656f0f14344bb8bedcfe4e7.metal.cache",
+      "sha256": "19bfe08ed7250e5bd9eed98d57fd4596b0ee6df4689041526729d971e097ea9f",
+      "size": 9500
+    },
+    {
+      "path": "MotionVectorsStoreShaderRD/053c37f599e9a1f1b6edcb0df6791e27cc04258af564ec11a8e929e1f58fc50b/8305c75c1294a9f00656f0f14344bb8bedcfe4e7.metal.cache",
+      "sha256": "74e69ecad2ac002cdbfb8970b7a0e07f13a59dea9cf16b1d8bbb174608c920b6",
+      "size": 4692
+    },
+    {
+      "path": "OctmapDownsamplerShaderRD/2232c0d2bbd0444161f6eedf2e402237f04e43c0b0a4182ae60f382701c9e84e/8305c75c1294a9f00656f0f14344bb8bedcfe4e7.metal.cache",
+      "sha256": "7dc8aba9fa31be0bd9a2ad5610a67986bda3a2687c7517da431ad79df67f74b9",
+      "size": 13868
+    },
+    {
+      "path": "OctmapFilterShaderRD/69e12a24310984e7449782cf761a5e21046453235d7d53c5f7ea355f7e0b333e/8305c75c1294a9f00656f0f14344bb8bedcfe4e7.metal.cache",
+      "sha256": "5eb1187b2d326618dd92d099225481c9366be40af68893f298a3f0b6285045da",
+      "size": 74980
+    },
+    {
+      "path": "OctmapRoughnessShaderRD/8132261fb0413e611623bf6a3742240101d2f040003a5dee889bbfbb21633b8f/8305c75c1294a9f00656f0f14344bb8bedcfe4e7.metal.cache",
+      "sha256": "977716108bee528a2c1e4a0e84fc6021efefd9bd5875cf80170f536a543710e2",
+      "size": 18316
+    },
+    {
+      "path": "ParticlesCopyShaderRD/24d89099f97b1cf1fc7cbbc8f348e37b3ecfeff2344b41cb9355bb1701693999/8305c75c1294a9f00656f0f14344bb8bedcfe4e7.metal.cache",
+      "sha256": "ec05f3e632f8b1cf59ce39dbb3a575fbfc71244e1f7378ce34af82a88870ad58",
+      "size": 222704
+    },
+    {
+      "path": "ParticlesShaderRD/b6c7d969adc2c9522906fb5ed230ec231f2f6f4ef9270fc1c37bfe95bf5330bc/07b5904b662900d90454c39c46885098de79aa4c.metal.cache",
+      "sha256": "37967e815c771b4a5b5baec5afa1fec757dc8625f151a36a3cf21024e26539f8",
+      "size": 14604
+    },
+    {
+      "path": "ResolveShaderRD/cfd5775dd543f5734172100a77ad23587b240dead09ab7049fc1180f7b408828/8305c75c1294a9f00656f0f14344bb8bedcfe4e7.metal.cache",
+      "sha256": "d628d4915cd10be66b1cbf7b728bc60ed94457d35b8b27922c7d6db47f541cd3",
+      "size": 16144
+    },
+    {
+      "path": "SceneForwardClusteredShaderRD/c2ccf1fba03bf988835dba74b33ff9f9690ef985335908c22dcdd30d4d0def59/347259af253e6bbec7ad5c69332af5ca731015aa.metal.cache",
+      "sha256": "5ad81a742b98e2f6a36000bbad4550a7ee5147c2c4975423f04905b23299a647",
+      "size": 251628
+    },
+    {
+      "path": "SceneForwardClusteredShaderRD/c2ccf1fba03bf988835dba74b33ff9f9690ef985335908c22dcdd30d4d0def59/a784797763b72ce058effad41b273eb697df9814.metal.cache",
+      "sha256": "bb5544ea1aa274a407c576b35941f18b28c1b56d7ad97f85eee366302a6b967b",
+      "size": 401076
+    },
+    {
+      "path": "SceneForwardClusteredShaderRD/c2ccf1fba03bf988835dba74b33ff9f9690ef985335908c22dcdd30d4d0def59/b600e18e20b53d8932999d48838b29553c586934.metal.cache",
+      "sha256": "374107ec2380b356d4e896024debeb23e31b71e8c33ce4c45f2344e42c6d41b4",
+      "size": 408392
+    },
+    {
+      "path": "ScreenSpaceReflectionDownsampleShaderRD/e6325ac8b9fb9bcd737992e4214427dca872259a117a5e216101674446c7bbc7/8305c75c1294a9f00656f0f14344bb8bedcfe4e7.metal.cache",
+      "sha256": "1010510eb8366608011b747f39e14dddfc3cdb822639ae1864d126b7178746dd",
+      "size": 19436
+    },
+    {
+      "path": "ScreenSpaceReflectionFilterShaderRD/da59a83906e0f2e8a22548f117fe20cbea5b3be2e12acbd6b042d77f4eb1c457/8305c75c1294a9f00656f0f14344bb8bedcfe4e7.metal.cache",
+      "sha256": "44ee145b9d7df7d8e22cf158c14288ae7d587d55facadbd769146f9ff3bcc22c",
+      "size": 7492
+    },
+    {
+      "path": "ScreenSpaceReflectionHizShaderRD/efca221c673612faabbf11b6edf63ce1a9edff2e2832af6582fb7e1effb897fd/8305c75c1294a9f00656f0f14344bb8bedcfe4e7.metal.cache",
+      "sha256": "e24432c9782ca3e0f0c6083a1a7311c38d103ffc0148b6798766fb7e8e1d6589",
+      "size": 16768
+    },
+    {
+      "path": "ScreenSpaceReflectionResolveShaderRD/1fbb748efceb36664d4b25ed0b8b4a1e2f16fe2c8515897b284aafc846e99d5a/8305c75c1294a9f00656f0f14344bb8bedcfe4e7.metal.cache",
+      "sha256": "31ad0309fc3348662e1dbc6ecacc041c467a750a829aab5929444593a285176c",
+      "size": 7660
+    },
+    {
+      "path": "ScreenSpaceReflectionShaderRD/3bd4227a42d4611084beddc1ec0cc27e071626bd471c96b27001ca3b5be9a5fd/8305c75c1294a9f00656f0f14344bb8bedcfe4e7.metal.cache",
+      "sha256": "1578006fe104199eab07bb86159659a3f82935cd2f79d2cad490d97e5b9a9474",
+      "size": 13160
+    },
+    {
+      "path": "SdfgiDebugProbesShaderRD/467fda70c797000ff6af05a8cb526e04218662a9be183aa2a7b46ad2f93cce77/8305c75c1294a9f00656f0f14344bb8bedcfe4e7.metal.cache",
+      "sha256": "49a7fc7d141754c2bc5c14a795dd1f7222a78253a7cdd977e8d496d2c1db5340",
+      "size": 43588
+    },
+    {
+      "path": "SdfgiDebugShaderRD/12dbfdf4517d9a7b37b4faeb432309599b5267d4cc29abaa587181dd5ddcdbc9/8305c75c1294a9f00656f0f14344bb8bedcfe4e7.metal.cache",
+      "sha256": "d2d8bfcdc62d4ce94e3101f9aaefed64f6c64de4980f8134f88ff3153beb6a6b",
+      "size": 8940
+    },
+    {
+      "path": "SdfgiDirectLightShaderRD/0401a0195f37d9da13221e9bb1ca84b6f25642d117306f2939cf9b06d7c187e1/8305c75c1294a9f00656f0f14344bb8bedcfe4e7.metal.cache",
+      "sha256": "e39ae00037bda4a3dc465b63ef30c9aaece4226a801654256e83f65c83ca0db0",
+      "size": 52460
+    },
+    {
+      "path": "SdfgiIntegrateShaderRD/38020518c3928864755a430bbea0312bdfdb8c51075dc2ace5bcddaae36070ad/8305c75c1294a9f00656f0f14344bb8bedcfe4e7.metal.cache",
+      "sha256": "8850a760b4d1b801604856c9b201fe138fbcfcf29506aa3786448057329b5b09",
+      "size": 45724
+    },
+    {
+      "path": "SdfgiPreprocessShaderRD/cd5f8b2fdd3632531a4f732ea1bbb7e2f7ecc333fe8b90b7f7c26d12ee02c55a/8305c75c1294a9f00656f0f14344bb8bedcfe4e7.metal.cache",
+      "sha256": "2370529de2d4bdeeb13e37fc31ef2af37e4a2fef9a4acb9b7f394239015e1a14",
+      "size": 60520
+    },
+    {
+      "path": "ShadowFrustumShaderRD/ac0cd9c7a7b5adc08e5e0770aac36764b5ca298a1a412b5d5256e978ac014583/8305c75c1294a9f00656f0f14344bb8bedcfe4e7.metal.cache",
+      "sha256": "1177abe1bf1cbc1e10c691fb8b70f227cb98321a3387b819b6934decd1075551",
+      "size": 6640
+    },
+    {
+      "path": "SkeletonShaderRD/96ae677d2af41a57b62fdce29c60aed1f841a9f298c7b5dc8c21c330ee4bfbd0/8305c75c1294a9f00656f0f14344bb8bedcfe4e7.metal.cache",
+      "sha256": "ce0b1af4c2b2ce0983e23bfe873617cf8e7ce7906e2f93538ffc4653b4b7d112",
+      "size": 18844
+    },
+    {
+      "path": "SkyShaderRD/5090ce1739a75f47b8eba781fdd25da47220dbf3e500e5864faf5b69a441ea65/0fa1946a11e1cca806ebfe4b3b4ac7f723d8b701.metal.cache",
+      "sha256": "8161dba2e31080c3db5316a15590a91409a4e83a0596134d6e494c88ec069509",
+      "size": 68060
+    },
+    {
+      "path": "SkyShaderRD/5090ce1739a75f47b8eba781fdd25da47220dbf3e500e5864faf5b69a441ea65/9247dd7bf98483a15ebb05f8c580a398614a07d8.metal.cache",
+      "sha256": "4c8eafd9471d60703583aa942297a05bf5e7781ff81815d7d2f1794c67b746bf",
+      "size": 89832
+    },
+    {
+      "path": "SkyShaderRD/5090ce1739a75f47b8eba781fdd25da47220dbf3e500e5864faf5b69a441ea65/ff1961ca0c4c55a79eb12f819a7b6345801bbbaf.metal.cache",
+      "sha256": "cb4b3e2b15942fa906fd6ed3c54c6328c6827cc45c3a69f0b6542f697436f8cf",
+      "size": 70784
+    },
+    {
+      "path": "SmaaBlendingShaderRD/28d6881ae8e064e7bb573261202e530fa9cd61edce48d444d046e61ab449ac36/8305c75c1294a9f00656f0f14344bb8bedcfe4e7.metal.cache",
+      "sha256": "dfe8eac1cd3331f4017f8950881bdcd45da5223a355079821c80abf389f6481f",
+      "size": 10136
+    },
+    {
+      "path": "SmaaEdgeDetectionShaderRD/87693d8136d46b4b64459dbec139c5405b1cabacb2c3894415b131e8782efb2a/8305c75c1294a9f00656f0f14344bb8bedcfe4e7.metal.cache",
+      "sha256": "d085c409ca87cbac27e387e39cbb7e63dbc0e32fd9103e3961ade9010afb74f8",
+      "size": 9288
+    },
+    {
+      "path": "SmaaWeightCalculationShaderRD/e920add2247a504ee41de41046b3e7179eb4952232110cb2db89172c537039b8/8305c75c1294a9f00656f0f14344bb8bedcfe4e7.metal.cache",
+      "sha256": "a6448a228e83e08f80f717e428afc77c42378a295b8cc6520b3672c63db1a998",
+      "size": 16960
+    },
+    {
+      "path": "SortShaderRD/a48873e523f14e04dd6158a6a01c5a4e4feb0c7d6714a8c6246ab619a144fa67/8305c75c1294a9f00656f0f14344bb8bedcfe4e7.metal.cache",
+      "sha256": "40808269ca48a794b8ec10ca4a010b3bdf47746ff94c63026e224a3b3aac574b",
+      "size": 14020
+    },
+    {
+      "path": "SpecularMergeShaderRD/2ac072fb5419de33ce27c9014825f16cc6d4060426f4ba73059bc68094b6bfa8/8305c75c1294a9f00656f0f14344bb8bedcfe4e7.metal.cache",
+      "sha256": "e096dc3f331187a823b619ec1879a1f3503868961e542aed02506ec2c222d782",
+      "size": 28828
+    },
+    {
+      "path": "SsEffectsDownsampleShaderRD/97de52c4017d44cc8bc9cac07ec50ee0d950c87823a123bfe72d66c85e3b3575/8305c75c1294a9f00656f0f14344bb8bedcfe4e7.metal.cache",
+      "sha256": "dc2a3e4187cd49e95a991bcb5ea0633780f1d4e16a0508d7c3cc86a5fca68713",
+      "size": 43520
+    },
+    {
+      "path": "SsaoBlurShaderRD/3ff5d62ff4747c7e9e9f6b8205a4437dc39f10b33be8fa73e629fa75fc0e0911/8305c75c1294a9f00656f0f14344bb8bedcfe4e7.metal.cache",
+      "sha256": "047a08d04e7be9c0a42e81b7763f5835c972377cf6cc2df54ae2d606dd4509bf",
+      "size": 15800
+    },
+    {
+      "path": "SsaoImportanceMapShaderRD/a82018925d702b86595d2166661e310d060917d4e9ba15e44f761060c7b2de83/8305c75c1294a9f00656f0f14344bb8bedcfe4e7.metal.cache",
+      "sha256": "45305bd6da4b79a233c255c12892dd45fea6db1f1bda1d2cce9a803c8cebb0eb",
+      "size": 14736
+    },
+    {
+      "path": "SsaoInterleaveShaderRD/a9a9b2ffc2e8e2f1bd8faf3bef8e282ac615e84e8207b3a6d749db7b41115a81/8305c75c1294a9f00656f0f14344bb8bedcfe4e7.metal.cache",
+      "sha256": "36a8671d0901460f052fc126b775c6be9b17d56d705527c621926d4f13438ff9",
+      "size": 14892
+    },
+    {
+      "path": "SsaoShaderRD/dbe49ee25c27dfab06f4ceafdc245136a29423ac963551cb1ae3ac2d8a958d4b/8305c75c1294a9f00656f0f14344bb8bedcfe4e7.metal.cache",
+      "sha256": "3bb2bb907e1b07fe96afca5567c5aeb75054a26b1b296da2e159271f279c3d43",
+      "size": 48828
+    },
+    {
+      "path": "SsilBlurShaderRD/bc994cf24b385408b444f6309b8b8cc0c300e2add223d358ebac27a5cebd9b2b/8305c75c1294a9f00656f0f14344bb8bedcfe4e7.metal.cache",
+      "sha256": "1f42a637ad4779b4476fda6c297916f68d41e2d86b683d426a81394f667114a2",
+      "size": 16160
+    },
+    {
+      "path": "SsilImportanceMapShaderRD/a3a76b3fc50d25382d0ad7affa6f8aba064612da0acba818798f0d75df747359/8305c75c1294a9f00656f0f14344bb8bedcfe4e7.metal.cache",
+      "sha256": "a38d7a244c0881a8db07b702081754ae9411c4cfa698276f095103f1d288a9ab",
+      "size": 14684
+    },
+    {
+      "path": "SsilInterleaveShaderRD/80a9244bd75179adf2d1606cc8a1f6c47b8ac606f9864a1846783007a5847725/8305c75c1294a9f00656f0f14344bb8bedcfe4e7.metal.cache",
+      "sha256": "add3a4906e8e215f944a6220fbc430e838d82486a8104b643553526a327d1b3b",
+      "size": 15184
+    },
+    {
+      "path": "SsilShaderRD/f18f9d51995393e98ec76d65866e22e4264679600294eff5d76fb86a4d578a4d/8305c75c1294a9f00656f0f14344bb8bedcfe4e7.metal.cache",
+      "sha256": "3a0a3e722abe52a1883f857c96feb75b7fa027a2fdadd179de6618c28ed76114",
+      "size": 52436
+    },
+    {
+      "path": "SubsurfaceScatteringShaderRD/67c90b70b25c773d8dba7dfab0941a884816dc2fc76ea6aab8ab19b0c93d28d4/8305c75c1294a9f00656f0f14344bb8bedcfe4e7.metal.cache",
+      "sha256": "c41db1d2f20cf83185c36593ea4728687cd85964f3b749d07d8f0b6fc7203157",
+      "size": 23208
+    },
+    {
+      "path": "TaaResolveShaderRD/b72c9f24259db22023774f099c134ba5eb5e27abd84e9df475a2ab05404d0abb/8305c75c1294a9f00656f0f14344bb8bedcfe4e7.metal.cache",
+      "sha256": "75696884541c5418087ba5cb57135102aaf89f32ca94eb9fddaded5d07e0df80",
+      "size": 12272
+    },
+    {
+      "path": "TexBlitShaderRD/d6c74a83a7053c8f0db4205307d734eb7e49dad4cffc40fefc1c098a20f56c9e/1e8995c9eb0e9b0b053035999de68595c521a33e.metal.cache",
+      "sha256": "3d9035f8fc0284e65c5a0601a7f737e50b834a7e706e58c41a165d9a61a94ef9",
+      "size": 40112
+    },
+    {
+      "path": "TonemapShaderRD/eb9c653c5c11c28b3c78b4b6d2fb70ca4f70e114fea55281aaa38a313893ac6c/8305c75c1294a9f00656f0f14344bb8bedcfe4e7.metal.cache",
+      "sha256": "884f23329afd0c02d90798014c605b6dc38517558eb1312c4252bcb8db4b2ce7",
+      "size": 96844
+    },
+    {
+      "path": "VolumetricFogProcessShaderRD/20617351d59bc7de5fdd02bae5348fb9c4e0c1ca2e1ca58374bed0f7833ae521/8305c75c1294a9f00656f0f14344bb8bedcfe4e7.metal.cache",
+      "sha256": "1c05a6bb74498b07887246437b8b41b54df1468f4d68535d6b76719dcd69e0a8",
+      "size": 104440
+    },
+    {
+      "path": "VoxelGiDebugShaderRD/e4f59199ebe30ae358ac4d800f8e12818a876bb4b13d27a7a08ff26dc58c4ac8/8305c75c1294a9f00656f0f14344bb8bedcfe4e7.metal.cache",
+      "sha256": "1761ef03188aad0ae63ad69dab5dedab0fd29939491a66d0ec730ff303c290c9",
+      "size": 34296
+    },
+    {
+      "path": "VoxelGiShaderRD/6c4634e4f17397a23696bbc6304a53cc281b742527f6f1883d9548d226e90453/8305c75c1294a9f00656f0f14344bb8bedcfe4e7.metal.cache",
+      "sha256": "067172a1710a72861afc8a0981d6424f4b11d01d236b3a1ae9dd50e5adac62ae",
+      "size": 84376
+    }
+  ],
+  "omitted": [
+    {
+      "path": "Fsr2ComputeLuminancePyramidPassShaderRD/ea30b9cf2586f5efa8adb0623d631dca2e08fcbffc511d15e430309048b62811/8305c75c1294a9f00656f0f14344bb8bedcfe4e7.metal.cache",
+      "reason": "variant 0: baker marked Metal variant invalid (0xffffffff)",
+      "sha256": "233337d9a4b85a23494017c68bc8c8693f90e8cb61dcec98499684aa1049deb4"
+    },
+    {
+      "path": "Fsr2ReconstructPreviousDepthPassShaderRD/7bb138b53460583c5620036572edf3406f00775acd6cc00d6f13210abf2b576a/8305c75c1294a9f00656f0f14344bb8bedcfe4e7.metal.cache",
+      "reason": "variant 0: baker marked Metal variant invalid (0xffffffff)",
+      "sha256": "90e6dd72e18c8740632758375b2bc479b9592d4f4d2407956cbca52cb1b04676"
+    },
+    {
+      "path": "SceneForwardClusteredShaderRD/3b57f606108ded8878ba68c5c59a308a1978b2ad7788fd022d00660d3b950daa/347259af253e6bbec7ad5c69332af5ca731015aa.metal.cache",
+      "reason": "variant 2: baker marked Metal variant invalid (0xffffffff)",
+      "sha256": "0cc05d69aeb42e220e657af446668038641d6faf4d0eda194c10f310d561b67b"
+    },
+    {
+      "path": "SceneForwardClusteredShaderRD/3b57f606108ded8878ba68c5c59a308a1978b2ad7788fd022d00660d3b950daa/a784797763b72ce058effad41b273eb697df9814.metal.cache",
+      "reason": "variant 2: baker marked Metal variant invalid (0xffffffff)",
+      "sha256": "c193be9b295d65fb41360a2294b04867f61e14830591ec81ab666fe928767b82"
+    },
+    {
+      "path": "SceneForwardClusteredShaderRD/3b57f606108ded8878ba68c5c59a308a1978b2ad7788fd022d00660d3b950daa/b600e18e20b53d8932999d48838b29553c586934.metal.cache",
+      "reason": "variant 2: baker marked Metal variant invalid (0xffffffff)",
+      "sha256": "129c60daee3ac91a0d4e9f55ef3ccb8d000f24d2dac876c8f2876539318adbfb"
+    },
+    {
+      "path": "VolumetricFogShaderRD/3f2d837801de79c51f543b1445b06125a26772d9cc66b7ab3294925e4c3bdfa9/3377d4ca9d0fc2e16f62596ee37d619e8e7e3f54.metal.cache",
+      "reason": "variant 0: baker marked Metal variant invalid (0xffffffff)",
+      "sha256": "ed8b3ad9d5435250386aa706cb2ace958659a17c4090e8ebd01d2717c9fa8055"
+    }
+  ],
+  "schema": 1,
+  "settings_sha256": "1312d4fd18df710d827d1066fac109ad2c83c1ad31af12bba8b725bcbae71ad0",
+  "target_min_os": "11.0"
+}

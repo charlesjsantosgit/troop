@@ -17,6 +17,32 @@ func run(main: Node) -> void:
 	ProjectSettings.set_setting("application/config/custom_user_dir_name",
 		"TROOP-join-cancel-" + Crypto.new().generate_random_bytes(8).hex_encode())
 	main._show_menu()
+	main._begin_menu_offline("solo")
+	var offline_attempt: int = main._join_attempt
+	_check(main._join_in_progress and main.mode == "loading" and main.world == null,
+		"offline first entry waits for graphics while leaving the menu visible")
+	_check(not main._online_button.disabled,
+		"the loading cancel button stays usable for offline entry")
+	main._begin_menu_offline("moon")
+	_check(main._join_attempt == offline_attempt,
+		"a second offline action cannot replace the pending texture load")
+	main._begin_public_join("CancelOfflineLoad")
+	for frame in range(3):
+		await get_tree().process_frame
+	_check(not main._join_in_progress and main.mode == "menu" \
+		and main.world == null and not Net.active,
+		"cancel wakes an offline texture waiter without creating a world or connection")
+	main._begin_menu_offline("solo")
+	var escape_attempt: int = main._join_attempt
+	main.name_edit.grab_focus()
+	_press_escape()
+	_check(not main._join_in_progress and main._join_attempt != escape_attempt \
+		and main.mode == "menu", "Escape cancels loading with the name field focused")
+	for frame in range(3):
+		await get_tree().process_frame
+	_check(not main._join_in_progress and main.mode == "menu" \
+		and main.world == null and not Net.active,
+		"Escape cannot let the suspended offline loader create a world later")
 	main.mode = "join"
 	main._join_in_progress = true
 	main._join_attempt += 1
@@ -71,10 +97,15 @@ func run(main: Node) -> void:
 	Net.active = true
 	var entry_result: Array = []
 	_capture_entry(main, main._join_attempt, entry_result)
-	while not is_instance_valid(main.world):
+	for frame in range(2000):
+		if is_instance_valid(main.world) or not entry_result.is_empty():
+			break
 		await get_tree().process_frame
+	_check(is_instance_valid(main.world), "real entry reaches its first yielded world")
 	var canceled_entry: Variant = main.world
-	main._cancel_join()
+	_press_escape()
+	_check(not main._join_in_progress and main.mode == "menu",
+		"Escape cancels a partially built online world")
 	for frame in range(3):
 		await get_tree().process_frame
 	_check(not is_instance_valid(canceled_entry) and entry_result == [false],
@@ -137,9 +168,31 @@ func run(main: Node) -> void:
 	main._cancel_join()
 	for frame in range(3):
 		await get_tree().process_frame
+	main._begin_menu_offline("solo")
+	for frame in range(2000):
+		if not main._join_in_progress:
+			break
+		await get_tree().process_frame
+	_check(main.mode == "solo" and is_instance_valid(main.world) \
+		and main.world.is_build_complete() and main.menu == null \
+		and SharedTextureCache.is_ready(),
+		"offline retry enters a complete world only after graphics are ready")
+	main._return_to_main_menu()
+	for frame in range(3):
+		await get_tree().process_frame
 	print("JOINCANCELLATIONTEST %d/%d %s" % [passed, total,
 		"PASS" if passed == total else "FAIL"])
 	get_tree().quit(0 if passed == total else 1)
+
+
+func _press_escape() -> void:
+	var event := InputEventKey.new()
+	event.keycode = KEY_ESCAPE
+	event.physical_keycode = KEY_ESCAPE
+	event.pressed = true
+	get_viewport().push_input(event)
+	event.pressed = false
+	get_viewport().push_input(event)
 
 
 func _start_fixture_entry(main: Node, output: Array) -> void:
