@@ -113,6 +113,20 @@ jobs:
           "$GODOT_BIN" --headless --path . res://scenes/main.tscn \
             --quit-after 12000 -- pausetest
 
+      - name: Verify complete online entry and cancellation
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m unittest discover -s tests -p test_run_join_entry.py
+          "$GODOT_BIN" --headless --path . --script res://tests/netjoinperformancetest.gd
+          "$GODOT_BIN" --headless --path . --script res://tests/worldstagedbuildtest.gd
+          "$GODOT_BIN" --headless --path . --script res://tests/scopeshadercachetest.gd
+          for MODE in joincancellationtest moonstagedsetuptest rocketstagedsetuptest visualshadercachetest; do
+            "$GODOT_BIN" --headless --path . --quit-after 30000 -- "$MODE"
+          done
+          python3 tests/run_join_entry.py --godot "$GODOT_BIN" --project . \
+            --headless --warm-restart
+
       - name: Run planet, atlas, and lunar expedition regressions
         shell: bash
         run: |

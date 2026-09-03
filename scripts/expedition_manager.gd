@@ -56,6 +56,9 @@ var _cabin_view := true
 var _cabin_yaw := 0.0
 var _cabin_pitch := 0.0
 var _local_aboard := false
+var _configure_phase := 0
+var _configure_complete := false
+var _online_activation_pending := false
 
 
 func configure(owner_main: Node, owner_world: World) -> void:
@@ -65,6 +68,79 @@ func configure(owner_main: Node, owner_world: World) -> void:
 	_inventories[Net.local_id()] = local_inventory
 	_build_worlds()
 	_build_ui()
+	_connect_network()
+	_apply_authoritative_state(Net.expedition_state_snapshot())
+	_apply_local_realm(Net.player_realm())
+	_sync_realm_suits()
+	_configure_complete = true
+
+
+## Main drives online setup while the manager/world are disabled. No partially
+## built Moon is used for gameplay, and the final state comes from Net's latest
+## snapshot rather than the one received before this progressive build began.
+func begin_configure(owner_main: Node, owner_world: World) -> void:
+	main = owner_main
+	world = owner_world
+	name = "ExpeditionManager"
+	_inventories[Net.local_id()] = local_inventory
+	_configure_phase = 0
+	_configure_complete = false
+	_online_activation_pending = true
+
+
+func is_configuration_complete() -> bool:
+	return _configure_complete
+
+
+func configuration_stage_name() -> String:
+	if _configure_phase == 1 and moon_world:
+		return "moon_" + moon_world.setup_phase_name()
+	if _configure_phase == 3 and rocket:
+		return "rocket_" + rocket.setup_phase_name()
+	return ["moon_shell", "moon", "rocket_shell", "rocket", "rocket_route",
+		"voyage_camera", "expedition_ui", "latest_snapshot", "complete"][
+		mini(_configure_phase, 8)]
+
+
+func build_configuration_step() -> bool:
+	if _configure_complete:
+		return true
+	match _configure_phase:
+		0:
+			_create_moon_world(true)
+		1:
+			if not moon_world.build_setup_step(2000):
+				return false
+		2:
+			_create_rocket(true)
+		3:
+			if not rocket.build_setup_step(2000):
+				return false
+		4:
+			_configure_rocket_route()
+			rocket.visible = true
+		5:
+			_create_voyage_camera()
+		6:
+			_build_ui()
+			_ui_layer.visible = false
+		7:
+			_apply_authoritative_state(Net.expedition_state_snapshot())
+			_apply_local_realm(Net.player_realm())
+			_sync_realm_suits()
+			_configure_complete = true
+	_configure_phase += 1
+	return _configure_complete
+
+
+## Subscribe only when Main is ready to reveal gameplay. Realm/crew signals can
+## select cameras even while Node processing is disabled. Re-read Net's current
+## state in the same non-yielding activation so packets received during the last
+## UI/voice/player setup frames are neither lost nor shown prematurely.
+func activate_online_session() -> void:
+	if not _online_activation_pending or not _configure_complete:
+		return
+	_online_activation_pending = false
 	_connect_network()
 	_apply_authoritative_state(Net.expedition_state_snapshot())
 	_apply_local_realm(Net.player_realm())
@@ -95,6 +171,12 @@ func _exit_tree() -> void:
 
 
 func _build_worlds() -> void:
+	_create_moon_world(false)
+	_create_rocket()
+	_create_voyage_camera()
+
+
+func _create_moon_world(progressive: bool) -> void:
 	moon_world = MoonWorld.new()
 	moon_world.name = "PlayableMoon"
 	moon_world.position = MOON_WORLD_OFFSET
@@ -102,21 +184,24 @@ func _build_worlds() -> void:
 	# assigning the session seed after add_child would permanently retain its
 	# default seed and let different sessions share the same crater layout.
 	moon_world.moon_seed = Gen.world_seed ^ 0x4d4f4f4e
-	moon_world.setup(moon_world.moon_seed)
+	if progressive:
+		moon_world.begin_setup(moon_world.moon_seed)
+	else:
+		moon_world.setup(moon_world.moon_seed)
 	world.add_child(moon_world)
 	moon_world.visible = false
 
+
+func _create_rocket(progressive := false) -> void:
 	rocket = LunarRocket.new()
+	rocket.freeze = true
+	if progressive:
+		rocket.visible = false
+		rocket.begin_setup()
 	world.add_child(rocket)
 	rocket.set_render_driven(true)
-	var earth_transform := Transform3D(Basis(Vector3.UP, PI),
-		_earth_launch_position())
-	var moon_local := moon_world.landing_transform()
-	var moon_transform := Transform3D(moon_world.global_basis * moon_local.basis,
-		moon_world.to_global(moon_local.origin))
-	# The same physical pad owns departure, return contact and disembarking.
-	rocket.configure_route(earth_transform, moon_transform, earth_transform)
-	rocket.freeze = true
+	if not progressive:
+		_configure_rocket_route()
 	rocket.crew_pose_requested.connect(_on_crew_pose_requested)
 	rocket.crew_suited.connect(_on_crew_suited)
 	rocket.voyage_progress.connect(_on_voyage_progress)
@@ -124,6 +209,18 @@ func _build_worlds() -> void:
 	rocket.moon_landing_completed.connect(_on_local_rocket_moon_landing)
 	rocket.splashdown_completed.connect(_on_local_rocket_splashdown)
 
+
+func _configure_rocket_route() -> void:
+	var earth_transform := Transform3D(Basis(Vector3.UP, PI),
+		_earth_launch_position())
+	var moon_local := moon_world.landing_transform()
+	var moon_transform := Transform3D(moon_world.global_basis * moon_local.basis,
+		moon_world.to_global(moon_local.origin))
+	# The same physical pad owns departure, return contact and disembarking.
+	rocket.configure_route(earth_transform, moon_transform, earth_transform)
+
+
+func _create_voyage_camera() -> void:
 	voyage_camera = Camera3D.new()
 	voyage_camera.name = "VoyageCamera"
 	voyage_camera.fov = 72.0

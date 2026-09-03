@@ -52,6 +52,10 @@ var _background_minimize_pending := false
 var _update_requires_installer := false
 var _update_version := ""
 var _update_restart_scheduled := false
+var _join_attempt := 0
+var _join_in_progress := false
+var _online_button: Button
+var _offline_buttons: Array[Button] = []
 
 
 func _ready() -> void:
@@ -85,6 +89,20 @@ func _ready() -> void:
 		_show_menu()
 		return
 	match args[0]:
+		"joincancellationtest":
+			mode = args[0]
+			var cancellation_test = load("res://tests/joincancellationtest.gd").new()
+			add_child(cancellation_test)
+			cancellation_test.call_deferred("run", self)
+		"moonstagedsetuptest", "rocketstagedsetuptest", "visualshadercachetest":
+			mode = args[0]
+			var staged_setup_test = load("res://tests/%s.gd" % args[0]).new()
+			add_child(staged_setup_test)
+			staged_setup_test.call_deferred("run")
+		"joinentrytest":
+			var join_test = load("res://tests/joinentrytest.gd").new()
+			add_child(join_test)
+			join_test.call_deferred("run", self, args.slice(1))
 		"renderbackendtest":
 			mode = args[0]
 			var render_test = load("res://tests/renderbackendtest.gd").new()
@@ -357,52 +375,189 @@ func _enter_world(pname: String, seed_v: int, warm_r: int) -> void:
 	_finish_world_entry(pname)
 
 
-func _enter_online_world(pname: String, seed_v: int) -> bool:
+func _enter_online_world(pname: String, seed_v: int,
+		attempt := -1) -> bool:
+	if attempt < 0:
+		attempt = _join_attempt
+	var phase_started := Time.get_ticks_usec()
 	Gen.setup(seed_v)
+	_trace_join_phase("seed", phase_started)
 	# Keep the connection screen alive between the expensive setup phases. The
 	# world itself remains paused until its center chunk and player are ready.
 	await get_tree().process_frame
-	if mode != "join" or not Net.active:
+	if mode != "join" or not Net.active or attempt != _join_attempt:
 		return false
 	world = World.new()
 	world.process_mode = Node.PROCESS_MODE_DISABLED
+	world.set_network_transient_effects_enabled(false)
 	add_child(world)
-	world.build()
+	var entry_world := world
+	# Establish the final render features with an empty camera before meshes
+	# arrive. Otherwise the first player camera enables motion vectors/SSAO
+	# together and forces Godot to rebuild every existing surface pipeline.
+	_set_join_status("Preparing graphics…")
+	_configure_rendering_backend()
+	get_viewport().scaling_3d_scale = _preferred_render_scale()
+	var loading_camera := Camera3D.new()
+	loading_camera.name = "OnlineLoadingCamera"
+	loading_camera.cull_mask = 0
+	world.add_child(loading_camera)
+	loading_camera.current = true
 	await get_tree().process_frame
-	if mode != "join" or not Net.active or not is_instance_valid(world):
+	if not _join_entry_current(attempt, entry_world):
 		return false
+	world.begin_build()
+	while not world.is_build_complete():
+		var stage := world.build_stage_name()
+		_set_join_status("Preparing jungle · " + stage.replace("_", " "))
+		phase_started = Time.get_ticks_usec()
+		world.build_step()
+		_trace_join_phase("earth_" + stage, phase_started)
+		await get_tree().process_frame
+		if not _join_entry_current(attempt, entry_world):
+			return false
+	phase_started = Time.get_ticks_usec()
 	world.warm_online_entry(Net.local_id())
+	_trace_join_phase("spawn_collision", phase_started)
 	await get_tree().process_frame
-	if mode != "join" or not Net.active or not is_instance_valid(world):
+	if not _join_entry_current(attempt, entry_world):
 		return false
-	_finish_world_entry(pname)
+	_set_join_status("Preparing your monkey…")
+	_spawn_entry_player(pname)
+	# CameraRig._ready makes its camera current even while gameplay processing
+	# is disabled. Keep the empty loading view until every scene is complete;
+	# otherwise we render an unfinished world for every subsequent setup step.
+	loading_camera.current = true
+	await get_tree().process_frame
+	if not _join_entry_current(attempt, entry_world):
+		return false
+	_build_entry_hud()
+	hud.visible = false
+	hud.process_mode = Node.PROCESS_MODE_DISABLED
+	await get_tree().process_frame
+	if not _join_entry_current(attempt, entry_world):
+		return false
+	expedition_manager = ExpeditionManager.new()
+	expedition_manager.process_mode = Node.PROCESS_MODE_DISABLED
+	add_child(expedition_manager)
+	expedition_manager.begin_configure(self, world)
+	while not expedition_manager.is_configuration_complete():
+		var stage := expedition_manager.configuration_stage_name()
+		_set_join_status("Preparing expedition · " + stage.replace("_", " "))
+		phase_started = Time.get_ticks_usec()
+		expedition_manager.build_configuration_step()
+		loading_camera.current = true
+		_trace_join_phase(stage, phase_started)
+		await get_tree().process_frame
+		if not _join_entry_current(attempt, entry_world):
+			return false
+	world.expedition_manager = expedition_manager
+	_set_join_status("Preparing chat and nearby players…")
+	_build_session_ui()
+	_session_ui_layer.visible = false
+	_session_ui_layer.process_mode = Node.PROCESS_MODE_DISABLED
+	admin_controller.process_mode = Node.PROCESS_MODE_DISABLED
+	await get_tree().process_frame
+	if not _join_entry_current(attempt, entry_world):
+		return false
+	while _spawn_one_entry_puppet():
+		await get_tree().process_frame
+		if not _join_entry_current(attempt, entry_world):
+			return false
+	Voice.attach_world(world)
+	_reset_adaptive_rendering()
+	await get_tree().process_frame
+	if not _join_entry_current(attempt, entry_world):
+		return false
+	expedition_manager.activate_online_session()
+	world.local_player.cam.snap_to_target()
+	world.local_player.cam.render_frame(0.0, 1.0)
+	if expedition_manager._local_aboard:
+		expedition_manager._update_aboard_camera()
+		expedition_manager.voyage_camera.current = true
+	else:
+		world.local_player.cam.make_current()
+	loading_camera.queue_free()
+	world.set_network_transient_effects_enabled(true)
 	world.process_mode = Node.PROCESS_MODE_PAUSABLE
+	expedition_manager.process_mode = Node.PROCESS_MODE_PAUSABLE
+	expedition_manager._ui_layer.visible = true
+	_session_ui_layer.visible = true
+	_session_ui_layer.process_mode = Node.PROCESS_MODE_PAUSABLE
+	admin_controller.process_mode = Node.PROCESS_MODE_PAUSABLE
+	hud.visible = true
+	hud.process_mode = Node.PROCESS_MODE_PAUSABLE
+	if DisplayServer.get_name() != "headless":
+		Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
 	return true
 
 
-func _finish_world_entry(pname: String) -> void:
+func _join_entry_current(attempt: int, entry_world: Variant) -> bool:
+	# A cancellation can free this object while the coroutine is suspended.
+	# A typed World argument would throw before is_instance_valid can run.
+	return attempt == _join_attempt and mode == "join" and Net.active \
+		and is_instance_valid(entry_world) and not entry_world.is_queued_for_deletion() \
+		and world == entry_world
+
+
+func _set_join_status(message: String) -> void:
+	if status_label and is_instance_valid(status_label):
+		status_label.text = message
+
+
+func _spawn_one_entry_puppet() -> bool:
+	for peer_id in Net.names:
+		if peer_id != Net.local_id() and not world.puppets.has(peer_id):
+			world.spawn_puppet(peer_id, Net.names[peer_id])
+			return true
+	return false
+
+
+func _spawn_entry_player(pname: String) -> void:
+	var phase_started := Time.get_ticks_usec()
 	var player := world.spawn_local(Net.local_id(), pname)
+	_trace_join_phase("player", phase_started)
 	player.cam.set_view_mode(_camera_mode_preference)
 	player.cam.set_sensitivity(_mouse_sensitivity)
 	if mode == "solo":
 		world.spawn_practice_targets()
 		world.spawn_solo_ai()
+
+
+func _build_entry_hud() -> void:
+	var phase_started := Time.get_ticks_usec()
 	hud = HUD.new()
 	hud.process_mode = Node.PROCESS_MODE_PAUSABLE
 	hud.player = world.local_player
 	add_child(hud)
+	_trace_join_phase("hud", phase_started)
+
+
+func _finish_world_entry(pname: String) -> void:
+	_spawn_entry_player(pname)
+	_build_entry_hud()
+	var phase_started := Time.get_ticks_usec()
 	expedition_manager = ExpeditionManager.new()
 	expedition_manager.process_mode = Node.PROCESS_MODE_PAUSABLE
 	add_child(expedition_manager)
 	expedition_manager.configure(self, world)
+	_trace_join_phase("expedition", phase_started)
 	world.expedition_manager = expedition_manager
+	phase_started = Time.get_ticks_usec()
 	Voice.attach_world(world)
 	_build_session_ui()
 	_sync_puppets()
 	_reset_adaptive_rendering()
+	_trace_join_phase("session_ui", phase_started)
 	if DisplayServer.get_name() != "headless" \
 			and mode in ["menu", "solo", "host", "join", "debugworld"]:
 		Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
+
+
+func _trace_join_phase(phase: String, started_usec: int) -> void:
+	if mode == "join" and OS.get_environment("TROOP_JOIN_PROFILE") == "1":
+		print("JOIN_PHASE %s ms=%.3f" % [phase,
+			float(Time.get_ticks_usec() - started_usec) / 1000.0])
 
 
 ## Chat, admin console, and the trade stall live on one overlay layer created
@@ -457,17 +612,21 @@ func _reset_adaptive_rendering() -> void:
 	_perf_sample_t = 0.0
 	_perf_low_samples = 0
 	_perf_high_samples = 0
+	_configure_rendering_backend()
+	_render_scale_ceiling = _preferred_render_scale()
+	_render_scale = _render_scale_ceiling
+	world.set_expensive_effects(false)
+	_adaptive_reduced_effects = _render_scale_ceiling < 0.75
+	_apply_adaptive_render_scale()
+
+
+func _configure_rendering_backend() -> void:
 	# Temporal reconstruction preserves fine terrain/planet detail when dynamic
 	# resolution has to move below native. Spatial MetalFX made the same scene
 	# look soft while throwing away temporal information that is already present.
 	get_viewport().scaling_3d_mode = scaling_mode_for_backend(
 		RenderingServer.get_current_rendering_driver_name(),
 		RenderingServer.get_current_rendering_method())
-	_render_scale_ceiling = _preferred_render_scale()
-	_render_scale = _render_scale_ceiling
-	world.set_expensive_effects(false)
-	_adaptive_reduced_effects = _render_scale_ceiling < 0.75
-	_apply_adaptive_render_scale()
 
 
 static func scaling_mode_for_backend(driver: String, method: String) -> int:
@@ -519,7 +678,7 @@ func _process(dt: float) -> void:
 			return
 		Engine.max_fps = _background_fps_restore
 		_background_fps_restore = -1
-	if get_tree().paused or DisplayServer.get_name() == "headless" \
+	if get_tree().paused or _join_in_progress or DisplayServer.get_name() == "headless" \
 			or not world or not is_instance_valid(world):
 		return
 	if _perf_warmup > 0.0:
@@ -657,6 +816,9 @@ func _begin_host(pname: String) -> void:
 
 
 func _begin_public_join(pname: String) -> void:
+	if _join_in_progress:
+		_cancel_join()
+		return
 	var address := _public_server_host()
 	if address.is_empty():
 		if status_label:
@@ -667,25 +829,92 @@ func _begin_public_join(pname: String) -> void:
 
 
 func _begin_join(address: String, pname: String, port := Net.PORT) -> void:
+	if _join_in_progress:
+		return
+	_join_attempt += 1
+	var attempt := _join_attempt
+	_join_in_progress = true
+	_set_join_button_busy(true)
 	mode = "join"
 	var err := Net.join(address, pname, port)
 	if err != OK:
+		_join_in_progress = false
+		_set_join_button_busy(false)
+		mode = "menu"
 		if status_label:
 			status_label.text = "Could not use online server address."
 		return
 	if status_label:
 		status_label.text = "Connecting to the worldwide canopy…"
-	var ok := await _await_or_timeout(Net.world_ready, 12.0)
+	var ok := await _await_join_or_timeout(Net.world_ready, 12.0, attempt)
+	if attempt != _join_attempt:
+		return
 	if not ok:
+		_join_in_progress = false
+		_set_join_button_busy(false)
 		Net.shutdown()
+		mode = "menu"
 		if status_label:
 			status_label.text = "The online server did not answer. Try again shortly."
 		return
 	if status_label:
 		status_label.text = "Connected — preparing your nearby jungle…"
-	var entered := await _enter_online_world(pname, Net.world_seed)
+	if OS.get_environment("TROOP_JOIN_PROFILE") == "1":
+		print("JOIN_SNAPSHOT players=%d collected=%d chests=%d vehicles=%d rests=%d" % [
+			Net.names.size(), Net.collected.size(), Net.claimed_supply_chests.size(),
+			Net.vehicle_spawn_definitions.size(), Net.vehicle_rests.size()])
+	var entered := await _enter_online_world(pname, Net.world_seed, attempt)
+	if attempt != _join_attempt:
+		return
+	_join_in_progress = false
+	_set_join_button_busy(false)
 	if entered:
+		_sync_puppets()
 		_close_menu()
+	else:
+		# A connection can end during a yielded build without a fresh error
+		# callback. Never leave that partial world behind for the next attempt.
+		_cancel_join()
+		_set_join_status("Connection ended while loading. Please try again.")
+
+
+func _cancel_join() -> void:
+	_join_attempt += 1
+	_join_in_progress = false
+	Voice.clear_world()
+	Net.shutdown()
+	if hud and is_instance_valid(hud):
+		hud.queue_free()
+	hud = null
+	_teardown_session_ui()
+	if world and is_instance_valid(world):
+		world.queue_free()
+	world = null
+	mode = "menu"
+	_set_join_button_busy(false)
+	if status_label:
+		status_label.text = "Connection canceled."
+
+
+func _set_join_button_busy(busy: bool) -> void:
+	for button in _offline_buttons:
+		if is_instance_valid(button):
+			button.disabled = busy
+	if _online_button and is_instance_valid(_online_button):
+		_online_button.text = ("CANCEL CONNECTION" if busy else
+			"PLAY ONLINE · PUBLIC CANOPY")
+
+
+func _await_join_or_timeout(sig: Signal, secs: float, attempt: int) -> bool:
+	var box := [false]
+	var cb := func(): box[0] = true
+	sig.connect(cb, CONNECT_ONE_SHOT)
+	var deadline := Time.get_ticks_msec() + int(secs * 1000.0)
+	while not box[0] and Time.get_ticks_msec() < deadline and attempt == _join_attempt:
+		await get_tree().process_frame
+	if not box[0] and sig.is_connected(cb):
+		sig.disconnect(cb)
+	return box[0] and attempt == _join_attempt
 
 
 func _public_server_host() -> String:
@@ -748,7 +977,7 @@ func _await_or_timeout(sig: Signal, secs: float) -> bool:
 # ---- puppets ---------------------------------------------------------------
 
 func _sync_puppets() -> void:
-	if not world:
+	if not world or _join_in_progress:
 		return
 	var my_id := Net.local_id()
 	for id in Net.names:
@@ -814,16 +1043,18 @@ func _on_net_error(msg: String) -> void:
 	if mode in ["nettest-host", "nettest-join"]:
 		print("NETTEST net_error: " + msg)
 		return
+	_join_attempt += 1
+	_join_in_progress = false
 	_close_pause_menu(false)
 	Voice.clear_world()
 	Net.shutdown()
+	_teardown_session_ui()
 	if world:
 		world.queue_free()
 		world = null
 	if hud:
 		hud.queue_free()
 		hud = null
-	_teardown_session_ui()
 	Gen.debug_world = false
 	_show_menu()
 	if status_label:
@@ -950,12 +1181,15 @@ func _schedule_staged_update_restart(version: String) -> void:
 # ---- menu ------------------------------------------------------------------
 
 func _show_menu() -> void:
+	_join_attempt += 1
+	_join_in_progress = false
 	_close_pause_menu(false)
 	mode = "menu"
 	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
 	if menu:
 		menu.queue_free()
 	_menu_scalars.clear()
+	_offline_buttons.clear()
 	menu = Control.new()
 	menu.set_anchors_preset(Control.PRESET_FULL_RECT)
 	menu.resized.connect(_refresh_menu_scale)
@@ -1052,23 +1286,25 @@ func _show_menu() -> void:
 	var solo := _menu_action_card(play_column, "SOLO BANANA DUEL",
 		"Instant match against Captain Peel in a fresh jungle",
 		Color("88cf3f"), Color("bdf06b"))
+	_offline_buttons.append(solo)
 	solo.pressed.connect(func():
 		mode = "solo"
 		_close_menu()
 		_start_solo(_pname(), randi() % 1000000, 2))
 
-	var online_b := _menu_action_card(play_column, "PLAY ONLINE · PUBLIC CANOPY",
+	_online_button = _menu_action_card(play_column, "PLAY ONLINE · PUBLIC CANOPY",
 		"Managed dedicated server · push-to-talk T · no port forwarding",
 		Color("257f70"), Color("39aa8f"))
-	online_b.disabled = _public_server_host().is_empty()
-	if online_b.disabled:
-		online_b.tooltip_text = ("No hosted address is embedded in this "
+	_online_button.disabled = _public_server_host().is_empty()
+	if _online_button.disabled:
+		_online_button.tooltip_text = ("No hosted address is embedded in this "
 			+ "source build; releases connect automatically.")
-	online_b.pressed.connect(func(): _begin_public_join(_pname()))
+	_online_button.pressed.connect(func(): _begin_public_join(_pname()))
 
 	var debug_b := _menu_action_card(play_column, "DEBUG WORLD",
 		"Flat playground: parkour · rope garden · regenerating robot range",
 		Color("6b5d33"), Color("9a8850"))
+	_offline_buttons.append(debug_b)
 	debug_b.pressed.connect(func():
 		_close_menu()
 		_start_debug_world(_pname()))
@@ -1076,6 +1312,7 @@ func _show_menu() -> void:
 	var moon_b := _menu_action_card(play_column, "MOON EXPEDITION",
 		"Grow cheese · trade with Muenster · build your lunar farm",
 		Color("46566e"), Color("9dc5ed"))
+	_offline_buttons.append(moon_b)
 	moon_b.pressed.connect(func(): _start_moon_world(_pname()))
 
 	var setup_column := VBoxContainer.new()
@@ -1097,7 +1334,9 @@ func _show_menu() -> void:
 	_menu_scale_font(name_edit, 17)
 	setup_column.add_child(name_edit)
 	name_edit.text_submitted.connect(
-		func(_text: String): solo.emit_signal("pressed"))
+		func(_text: String):
+			if not _join_in_progress:
+				solo.emit_signal("pressed"))
 
 	var camera_select := OptionButton.new()
 	camera_select.add_item("CAMERA · RIGHT SHOULDER", 0)
@@ -1377,6 +1616,8 @@ func _close_menu() -> void:
 		menu.queue_free()
 		menu = null
 	update_button = null
+	_online_button = null
+	_offline_buttons.clear()
 
 
 func _open_pause_menu(open_settings := false) -> void:

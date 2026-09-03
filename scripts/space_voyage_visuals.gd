@@ -180,10 +180,14 @@ var local_viewer_enabled := true
 var cinematic_terrain_enabled := false
 var _voyage_active := false
 var _terrain_curvature_applied := false
+enum SetupPhase { NOT_STARTED, RESOURCES, SHELLS, LIGHTS, STARS,
+	CONSTELLATIONS, GALAXY, EARTH, ATMOSPHERE, MOON, SUN, PLANETS, NEBULAE,
+	COMPLETE }
+var _setup_phase := SetupPhase.NOT_STARTED
 
 
 func _ready() -> void:
-	if get_child_count() == 0:
+	if get_child_count() == 0 and _setup_phase == SetupPhase.NOT_STARTED:
 		_build_backdrop()
 	# Keep the bounded diorama centred on the craft without inheriting its roll.
 	# The old child-space planets spun whenever the rocket pitched toward the Moon.
@@ -193,6 +197,64 @@ func _ready() -> void:
 	physics_interpolation_mode = Node.PHYSICS_INTERPOLATION_MODE_OFF
 	_anchor_to_rocket()
 	visible = false
+
+
+func begin_setup() -> void:
+	if _setup_phase == SetupPhase.NOT_STARTED:
+		_setup_phase = SetupPhase.RESOURCES
+
+
+func is_setup_complete() -> bool:
+	return _setup_phase == SetupPhase.COMPLETE
+
+
+func setup_phase_name() -> String:
+	return String(SetupPhase.keys()[_setup_phase]).to_lower()
+
+
+func build_setup_step(_budget_usec: int = 2000) -> bool:
+	if is_queued_for_deletion():
+		return false
+	if _setup_phase == SetupPhase.NOT_STARTED:
+		begin_setup()
+	# Each first-use mesh/texture upload gets its own frame during online entry;
+	# the same complete authored backdrop remains available before boarding.
+	match _setup_phase:
+		SetupPhase.RESOURCES:
+			_ensure_shared_resources()
+		SetupPhase.SHELLS:
+			_build_shells()
+		SetupPhase.LIGHTS:
+			_build_lights()
+		SetupPhase.STARS:
+			_build_stars()
+		SetupPhase.CONSTELLATIONS:
+			_build_constellations()
+		SetupPhase.GALAXY:
+			_build_galaxy()
+		SetupPhase.EARTH:
+			earth_visual = _add_sphere("RecedingEarth", 1.0, _earth_material, true)
+			# Keep the launch tangent away from the atlas's bright polar seam.
+			earth_visual.rotation_degrees = Vector3(90.0, 0.0, 0.0)
+		SetupPhase.ATMOSPHERE:
+			earth_atmosphere_visual = _add_sphere("EarthAtmosphereLimb", 1.0,
+				_earth_atmosphere_material, true)
+			earth_atmosphere_visual.rotation = earth_visual.rotation
+		SetupPhase.MOON:
+			moon_visual = _add_sphere("ApproachingMoon", 1.0, _moon_material, true)
+			# Keep the close landing tangent away from the sphere's UV pole fan.
+			moon_visual.rotation_degrees = Vector3(90.0, 0.0, 0.0)
+		SetupPhase.SUN:
+			sun_visual = _add_sphere("DistantSun", 3.2, _sun_material)
+			sun_visual.position = Vector3(360.0, 230.0, -610.0)
+		SetupPhase.PLANETS:
+			_build_planets()
+		SetupPhase.NEBULAE:
+			_build_nebulae()
+		SetupPhase.COMPLETE:
+			return true
+	_setup_phase = (_setup_phase + 1) as SetupPhase
+	return is_setup_complete()
 
 
 func begin_voyage(outbound: bool) -> void:
@@ -662,7 +724,12 @@ static func _lunar_rocket_timing() -> Dictionary:
 
 
 func _build_backdrop() -> void:
-	_ensure_shared_resources()
+	begin_setup()
+	while not is_setup_complete() and not is_queued_for_deletion():
+		build_setup_step()
+
+
+func _build_shells() -> void:
 	# The voyage happens inside a fog-free inward-facing shell. It hides the
 	# terrestrial atmosphere without swapping the world's shared Environment,
 	# and is a single cached material/primitive rather than a per-frame effect.
@@ -680,6 +747,8 @@ func _build_backdrop() -> void:
 	vacuum_backstop.visible = false
 	add_child(vacuum_backstop)
 
+
+func _build_lights() -> void:
 	# Two small shadowless practical lights travel with the capsule. They keep
 	# white hull panels, blue windows, and the warm mission stripe readable while
 	# preserving a dark side and a convincing cool space rim.
@@ -710,6 +779,8 @@ func _build_backdrop() -> void:
 	celestial_fill_light.sky_mode = DirectionalLight3D.SKY_MODE_LIGHT_ONLY
 	add_child(celestial_fill_light)
 
+
+func _build_stars() -> void:
 	star_field = MultiMeshInstance3D.new()
 	star_field.name = "BoundedStarField"
 	var multimesh := MultiMesh.new()
@@ -733,6 +804,8 @@ func _build_backdrop() -> void:
 	star_field.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	add_child(star_field)
 
+
+func _build_constellations() -> void:
 	constellation_lines = MeshInstance3D.new()
 	constellation_lines.name = "ConstellationLines"
 	constellation_lines.mesh = _constellation_mesh()
@@ -740,6 +813,8 @@ func _build_backdrop() -> void:
 	constellation_lines.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	add_child(constellation_lines)
 
+
+func _build_galaxy() -> void:
 	# One distant billboard makes the requested galaxy legible without introducing
 	# a second particle field. Its deterministic texture and material are cached
 	# once for every rocket; the voyage update only toggles visibility.
@@ -753,19 +828,8 @@ func _build_backdrop() -> void:
 	galaxy_visual.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	add_child(galaxy_visual)
 
-	earth_visual = _add_sphere("RecedingEarth", 1.0, _earth_material, true)
-	# Put a temperate Pangaea texel at the launch tangent instead of the atlas's
-	# bright polar seam, so the local green terrain grows into recognizable land.
-	earth_visual.rotation_degrees = Vector3(90.0, 0.0, 0.0)
-	earth_atmosphere_visual = _add_sphere("EarthAtmosphereLimb", 1.0,
-		_earth_atmosphere_material, true)
-	earth_atmosphere_visual.rotation = earth_visual.rotation
-	moon_visual = _add_sphere("ApproachingMoon", 1.0, _moon_material, true)
-	# Move the landing tangent away from SphereMesh's UV pole; at close range the
-	# pole fan otherwise stretches one atlas texel into white radial wedges.
-	moon_visual.rotation_degrees = Vector3(90.0, 0.0, 0.0)
-	sun_visual = _add_sphere("DistantSun", 3.2, _sun_material)
-	sun_visual.position = Vector3(360.0, 230.0, -610.0)
+
+func _build_planets() -> void:
 	for index in range(PLANET_COLORS.size()):
 		var material := StandardMaterial3D.new()
 		material.albedo_color = PLANET_COLORS[index]
@@ -780,7 +844,6 @@ func _build_backdrop() -> void:
 		planet.position = Vector3(-310.0 + index * 180.0,
 			168.0 - index * 72.0, -525.0 - index * 56.0)
 		planets.append(planet)
-	_build_nebulae()
 
 
 func _build_nebulae() -> void:

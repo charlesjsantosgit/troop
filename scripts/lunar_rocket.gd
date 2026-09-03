@@ -109,6 +109,31 @@ static var _dust_mesh: QuadMesh
 static var _dust_sheet_mesh: ArrayMesh
 static var _landing_strut_mesh: CylinderMesh
 static var _landing_piston_mesh: CylinderMesh
+static var _batch_cpu_meshes: Dictionary = {}
+static var _unit_box_arrays: Array = []
+
+## SurfaceTool can consume Mesh's CPU virtual directly. Unlike ArrayMesh or
+## PrimitiveMesh.surface_get_arrays, this adapter never reads a renderer buffer.
+## Keeping SurfaceTool's native append preserves every attribute and its exact
+## normal/tangent transform rules instead of reimplementing those in GDScript.
+class CpuBatchMesh:
+	extends Mesh
+	var arrays: Array
+	func _surface_get_arrays(_surface: int) -> Array:
+		return arrays
+	func _surface_get_primitive_type(_surface: int) -> int:
+		return Mesh.PRIMITIVE_TRIANGLES
+
+enum SetupPhase { NOT_STARTED, RESOURCES, STRUCTURE, CABIN, LADDER,
+	EXTERIOR_BATCH, CABIN_BATCH, GEAR, FLAMES, LAUNCH_PLUME, REENTRY_FLAMES,
+	LUNAR_DUST, VOYAGE, COMPLETE }
+var _setup_phase := SetupPhase.NOT_STARTED
+var _setup_exterior: Node3D
+var _setup_batch_parts: Array[MeshInstance3D] = []
+var _setup_batch_surfaces: Dictionary = {}
+var _setup_batch_cursor := 0
+var _setup_batch_commit_cursor := 0
+var _setup_batch_started := false
 
 var state := State.EARTH_BOARDING
 var voyage_elapsed := 0.0
@@ -169,12 +194,77 @@ func _ready() -> void:
 	can_sleep = true
 	linear_damp = 0.08
 	angular_damp = 1.4
-	if get_child_count() == 0:
+	if get_child_count() == 0 and _setup_phase == SetupPhase.NOT_STARTED:
 		_build_rocket()
 	if earth_launch_transform == Transform3D.IDENTITY:
 		earth_launch_transform = global_transform
 	_update_effects()
-	set_physics_process(true)
+	set_physics_process(_setup_phase in [SetupPhase.NOT_STARTED, SetupPhase.COMPLETE])
+
+
+func begin_setup() -> void:
+	if _setup_phase != SetupPhase.NOT_STARTED:
+		return
+	_setup_phase = SetupPhase.RESOURCES
+	set_physics_process(false)
+
+
+func is_setup_complete() -> bool:
+	return _setup_phase == SetupPhase.COMPLETE
+
+
+func setup_phase_name() -> String:
+	if _setup_phase == SetupPhase.VOYAGE and voyage_visuals:
+		return "voyage_" + voyage_visuals.setup_phase_name()
+	return String(SetupPhase.keys()[_setup_phase]).to_lower()
+
+
+func build_setup_step(budget_usec: int = 2000) -> bool:
+	if is_queued_for_deletion():
+		return false
+	if _setup_phase == SetupPhase.NOT_STARTED:
+		begin_setup()
+	match _setup_phase:
+		SetupPhase.RESOURCES:
+			_ensure_shared_resources()
+		SetupPhase.STRUCTURE:
+			_build_structure()
+		SetupPhase.CABIN:
+			_build_cabin()
+		SetupPhase.LADDER:
+			_build_access_ladder(_setup_exterior)
+		SetupPhase.EXTERIOR_BATCH, SetupPhase.CABIN_BATCH:
+			var interior := _setup_phase == SetupPhase.CABIN_BATCH
+			if not _build_static_batch_step(cabin if interior else _setup_exterior,
+					interior, budget_usec):
+				return false
+		SetupPhase.GEAR:
+			_build_landing_mechanisms()
+		SetupPhase.FLAMES:
+			_build_flame_meshes()
+		SetupPhase.LAUNCH_PLUME:
+			launch_plume = _build_launch_plume()
+			add_child(launch_plume)
+		SetupPhase.REENTRY_FLAMES:
+			reentry_flames = _build_reentry_flames()
+			add_child(reentry_flames)
+		SetupPhase.LUNAR_DUST:
+			_build_dust_effects()
+		SetupPhase.VOYAGE:
+			if not voyage_visuals:
+				voyage_visuals = SpaceVoyageVisuals.new()
+				voyage_visuals.name = "VoyagePresentation"
+				voyage_visuals.begin_setup()
+				add_child(voyage_visuals)
+			if not voyage_visuals.build_setup_step(budget_usec):
+				return false
+		SetupPhase.COMPLETE:
+			return true
+	_setup_phase = (_setup_phase + 1) as SetupPhase
+	if is_setup_complete():
+		_update_effects()
+		set_physics_process(true)
+	return is_setup_complete()
 
 
 func configure_route(earth_launch: Transform3D, moon_landing: Transform3D,
@@ -1178,11 +1268,18 @@ func _first_free_seat() -> int:
 
 
 func _build_rocket() -> void:
-	_ensure_shared_resources()
+	begin_setup()
+	while not is_setup_complete() and not is_queued_for_deletion():
+		build_setup_step()
+
+
+func _build_structure() -> void:
 	collision_layer = 1
 	collision_mask = 1
 	var exterior := Node3D.new()
 	exterior.name = "VehicleStructure"
+	exterior.set_meta(&"cpu_batch_root", true)
+	_setup_exterior = exterior
 	add_child(exterior)
 	# Solid propellant/equipment decks stop below the inhabitable pressure cabin.
 	# Its floor, ceiling and ring of wall colliders leave a real empty room.
@@ -1202,8 +1299,8 @@ func _build_rocket() -> void:
 		3.20, Vector3(0, 9.40, 0), _hull_material)
 	# The cabin's own floor and ceiling close these openings. A second set of
 	# exactly coplanar cylinder caps flickered across the entire interior.
-	(lower_hull.mesh as CylinderMesh).cap_top = false
-	(upper_hull.mesh as CylinderMesh).cap_bottom = false
+	(lower_hull.get_meta(&"cpu_batch_source") as CylinderMesh).cap_top = false
+	(upper_hull.get_meta(&"cpu_batch_source") as CylinderMesh).cap_bottom = false
 	_add_cylinder_to(exterior, "NoseCone", 0.06, HULL_RADIUS,
 		6.0, Vector3(0, 14.0, 0), _hull_material)
 	_add_cylinder_to(exterior, "NoseSeparationBand", 3.53, 3.53,
@@ -1228,13 +1325,9 @@ func _build_rocket() -> void:
 			1.4, engine_offset + Vector3.DOWN * 9.9, _heatshield_material, 16)
 		_add_cylinder_to(exterior, "EngineThroat", 0.54, 0.54,
 			0.16, engine_offset + Vector3.DOWN * 9.22, _gold_material, 12)
-	_build_cabin()
-	_build_access_ladder(exterior)
-	# Bake the detailed static surfaces by material once, leaving only the gear,
-	# flames, windows and two cabin lights as separate render submissions.
-	_batch_static_geometry(exterior)
-	_batch_static_geometry(cabin, true)
-	_build_landing_mechanisms()
+
+
+func _build_flame_meshes() -> void:
 	var flame_core_mesh := CylinderMesh.new()
 	flame_core_mesh.top_radius = 1.38
 	flame_core_mesh.bottom_radius = 0.09
@@ -1252,10 +1345,9 @@ func _build_rocket() -> void:
 	for flame in [exhaust_flame_core, exhaust_flame_glow]:
 		flame.visible = false
 		flame.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-	launch_plume = _build_launch_plume()
-	add_child(launch_plume)
-	reentry_flames = _build_reentry_flames()
-	add_child(reentry_flames)
+
+
+func _build_dust_effects() -> void:
 	lunar_dust = _build_lunar_dust()
 	lunar_dust.top_level = true
 	add_child(lunar_dust)
@@ -1267,14 +1359,12 @@ func _build_rocket() -> void:
 	lunar_dust_sheet.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	lunar_dust_sheet.visible = false
 	add_child(lunar_dust_sheet)
-	voyage_visuals = SpaceVoyageVisuals.new()
-	voyage_visuals.name = "VoyagePresentation"
-	add_child(voyage_visuals)
 
 
 func _build_cabin() -> void:
 	cabin = Node3D.new()
 	cabin.name = "CrewCabin"
+	cabin.set_meta(&"cpu_batch_root", true)
 	add_child(cabin)
 	_add_cylinder_to(cabin, "CabinFloor", 3.47, 3.47, 0.16,
 		Vector3(0, CABIN_FLOOR_Y - 0.08, 0), _dark_material)
@@ -1308,6 +1398,8 @@ func _build_cabin() -> void:
 			outward * panel_radius + Vector3.UP * (window_top + CABIN_WINDOW_SILL_Y) * 0.5,
 			_window_material, rotation)
 		glass.set_meta(&"keep_separate", true)
+		glass.mesh = glass.get_meta(&"cpu_batch_source")
+		glass.remove_meta(&"cpu_batch_source")
 		glass.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 		cabin_windows.append(glass)
 		var wall_shape := BoxShape3D.new()
@@ -1477,11 +1569,14 @@ static func _add_cylinder_to(parent: Node3D, part_name: String, top_radius: floa
 	return _add_mesh_to(parent, part_name, mesh, local_position, material)
 
 
-static func _batch_static_geometry(model_root: Node3D, interior: bool = false) -> void:
-	var parts: Array[MeshInstance3D] = []
-	_gather_static_parts(model_root, parts)
-	var batches: Dictionary = {}
-	for part in parts:
+func _build_static_batch_step(model_root: Node3D, interior: bool,
+		budget_usec: int) -> bool:
+	if not _setup_batch_started:
+		_gather_static_parts(model_root, _setup_batch_parts)
+		_setup_batch_started = true
+	var started := Time.get_ticks_usec()
+	while _setup_batch_cursor < _setup_batch_parts.size():
+		var part := _setup_batch_parts[_setup_batch_cursor]
 		var material: Material = part.material_override
 		if interior and material is StandardMaterial3D:
 			# The pressure cabin has its own two local lights. Low-bias planetary
@@ -1495,26 +1590,79 @@ static func _batch_static_geometry(model_root: Node3D, interior: bool = false) -
 				_interior_materials[source_key] = cabin_material
 			material = _interior_materials[source_key]
 		var key := material.get_instance_id()
-		if not batches.has(key):
+		if not _setup_batch_surfaces.has(key):
 			var surface := SurfaceTool.new()
 			surface.begin(Mesh.PRIMITIVE_TRIANGLES)
 			surface.set_material(material)
-			batches[key] = surface
+			_setup_batch_surfaces[key] = surface
 		var relative := part.transform
 		var ancestor := part.get_parent()
 		while ancestor != model_root:
 			relative = (ancestor as Node3D).transform * relative
 			ancestor = ancestor.get_parent()
-		var surface: SurfaceTool = batches[key]
-		surface.append_from(part.mesh, 0, relative)
-	for key in batches:
-		var surface: SurfaceTool = batches[key]
+		var surface: SurfaceTool = _setup_batch_surfaces[key]
+		var source: PrimitiveMesh = part.get_meta(&"cpu_batch_source", part.mesh)
+		surface.append_from(_cpu_batch_mesh(source), 0, relative)
+		_setup_batch_cursor += 1
+		if Time.get_ticks_usec() - started >= maxi(budget_usec, 1):
+			return false
+	# The uploads are intentionally separate from CPU gathering, and only one
+	# material is published per call. No frame uploads the whole craft at once.
+	if _setup_batch_commit_cursor < _setup_batch_surfaces.size():
+		var key: int = _setup_batch_surfaces.keys()[_setup_batch_commit_cursor]
+		var surface: SurfaceTool = _setup_batch_surfaces[key]
 		var batch := MeshInstance3D.new()
 		batch.name = "StaticMaterial%d" % model_root.get_child_count()
 		batch.mesh = surface.commit()
 		model_root.add_child(batch)
-	for part in parts:
+		_setup_batch_commit_cursor += 1
+		return false
+	for part in _setup_batch_parts:
 		part.free()
+	_setup_batch_parts.clear()
+	_setup_batch_surfaces.clear()
+	_setup_batch_cursor = 0
+	_setup_batch_commit_cursor = 0
+	_setup_batch_started = false
+	return true
+
+
+static func _cpu_batch_mesh(source: PrimitiveMesh) -> CpuBatchMesh:
+	var description: Array
+	if source is BoxMesh:
+		description = ["box", source.size, source.subdivide_width,
+			source.subdivide_height, source.subdivide_depth,
+			source.flip_faces, source.add_uv2, source.uv2_padding]
+	elif source is CylinderMesh:
+		description = ["cylinder", source.top_radius, source.bottom_radius,
+			source.height, source.radial_segments, source.rings, source.cap_top,
+			source.cap_bottom, source.flip_faces, source.add_uv2, source.uv2_padding]
+	else:
+		description = [source.get_instance_id()]
+	# Binary keys preserve full float precision (Vector3 string formatting does
+	# not), and include every geometry-affecting property of the authored types.
+	var key := var_to_bytes(description)
+	if _batch_cpu_meshes.has(key):
+		return _batch_cpu_meshes[key]
+	var cached := CpuBatchMesh.new()
+	if source is BoxMesh and source.subdivide_width == 0 \
+			and source.subdivide_height == 0 and source.subdivide_depth == 0 \
+			and not source.flip_faces and not source.add_uv2:
+		if _unit_box_arrays.is_empty():
+			var unit := BoxMesh.new()
+			unit.size = Vector3.ONE
+			_unit_box_arrays = unit.get_mesh_arrays()
+		cached.arrays = _unit_box_arrays.duplicate()
+		var vertices: PackedVector3Array = _unit_box_arrays[Mesh.ARRAY_VERTEX].duplicate()
+		for index in range(vertices.size()):
+			vertices[index] *= source.size
+		cached.arrays[Mesh.ARRAY_VERTEX] = vertices
+	else:
+		# A cylinder's taper changes normals; cache the exact engine-generated
+		# arrays once per full recipe instead of approximating them by scaling.
+		cached.arrays = source.get_mesh_arrays()
+	_batch_cpu_meshes[key] = cached
+	return cached
 
 
 static func _gather_static_parts(node: Node, parts: Array[MeshInstance3D]) -> void:
@@ -1647,7 +1795,19 @@ static func _add_mesh_to(parent: Node3D, part_name: String,
 		material: Material) -> MeshInstance3D:
 	var instance := MeshInstance3D.new()
 	instance.name = part_name
-	instance.mesh = mesh
+	var ancestor: Node = parent
+	var deferred_mesh := false
+	while ancestor:
+		if ancestor.get_meta(&"cpu_batch_root", false):
+			deferred_mesh = true
+			break
+		ancestor = ancestor.get_parent()
+	if deferred_mesh:
+		# These temporary nodes supply only transforms/materials to the batcher.
+		# Assigning their mesh would upload hundreds of soon-discarded primitives.
+		instance.set_meta(&"cpu_batch_source", mesh)
+	else:
+		instance.mesh = mesh
 	instance.position = local_position
 	instance.material_override = material
 	parent.add_child(instance)

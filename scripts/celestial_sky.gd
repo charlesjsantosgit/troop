@@ -221,13 +221,19 @@ var _sun_visibility := 0.0
 
 
 func _init(world_seed_override: Variant = null) -> void:
+	var profile_started := Time.get_ticks_usec() \
+		if OS.get_environment("TROOP_JOIN_PROFILE") == "1" else 0
 	_world_seed = Gen.world_seed if world_seed_override == null \
 		else int(world_seed_override)
 	_sun_smiley_enabled = sun_smiley_for_seed(_world_seed)
+	profile_started = _profile_setup_step("seed", profile_started)
 	if _shared_shader == null or _shared_atlas_texture == null:
 		_build_catalog()
+		profile_started = _profile_setup_step("catalog_total", profile_started)
 		_shader = Shader.new()
+		profile_started = _profile_setup_step("shader_new", profile_started)
 		_shader.code = SKY_SHADER
+		profile_started = _profile_setup_step("shader_code", profile_started)
 		_shared_shader = _shader
 		_shared_atlas_texture = _atlas_texture
 		_shared_catalog_signature = _catalog_signature
@@ -237,9 +243,13 @@ func _init(world_seed_override: Variant = null) -> void:
 		_atlas_texture = _shared_atlas_texture
 		_catalog_signature = _shared_catalog_signature
 		_constellation_segment_count = _shared_constellation_segment_count
+	profile_started = _profile_setup_step("shared_resources", profile_started)
 	material = ShaderMaterial.new()
+	profile_started = _profile_setup_step("material_new", profile_started)
 	material.shader = _shader
+	profile_started = _profile_setup_step("material_shader", profile_started)
 	material.set_shader_parameter("celestial_atlas", _atlas_texture)
+	profile_started = _profile_setup_step("material_atlas", profile_started)
 	var moon_radius := deg_to_rad(MOON_DIAMETER_DEGREES * 0.5)
 	material.set_shader_parameter("moon_radius_sine", sin(moon_radius))
 	material.set_shader_parameter("moon_guard_cosine", cos(moon_radius * 1.6))
@@ -250,9 +260,22 @@ func _init(world_seed_override: Variant = null) -> void:
 		SUN_DISC_EDGE_SOFTNESS)
 	material.set_shader_parameter("sun_smiley_enabled",
 		1.0 if _sun_smiley_enabled else 0.0)
+	profile_started = _profile_setup_step("material_parameters", profile_started)
 	update_palette(_palette.top, _palette.horizon,
 		_palette.ground_bottom, _palette.ground_horizon, 0.72)
+	profile_started = _profile_setup_step("initial_palette", profile_started)
 	update_celestials(1.0, 1.0, Vector3.UP, 0.0, 12.0, Vector3.DOWN)
+	_profile_setup_step("initial_celestials", profile_started)
+
+
+## Opt-in cold-entry diagnostics; no renderer synchronization is introduced.
+static func _profile_setup_step(phase: String, started_usec: int) -> int:
+	if started_usec == 0:
+		return 0
+	print("JOIN_CELESTIAL_PHASE %s ms=%.3f" % [phase,
+		float(Time.get_ticks_usec() - started_usec) / 1000.0])
+	# Exclude logging time from the following phase's measurement.
+	return Time.get_ticks_usec()
 
 
 func get_material() -> ShaderMaterial:
@@ -407,10 +430,13 @@ func palette_colors() -> Dictionary:
 
 
 func _build_catalog() -> void:
+	var profile_started := Time.get_ticks_usec() \
+		if OS.get_environment("TROOP_JOIN_PROFILE") == "1" else 0
 	_constellation_segment_count = 0
 	var image := Image.create_empty(ATLAS_WIDTH, ATLAS_HEIGHT, false,
 		Image.FORMAT_RGBA8)
 	image.fill(Color(0, 0, 0, 0))
+	profile_started = _profile_setup_step("atlas_create_fill", profile_started)
 	var rng := RandomNumberGenerator.new()
 	rng.seed = 0x5A17C0DE
 	for index in range(RANDOM_STAR_COUNT):
@@ -438,15 +464,21 @@ func _build_catalog() -> void:
 			tint = Color(0.65, 0.79, 1.0)
 		_stamp_star(image, Vector2i(x, y), radius,
 			tint, rng.randf_range(0.20, 0.78))
+	profile_started = _profile_setup_step("atlas_paint_stars", profile_started)
 
 	_add_constellations(image)
+	profile_started = _profile_setup_step("atlas_paint_constellations", profile_started)
 	_add_planets(image)
+	profile_started = _profile_setup_step("atlas_paint_planets", profile_started)
 	image.generate_mipmaps()
+	profile_started = _profile_setup_step("atlas_mipmaps", profile_started)
 	_atlas_texture = ImageTexture.create_from_image(image)
+	profile_started = _profile_setup_step("atlas_texture_upload", profile_started)
 	_catalog_signature = "%d:%d:%d:%d:%d" % [
 		hash(image.get_data()), RANDOM_STAR_COUNT,
 		_constellation_segment_count, PLANET_COUNT, MOON_CRATER_COUNT,
 	]
+	_profile_setup_step("atlas_signature", profile_started)
 
 
 func _add_constellations(image: Image) -> void:

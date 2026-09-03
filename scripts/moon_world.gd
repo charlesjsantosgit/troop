@@ -44,6 +44,7 @@ static var _lunar_star_material: StandardMaterial3D
 static var _lunar_star_mesh: BoxMesh
 static var _lunar_rock_material: StandardMaterial3D
 static var _lunar_rock_mesh: SphereMesh
+static var _lunar_rock_vertices := PackedVector3Array()
 static var _earth_halo_material: StandardMaterial3D
 const LUNAR_MICRODETAIL: Texture2D = preload(
 	"res://assets/textures/satellite_microdetail_overlay.png")
@@ -152,13 +153,40 @@ var _sphere_vertices := PackedVector3Array()
 var _sphere_indices := PackedInt32Array()
 var _grid_vertex_indices: Dictionary = {}
 
+enum SetupPhase {
+	NOT_STARTED, MATERIAL, VERTEX_ROWS, INDEX_ROWS, FACE_NORMALS,
+	VERTEX_NORMALS, TERRAIN_MESH, TERRAIN_COLLISION_FACES, TERRAIN_COLLISION, LANDING_PLATFORM,
+	ROCKS, GRAVITY, LIGHTING, SKY, SHOP, COLONY, COMPLETE,
+}
+const SETUP_NORMAL_TRIANGLE_BATCH := 512
+const SETUP_NORMAL_VERTEX_BATCH := 1024
+const SETUP_COLLISION_TRIANGLE_BATCH := 512
+# Match Godot's TriangleMesh::create, used by Mesh.create_trimesh_shape().
+const TERRAIN_COLLISION_SNAP := 0.0001
+var _setup_phase := SetupPhase.NOT_STARTED
+var _setup_face := 0
+var _setup_row := 0
+var _setup_cursor := 0
+var _setup_normals := PackedVector3Array()
+var _setup_colors := PackedColorArray()
+var _setup_collision_faces := PackedVector3Array()
+
 
 func _ready() -> void:
-	if not _built:
+	# An explicit progressive build is owned by its caller, even after this node
+	# enters the tree. Never drain it from _ready and recreate the entry hitch.
+	if not _built and _setup_phase == SetupPhase.NOT_STARTED:
 		setup(moon_seed)
 
 
 func setup(seed_value: int) -> void:
+	if _setup_phase != SetupPhase.NOT_STARTED and not _built:
+		# Switching APIs mid-build completes the already selected seed; restarting
+		# would mix cached crater samples and the partially welded terrain.
+		while not build_setup_step():
+			if is_queued_for_deletion():
+				return
+		return
 	moon_seed = seed_value
 	if _built:
 		return
@@ -177,6 +205,202 @@ func setup(seed_value: int) -> void:
 	colony_world.configure(self)
 	add_child(colony_world)
 	_disable_fog_on_descendants(colony_world)
+	_setup_phase = SetupPhase.COMPLETE
+
+
+## Select a seed without constructing resources or scheduling background work.
+## Keep the node hidden/disabled until completion; callers may free it at any
+## point. Repeated begin calls do not reseed an in-progress or completed world.
+func begin_setup(seed_value: int) -> void:
+	if _built or _setup_phase != SetupPhase.NOT_STARTED:
+		return
+	moon_seed = seed_value
+	_setup_phase = SetupPhase.MATERIAL
+
+
+func is_setup_complete() -> bool:
+	return _built
+
+
+func setup_phase_name() -> String:
+	return str(SetupPhase.keys()[_setup_phase]).to_lower()
+
+
+## Terrain CPU work is sliced by rows or small normal/collision-face batches, checked
+## against elapsed wall time after every unit. Native mesh/collider publication
+## and each authored feature get a separate call: those atomic engine calls can
+## exceed the requested budget, but never share a burst with the next feature.
+func build_setup_step(budget_usec: int = 2000) -> bool:
+	if _built:
+		return true
+	if is_queued_for_deletion():
+		return false
+	if _setup_phase == SetupPhase.NOT_STARTED:
+		begin_setup(moon_seed)
+	var started := Time.get_ticks_usec()
+	while true:
+		var previous_phase := _setup_phase
+		_build_setup_unit()
+		if _built:
+			return true
+		var previous_was_cpu := (previous_phase >= SetupPhase.VERTEX_ROWS \
+			and previous_phase <= SetupPhase.VERTEX_NORMALS) \
+			or previous_phase == SetupPhase.TERRAIN_COLLISION_FACES
+		var next_is_cpu := (_setup_phase >= SetupPhase.VERTEX_ROWS \
+			and _setup_phase <= SetupPhase.VERTEX_NORMALS) \
+			or _setup_phase == SetupPhase.TERRAIN_COLLISION_FACES
+		if not previous_was_cpu or not next_is_cpu \
+				or Time.get_ticks_usec() - started >= maxi(budget_usec, 1):
+			return false
+	return false
+
+
+func _build_setup_unit() -> void:
+	match _setup_phase:
+		SetupPhase.MATERIAL:
+			_ensure_surface_material()
+			_setup_phase = SetupPhase.VERTEX_ROWS
+		SetupPhase.VERTEX_ROWS:
+			_build_setup_vertex_row()
+		SetupPhase.INDEX_ROWS:
+			_build_setup_index_row()
+		SetupPhase.FACE_NORMALS:
+			var stop := mini(_setup_cursor + SETUP_NORMAL_TRIANGLE_BATCH * 3,
+				_sphere_indices.size())
+			for index in range(_setup_cursor, stop, 3):
+				var a := _sphere_indices[index]
+				var b := _sphere_indices[index + 1]
+				var c := _sphere_indices[index + 2]
+				var normal := (_sphere_vertices[c] - _sphere_vertices[a]).cross(
+					_sphere_vertices[b] - _sphere_vertices[a])
+				_setup_normals[a] += normal
+				_setup_normals[b] += normal
+				_setup_normals[c] += normal
+			_setup_cursor = stop
+			if stop == _sphere_indices.size():
+				_setup_cursor = 0
+				_setup_phase = SetupPhase.VERTEX_NORMALS
+		SetupPhase.VERTEX_NORMALS:
+			var stop := mini(_setup_cursor + SETUP_NORMAL_VERTEX_BATCH,
+				_setup_normals.size())
+			for index in range(_setup_cursor, stop):
+				_setup_normals[index] = _setup_normals[index].normalized()
+			_setup_cursor = stop
+			if stop == _setup_normals.size():
+				_setup_phase = SetupPhase.TERRAIN_MESH
+		SetupPhase.TERRAIN_MESH:
+			_publish_setup_terrain()
+			_setup_cursor = 0
+			_setup_collision_faces.resize(_sphere_indices.size())
+			_setup_phase = SetupPhase.TERRAIN_COLLISION_FACES
+		SetupPhase.TERRAIN_COLLISION_FACES:
+			# Retain the engine trimesh path's triangle order and vertex snapping,
+			# without reading the published terrain buffers back from the GPU.
+			var stop := mini(_setup_cursor + SETUP_COLLISION_TRIANGLE_BATCH * 3,
+				_sphere_indices.size())
+			for index in range(_setup_cursor, stop):
+				_setup_collision_faces[index] = _sphere_vertices[_sphere_indices[index]] \
+					.snappedf(TERRAIN_COLLISION_SNAP)
+			_setup_cursor = stop
+			if stop == _sphere_indices.size():
+				_setup_phase = SetupPhase.TERRAIN_COLLISION
+		SetupPhase.TERRAIN_COLLISION:
+			terrain_body = StaticBody3D.new()
+			terrain_body.name = "ClosedLunarGround"
+			terrain_body.collision_layer = 1
+			terrain_body.collision_mask = 1
+			var collision := CollisionShape3D.new()
+			collision.name = "ExactSphericalTerrainCollision"
+			var shape := ConcavePolygonShape3D.new()
+			shape.set_faces(_setup_collision_faces)
+			collision.shape = shape
+			terrain_body.add_child(collision)
+			add_child(terrain_body)
+			_setup_collision_faces = PackedVector3Array()
+			_setup_phase = SetupPhase.LANDING_PLATFORM
+		SetupPhase.LANDING_PLATFORM:
+			_build_landing_platform()
+			_setup_phase = SetupPhase.ROCKS
+		SetupPhase.ROCKS:
+			_build_rock_field()
+			_setup_phase = SetupPhase.GRAVITY
+		SetupPhase.GRAVITY:
+			_build_gravity_volume()
+			_setup_phase = SetupPhase.LIGHTING
+		SetupPhase.LIGHTING:
+			_build_lighting()
+			_setup_phase = SetupPhase.SKY
+		SetupPhase.SKY:
+			_build_lunar_sky()
+			_setup_phase = SetupPhase.SHOP
+		SetupPhase.SHOP:
+			cheese_shop = MoonCheeseShop.new()
+			cheese_shop.transform = shop_local_transform()
+			add_child(cheese_shop)
+			_disable_fog_on_descendants(cheese_shop)
+			_setup_phase = SetupPhase.COLONY
+		SetupPhase.COLONY:
+			colony_world = MoonColonyWorld.new()
+			colony_world.configure(self)
+			add_child(colony_world)
+			_disable_fog_on_descendants(colony_world)
+			_setup_phase = SetupPhase.COMPLETE
+			_built = true
+
+
+func _build_setup_vertex_row() -> void:
+	# Preserve the synchronous face/row/column order, including edge welding.
+	for x in range(SPHERE_FACE_SEGMENTS + 1):
+		var key := _cube_grid_point(_setup_face, x, _setup_row)
+		if _grid_vertex_indices.has(key):
+			continue
+		var point := _grid_surface_vertex(_setup_face, x, _setup_row)
+		_grid_vertex_indices[key] = _sphere_vertices.size()
+		_sphere_vertices.append(point)
+		_setup_normals.append(Vector3.ZERO)
+		var mineral := 0.97 + 0.035 * sin(point.x * 0.017 + point.z * 0.011)
+		_setup_colors.append(Color(mineral, mineral * 0.99, mineral * 0.96))
+	_setup_row += 1
+	if _setup_row > SPHERE_FACE_SEGMENTS:
+		_setup_row = 0
+		_setup_phase = SetupPhase.INDEX_ROWS
+
+
+func _build_setup_index_row() -> void:
+	for x in range(SPHERE_FACE_SEGMENTS):
+		var a: int = _grid_vertex_indices[_cube_grid_point(_setup_face, x, _setup_row)]
+		var b: int = _grid_vertex_indices[_cube_grid_point(_setup_face, x + 1, _setup_row)]
+		var c: int = _grid_vertex_indices[_cube_grid_point(_setup_face, x, _setup_row + 1)]
+		var d: int = _grid_vertex_indices[_cube_grid_point(_setup_face, x + 1, _setup_row + 1)]
+		_sphere_indices.append_array(PackedInt32Array([a, c, b, b, c, d]))
+	_setup_row += 1
+	if _setup_row == SPHERE_FACE_SEGMENTS:
+		_setup_row = 0
+		_setup_face += 1
+		_setup_phase = SetupPhase.VERTEX_ROWS if _setup_face < 6 \
+			else SetupPhase.FACE_NORMALS
+
+
+func _publish_setup_terrain() -> void:
+	var arrays := []
+	arrays.resize(Mesh.ARRAY_MAX)
+	arrays[Mesh.ARRAY_VERTEX] = _sphere_vertices
+	arrays[Mesh.ARRAY_NORMAL] = _setup_normals
+	arrays[Mesh.ARRAY_COLOR] = _setup_colors
+	arrays[Mesh.ARRAY_INDEX] = _sphere_indices
+	var mesh := ArrayMesh.new()
+	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
+	terrain_mesh = MeshInstance3D.new()
+	terrain_mesh.name = "ClosedLunarSphere"
+	terrain_mesh.mesh = mesh
+	terrain_mesh.material_override = _horizon_material
+	terrain_mesh.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	terrain_mesh.extra_cull_margin = 0.0
+	add_child(terrain_mesh)
+	lunar_far_surface_fill = terrain_mesh
+	lunar_visual_horizon = terrain_mesh
+	_setup_normals = PackedVector3Array()
+	_setup_colors = PackedColorArray()
 
 
 func center_world_position() -> Vector3:
@@ -650,7 +874,9 @@ func _build_rock_field() -> void:
 		if size >= 1.0:
 			var collision := CollisionShape3D.new()
 			var shape := ConvexPolygonShape3D.new()
-			var rock_vertices: PackedVector3Array = _lunar_rock_mesh.get_mesh_arrays()[Mesh.ARRAY_VERTEX]
+			# Each convex shape owns its scaled copy. The shared source remains
+			# unchanged for every rock and every later Moon instance.
+			var rock_vertices := _lunar_rock_vertices.duplicate()
 			for vertex in range(rock_vertices.size()):
 				rock_vertices[vertex] *= Vector3(size, size * squash, size * 0.78)
 			shape.points = rock_vertices
@@ -831,6 +1057,9 @@ static func _ensure_lunar_sky_resources() -> void:
 	_lunar_rock_mesh.height = 1.0
 	_lunar_rock_mesh.radial_segments = 8
 	_lunar_rock_mesh.rings = 4
+	# PrimitiveMesh array access can synchronize with the renderer. Read this
+	# immutable mesh once, not separately for every large boulder collider.
+	_lunar_rock_vertices = _lunar_rock_mesh.get_mesh_arrays()[Mesh.ARRAY_VERTEX]
 	_lunar_rock_material = StandardMaterial3D.new()
 	_lunar_rock_material.albedo_color = Color(0.43, 0.42, 0.40)
 	_lunar_rock_material.roughness = 1.0

@@ -10,6 +10,7 @@ const LANDMARK_NAMES := MoonColony.LANDMARK_NAMES
 
 static var _materials: Dictionary = {}
 static var _meshes: Dictionary = {}
+static var _collision_vertices: Dictionary = {}
 
 var plot_roots: Array[Node3D] = []
 var facility_roots: Dictionary = {}
@@ -528,8 +529,13 @@ func _solid_primitive(root: Node3D, mesh_id: String, at: Vector3, size: Vector3,
 		body.collision_mask = 1
 		root.add_child(body)
 		_bodies[root.get_instance_id()] = body
-	var mesh: PrimitiveMesh = _meshes[mesh_id]
-	var vertices: PackedVector3Array = mesh.get_mesh_arrays()[Mesh.ARRAY_VERTEX]
+	# Shared meshes are immutable; repeated array reads can force GPU readback.
+	# Cache once per mesh and never scale the cached source in place.
+	if not _collision_vertices.has(mesh_id):
+		var mesh: PrimitiveMesh = _meshes[mesh_id]
+		_collision_vertices[mesh_id] = mesh.get_mesh_arrays()[Mesh.ARRAY_VERTEX]
+	var source_vertices: PackedVector3Array = _collision_vertices[mesh_id]
+	var vertices := source_vertices.duplicate()
 	for id in range(vertices.size()):
 		vertices[id] *= size
 	var convex := ConvexPolygonShape3D.new()
