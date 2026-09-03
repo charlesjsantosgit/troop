@@ -37,6 +37,11 @@ if [[ "$GODOT_VERSION" != 4.7.stable.* ]]; then
   exit 1
 fi
 
+# Portable Metal libraries are build inputs, not caches copied from a player's
+# Mac. Verify the exact engine/recipe, container structure and every byte before
+# exporting; the postflight also checks that the plugin really embedded them.
+python3 "$SCRIPT_DIR/bake_metal_cache.py" --verify "$SCRIPT_DIR/metal_cache"
+
 APP_VERSION="$(sed -n 's/^config\/version="\([^"]*\)"/\1/p' "$PROJECT_ROOT/project.godot" | head -1)"
 if [[ ! "$APP_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.][0-9]+)?$ ]]; then
   echo "project.godot must contain a numeric config/version such as 0.1.0" >&2
@@ -130,6 +135,8 @@ if ! file "$WINDOWS_EXE" | grep -q "PE32+ executable"; then
   echo "TROOP.exe is not a Windows x86_64 executable" >&2
   exit 1
 fi
+python3 "$SCRIPT_DIR/verify_packed_metal_cache.py" --godot "$GODOT_COMMAND" \
+  --pack "$WINDOWS_PCK"
 
 echo "[4/8] Compiling the per-user Windows installer"
 "$MAKENSIS_COMMAND" -V2 \
@@ -159,6 +166,8 @@ if [[ ! -x "$MAC_BUILD_APP/Contents/MacOS/TROOP" ]]; then
   echo "The macOS export does not contain its TROOP executable" >&2
   exit 1
 fi
+python3 "$SCRIPT_DIR/verify_packed_metal_cache.py" --godot "$GODOT_COMMAND" \
+  --pack "$MAC_BUILD_APP/Contents/Resources/TROOP.pck"
 ditto --norsrc --noextattr --noqtn "$MAC_BUILD_APP" "$MAC_APP"
 
 MAC_BINARY="$MAC_APP/Contents/MacOS/TROOP"

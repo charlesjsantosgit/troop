@@ -1,5 +1,48 @@
 # TROOP changelog
 
+## 0.4.10 — FASTER MAC STARTUP
+
+### First launch and cancellation
+
+- Ship 72 pinned, precompiled Metal engine-shader groups and load shared
+  gameplay textures after the first menu draw instead of during startup script
+  loading. The cache uses the macOS 11.0/Apple7 profile; this does not raise the
+  platform minimums or remove the existing Windows or universal Mac targets.
+- Keep updater manifest timeouts, download cancellation, and request teardown
+  responsive when an HTTP server stalls. Signature, size, URL, and hash checks
+  remain unchanged.
+- Gate offline and online entry on graphics readiness while keeping the menu
+  visible. Escape cancels loading even with the name field focused; stale
+  continuations cannot create a world after cancellation.
+- In local M4/macOS 27 testing, cold first-menu engine time fell from **29.43 s**
+  with the old build to **2.51 s** with the candidate; candidate launch-to-menu
+  wall time was **4.35 s**, and warm engine time was **1.23 s**. Cold and warm
+  runs still showed a roughly **535 ms** gap around five seconds after startup.
+  That smaller hitch remains: not all native responsiveness gates have
+  passed. **M1/Tahoe has not been directly tested**, and its acceptance remains
+  pending; these M4 measurements do not establish M1 performance.
+- Native multiplayer entered gameplay with all readiness and teardown checks
+  satisfied. A fresh-cache join took 18.71 s with a 3.22 s first-use graphics
+  pause; a separate repeat process took 4.72 s with a 554 ms maximum frame gap.
+  Both missed the strict 250 ms native target. This patch fixes the long initial
+  menu startup and stalled-HTTP teardown, not every gameplay compilation hitch.
+
+### One-time full installer and reproducible cache
+
+- **Install 0.4.10 with the full installer, including when upgrading 0.4.9.**
+  Download the offered installer, close TROOP, and replace the old installation.
+  On macOS, replace TROOP.app in Applications and launch that copy. Confirm
+  **0.4.10** on the menu before joining friends.
+- Updater bootstrap **3** is required: the updater autoload and renderer start
+  before a hot content pack can replace them. Future compatible content
+  updates can remain automatic. Multiplayer stays on protocol **11**, but the
+  server and all players must use the same **0.4.10** game version.
+- Pin the cache to exact Godot `4.7.stable.official.5b4e0cb0f`, its bake recipe,
+  and each file's size and SHA-256. Ordinary headless builds use the checked-in
+  files; regeneration alone needs a Mac Metal GPU and Apple Metal compiler.
+  Preflight validates the cache, and postflight extracts each exported PCK in
+  an empty headless project to reject missing, extra, or changed shader groups.
+
 ## 0.4.9 — SMOOTHER ONLINE JOINING
 
 The 0.4.6, 0.4.7, and 0.4.8 candidates were not published. The performance

@@ -67,6 +67,20 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def include_join_test_fixtures(preset: str) -> str:
+    """Expose fixtures without discarding shipping exclusions for export inputs."""
+    def keep_other_exclusions(match: re.Match[str]) -> str:
+        patterns = [pattern.strip() for pattern in match.group(1).split(",")
+                    if pattern.strip() and pattern.strip() != "tests/**"]
+        return 'exclude_filter="' + ",".join(patterns) + '"'
+
+    preset, count = re.subn(r'^exclude_filter="([^"]*)"$', keep_other_exclusions,
+                            preset, flags=re.MULTILINE)
+    if count != 1:
+        raise JoinEntryFailure("macOS preset has no unambiguous exclude_filter")
+    return preset
+
+
 class JoinEntryRun:
     def __init__(self, godot: str, project: Path, rendered: bool,
                  warm_restart: bool, client_timeout: float,
@@ -117,16 +131,26 @@ class JoinEntryRun:
                 "run/flush_stdout_on_print=true\n",
                 encoding="utf-8",
             )
-            for source_name in ("assets", "scenes", "scripts", "tests"):
+            source_names = ["assets", "scenes", "scripts", "tests"]
+            # The shipping editor plugin injects the pinned Metal cache during
+            # export. Include just its code and cache inputs, not the rest of
+            # packaging (baker projects, diagnostic fixtures, or build tools).
+            # Older projects without this optional plugin remain supported.
+            for source_name in ("addons/metal_cache_export", "packaging/metal_cache"):
+                if (self.project / source_name).is_dir():
+                    source_names.append(source_name)
+            for source_name in source_names:
                 source = self.project / source_name
                 if not source.is_dir():
                     raise JoinEntryFailure(f"required source directory is missing: {source}")
+                target = destination / source_name
+                target.parent.mkdir(parents=True, exist_ok=True)
                 if role == "client" and self.native_app is not None:
                     # The export editor may create .uid/import metadata. Its
                     # inputs must be copies, not links back into the checkout.
-                    shutil.copytree(source, destination / source_name)
+                    shutil.copytree(source, target)
                 else:
-                    (destination / source_name).symlink_to(source, target_is_directory=True)
+                    target.symlink_to(source, target_is_directory=True)
             for source_name in ("icon.svg", "icon.svg.import"):
                 source = self.project / source_name
                 if source.exists():
@@ -196,13 +220,7 @@ class JoinEntryRun:
                 mac_preset = section.split("]", 1)[0].removeprefix("[")
                 # Keep the normal release settings; only include test fixtures
                 # in this disposable pack. Never edit the real presets.
-                section, count = re.subn(
-                    r'^exclude_filter="[^"]*"$',
-                    'exclude_filter="artifacts/**,build/**,dist/**"', section,
-                    count=1, flags=re.MULTILINE)
-                if count != 1:
-                    raise JoinEntryFailure("macOS preset has no unambiguous exclude_filter")
-                sections[index] = section
+                sections[index] = include_join_test_fixtures(section)
         if not mac_preset:
             raise JoinEntryFailure("macOS export preset is missing")
         found_options = False

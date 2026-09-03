@@ -76,12 +76,15 @@ either one.
 
 ## Publishing a release
 
-Version 0.4.5 uses bootstrap 2, protocol 11, and `requires_installer=true`.
-Keep `minimum_bootstrap` at least 2 for later compatible content releases so an
-older executable cannot skip the required project/bootstrap installer migration.
-Version 0.4.9 keeps the same engine, bootstrap and protocol and sets
-`requires_installer=false`; it is a compatible content update for 0.4.5.
-The server and every client must still activate 0.4.9 before they can connect.
+Version **0.4.10** uses bootstrap **3**, protocol **11**,
+`minimum_bootstrap=3`, and `requires_installer=true`. This is a one-time full
+installer migration even from 0.4.9: the renderer initializes before the first
+autoload, and the Updater autoload is already running when it mounts a hot PCK.
+Those startup fixes cannot be delivered safely as a content-only update.
+Players must download the 0.4.10 installer, close TROOP, replace the old app,
+and confirm 0.4.10 on the menu. Keep `minimum_bootstrap` at least 3 for later
+compatible content releases. The server and every client must activate 0.4.10
+before they can connect, although protocol 11 is unchanged.
 
 1. Set `application/config/version` in `project.godot` to the new numeric
    version (`major.minor.patch`, with an optional fourth numeric component).
@@ -105,24 +108,89 @@ for a later release whose changes are genuinely safe to load as a content PCK.
 
 ## Local build and manifest
 
-Install Godot 4.7 stable and matching Windows x86_64/macOS templates. Install
-NSIS on the Mac with `brew install nsis`, then run:
+Install exact Godot `4.7.stable.official.5b4e0cb0f` and matching Windows
+x86_64/macOS templates. Install NSIS and libzstd on the Mac with
+`brew install nsis zstd`, then run:
 
 ```bash
 ./packaging/build_installers.sh
 ```
 
 The builder refuses to overwrite any existing versioned output. It imports
-resources, runs the source smoke test, exports both platforms, validates the PE
+resources, runs the source smoke test, validates the pinned Metal cache, exports
+both platforms, verifies their actual packed shader groups, validates the PE
 files and macOS code signature, smoke-tests the exported Mac app, validates the
-DMG, compares the platform PCKs, and writes checksums.
+DMG, compares the platform PCKs, and writes checksums. Headless smoke tests do not
+prove native graphics responsiveness or M1 hardware compatibility.
+
+## Pinned Metal engine cache
+
+`packaging/metal_cache/manifest.json` and `files/<relative cache path>` contain
+72 structurally validated, precompiled engine-shader groups. Their macOS
+11.0/Apple7 bake profile
+does not raise the existing platform requirements. The manifest pins exact
+Godot `4.7.stable.official.5b4e0cb0f`, the hash of the three-file recipe under
+`packaging/metal_baker`, and every group's path, size, and SHA-256. Invalid baker
+groups are omitted whole and remain ordinary runtime cache misses; they are
+never patched into superficially valid containers.
+
+The self-contained `addons/metal_cache_export` editor plugin validates and
+injects those bytes at `res://.godot/shader_cache` for Windows and macOS exports.
+Both PCKs carry the same cache, preserving their byte-identical shared-content
+contract; Windows does not execute Metal shaders. Raw cache input files and the
+editor plugin itself are excluded from the exported game. Structural validation
+does not prove Apple's opaque library internals or every hardware/OS combination;
+native acceptance testing remains necessary.
+
+Ordinary release builds and CI are headless: they need the pinned files and
+libzstd for bounded cache decompression/validation, not a Metal compiler or GPU.
+Run the preflight and one actual-export postflight manually with:
+
+```bash
+python3 packaging/bake_metal_cache.py --verify packaging/metal_cache
+python3 packaging/verify_packed_metal_cache.py --godot godot \
+  --pack build/release-0.4.10/windows/TROOP.pck
+python3 -m unittest discover -s tests -p 'test_*metal*cache.py'
+```
+
+The builder runs postflight on both Windows and macOS PCKs. Postflight launches
+the exact engine headlessly in a fresh **empty** project and loads the pack only
+after initialization; it never starts game autoloads. A mounted PCK merges with
+the filesystem, so extracting from the game or baker project could accidentally
+include host caches and is forbidden. Extracted paths, sizes, and hashes must
+match the manifest exactly, with no extra or missing groups. Logs and raw
+extracted bytes remain in the reported temporary directory.
+
+Regeneration is a separate developer operation requiring a Mac with a working
+Metal GPU, the exact Godot editor and export templates, and Apple's Metal
+compiler toolchain (`xcrun -sdk macosx metal --version` must succeed). Run it
+alone on the GPU, choosing a **new, nonexistent** output path:
+
+```bash
+python3 packaging/bake_metal_cache.py --godot godot \
+  --output /tmp/troop-metal-cache-new
+```
+
+The generator uses an isolated recipe copy and a separate empty extraction
+project, retains provenance/logs, and refuses to overwrite existing output.
+Review the generated manifest and exclusions before replacing checked-in inputs.
+Re-run preflight, both export postflights, and native cold/warm tests after a
+recipe or engine change; never relabel cache provenance to bypass a mismatch.
+
+Local M4/macOS 27 measurements for the 0.4.10 candidate reached the first menu
+in 2.51 s of engine time (4.35 s launch-to-menu wall time), versus 29.43 s cold
+engine time for the old build; warm engine time was 1.23 s. Both candidate runs
+still had an approximately 535 ms menu gap under investigation. Not all native
+responsiveness gates have passed, and M1/Tahoe has not been directly tested.
+
+## Local signed manifest
 
 To make and independently verify a local signed envelope after the artifacts
 exist:
 
 ```bash
 python3 packaging/make_update_manifest.py \
-  --version 0.4.1 \
+  --version 0.4.10 \
   --repository OWNER/REPOSITORY \
   --private-key /Users/charlessantos/.config/troop/update-signing-private.pem
 

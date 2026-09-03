@@ -88,8 +88,8 @@ jobs:
           test -x "$GODOT_BIN"
           echo "GODOT_BIN=$GODOT_BIN" >> "$GITHUB_ENV"
 
-      - name: Install NSIS
-        run: brew install nsis
+      - name: Install NSIS and the shader-cache verifier dependency
+        run: brew install nsis zstd
 
       - name: Run updater, voice, and public-transport security tests
         shell: bash
@@ -100,6 +100,7 @@ jobs:
           # main loop waiting indefinitely.
           "$GODOT_BIN" --headless --path . --editor --quit
           "$GODOT_BIN" --headless --path . --script res://tests/updatetest.gd
+          python3 tests/run_updater_http.py --godot "$GODOT_BIN" --project .
           "$GODOT_BIN" --headless --path . --script res://tests/voicetest.gd
           "$GODOT_BIN" --headless --path . --script res://tests/netsecuritytest.gd
           "$GODOT_BIN" --headless --path . --script res://tests/netrostertest.gd
@@ -119,10 +120,16 @@ jobs:
         run: |
           set -euo pipefail
           python3 -m unittest discover -s tests -p test_run_join_entry.py
+          python3 -m unittest discover -s tests -p test_run_native_first_menu.py
+          python3 -m unittest discover -s tests -p 'test_*metal_cache*.py'
+          python3 -m unittest discover -s tests -p test_metal_shader_cache.py
+          python3 packaging/bake_metal_cache.py --verify packaging/metal_cache
+          python3 addons/metal_cache_export/run_tests.py --godot "$GODOT_BIN"
           "$GODOT_BIN" --headless --path . --script res://tests/headlessparticleshutdownprobe.gd
           "$GODOT_BIN" --headless --path . --script res://tests/netjoinperformancetest.gd
           "$GODOT_BIN" --headless --path . --script res://tests/worldstagedbuildtest.gd
           "$GODOT_BIN" --headless --path . --script res://tests/scopeshadercachetest.gd
+          "$GODOT_BIN" --headless --path . --script res://tests/sharedtexturecachetest.gd
           for MODE in joincancellationtest moonstagedsetuptest rocketstagedsetuptest visualshadercachetest; do
             "$GODOT_BIN" --headless --path . --quit-after 30000 -- "$MODE"
           done

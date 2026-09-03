@@ -14,7 +14,7 @@ signal update_staged(version: String)
 signal installer_ready(version: String, path: String)
 signal update_error(message: String)
 
-const BOOTSTRAP_VERSION := 2
+const BOOTSTRAP_VERSION := 3
 const MANIFEST_SCHEMA := 1
 const STATE_SCHEMA := 1
 const APP_ID := "com.charlessantos.troop"
@@ -150,12 +150,7 @@ func check_for_updates(force := false) -> Error:
 		return OK
 	if _manifest_request and is_instance_valid(_manifest_request):
 		_manifest_request.queue_free()
-	_manifest_request = HTTPRequest.new()
-	_manifest_request.name = "UpdateManifestRequest"
-	_manifest_request.timeout = 10.0
-	_manifest_request.body_size_limit = MANIFEST_MAX_BYTES
-	_manifest_request.max_redirects = 8
-	_manifest_request.use_threads = true
+	_manifest_request = _create_manifest_request()
 	add_child(_manifest_request)
 	_manifest_request.request_completed.connect(_on_manifest_completed)
 	_set_status("checking", "Checking GitHub Releases")
@@ -169,6 +164,33 @@ func check_for_updates(force := false) -> Error:
 		_manifest_request = null
 		_fail("Could not start the update check (%d)" % err)
 	return err
+
+
+func _create_manifest_request() -> HTTPRequest:
+	return _create_http_request("UpdateManifestRequest", MANIFEST_MAX_BYTES, 10.0)
+
+
+func _create_asset_request(asset_size: int, part_path: String) -> HTTPRequest:
+	# Large installers may legitimately take minutes on a slow connection. Keep
+	# the existing unlimited total duration; cancellation must stay responsive.
+	var request := _create_http_request("UpdateAssetRequest", asset_size, 0.0)
+	request.download_file = part_path
+	return request
+
+
+func _create_http_request(request_name: String, body_limit: int,
+		timeout_seconds: float) -> HTTPRequest:
+	var request := HTTPRequest.new()
+	request.name = request_name
+	request.timeout = timeout_seconds
+	request.body_size_limit = body_limit
+	request.max_redirects = 8
+	# Godot 4.7's threaded HTTPRequest cancels by joining its worker, whose
+	# blocking response read can wait indefinitely for a stalled server. The
+	# non-threaded path already polls DNS/TLS/socket I/O without blocking, so a
+	# timeout or scene teardown cannot turn an update check into a frozen menu.
+	request.use_threads = false
+	return request
 
 
 func download_available_update() -> Error:
@@ -416,13 +438,7 @@ func _begin_asset_download(kind: String, asset: Dictionary) -> Error:
 	_remove_internal_file(_download_part_path)
 	if _download_request and is_instance_valid(_download_request):
 		_download_request.queue_free()
-	_download_request = HTTPRequest.new()
-	_download_request.name = "UpdateAssetRequest"
-	_download_request.download_file = _download_part_path
-	_download_request.body_size_limit = int(asset.size)
-	_download_request.max_redirects = 8
-	_download_request.timeout = 0.0
-	_download_request.use_threads = true
+	_download_request = _create_asset_request(int(asset.size), _download_part_path)
 	add_child(_download_request)
 	_download_request.request_completed.connect(_on_asset_downloaded)
 	_last_progress_bytes = -1

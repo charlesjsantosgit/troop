@@ -1,9 +1,12 @@
 """The dummy-renderer exception must not hide runtime or native-client errors."""
 
 import unittest
+from pathlib import Path
+import tempfile
 from types import SimpleNamespace
 
-from run_join_entry import JoinEntryFailure, JoinEntryRun, classify_client_errors
+from run_join_entry import (JoinEntryFailure, JoinEntryRun, classify_client_errors,
+                           include_join_test_fixtures)
 
 
 HEADER = "Godot Engine v4.7.stable.official.5b4e0cb0f - https://godotengine.org\n"
@@ -111,6 +114,75 @@ class ClientCommandTest(unittest.TestCase):
         command = JoinEntryRun.client_command(runner)
         self.assertEqual(command[-4:],
                          ["joinentrytest", "127.0.0.1", "30623", "400.000"])
+
+
+class NativeExportInputsTest(unittest.TestCase):
+    def test_fixture_export_preserves_packaging_and_other_exclusions(self):
+        preset = ('[preset.1]\nname="macOS"\n'
+                  'exclude_filter="artifacts/**,tests/**,build/**,dist/**,'
+                  'packaging/**,addons/**,private-data/**"\n')
+        self.assertEqual(include_join_test_fixtures(preset),
+                         preset.replace(",tests/**", ""))
+
+    def test_fixture_export_requires_one_exclusion_setting(self):
+        for preset in ('[preset.1]\nname="macOS"\n',
+                       'exclude_filter="tests/**"\nexclude_filter="build/**"\n'):
+            with self.subTest(preset=preset), self.assertRaises(JoinEntryFailure):
+                include_join_test_fixtures(preset)
+
+    def prepare_inputs(self, directory, *, native, cache_inputs=True):
+        source = Path(directory) / "source"
+        source.mkdir()
+        (source / "project.godot").write_text('[application]\nconfig/name="TROOP"\n')
+        for name in ("assets", "scenes", "scripts", "tests", ".godot/imported"):
+            (source / name).mkdir(parents=True)
+        if cache_inputs:
+            for name, content in (
+                ("addons/metal_cache_export/plugin.cfg", "cache plugin"),
+                ("packaging/metal_cache/manifest.json", '{"cache":"pinned"}'),
+                ("packaging/metal_cache/files/example.cache", "cache bytes"),
+                ("packaging/metal_baker/test.gd", "must not copy"),
+            ):
+                path = source / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(content)
+        root = Path(directory) / "run"
+        root.mkdir()
+        runner = SimpleNamespace(project=source, root=root, run_id="fixture",
+                                 user_names={}, projects={},
+                                 native_app=Path("fixture.app") if native else None)
+        JoinEntryRun.prepare_projects(runner)
+        return runner
+
+    def test_native_export_gets_independent_plugin_and_cache_copies_only(self):
+        with tempfile.TemporaryDirectory(prefix="troop-export-inputs-") as directory:
+            runner = self.prepare_inputs(directory, native=True)
+            client = runner.projects["client"]
+            for name in ("addons/metal_cache_export", "packaging/metal_cache"):
+                self.assertTrue((client / name).is_dir())
+                self.assertFalse((client / name).is_symlink())
+                self.assertTrue((runner.projects["server"] / name).is_symlink())
+            cache = client / "packaging/metal_cache/files/example.cache"
+            self.assertEqual(cache.read_text(), "cache bytes")
+            cache.write_text("disposable change")
+            self.assertEqual((runner.project / "packaging/metal_cache/files/example.cache")
+                             .read_text(), "cache bytes")
+            self.assertFalse((client / "packaging/metal_baker").exists())
+
+    def test_source_run_links_export_inputs_without_copying_baker_projects(self):
+        with tempfile.TemporaryDirectory(prefix="troop-export-inputs-") as directory:
+            runner = self.prepare_inputs(directory, native=False)
+            for role in ("server", "client"):
+                project = runner.projects[role]
+                for name in ("addons/metal_cache_export", "packaging/metal_cache"):
+                    self.assertTrue((project / name).is_symlink())
+                self.assertFalse((project / "packaging/metal_baker").exists())
+
+    def test_older_projects_without_plugin_inputs_still_prepare(self):
+        with tempfile.TemporaryDirectory(prefix="troop-export-inputs-") as directory:
+            runner = self.prepare_inputs(directory, native=True, cache_inputs=False)
+            self.assertTrue((runner.projects["client"] / "scripts").is_dir())
+            self.assertFalse((runner.projects["client"] / "packaging").exists())
 
 
 if __name__ == "__main__":

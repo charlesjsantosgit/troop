@@ -25,12 +25,17 @@ static var _cinematic_curve_cap_radius := 1_000_000_000.0
 static var _cinematic_render_surface := Vector3.ZERO
 static var _cinematic_render_radius := 12_000_000.0
 static var _cinematic_materials: Array[ShaderMaterial] = []
-const TERRAIN_MICRODETAIL: Texture2D = preload(
-	"res://assets/textures/satellite_microdetail_overlay.png")
-const TERRAIN_FLOOR_ALBEDO: Texture2D = preload(
-	"res://assets/textures/jungle_floor_albedo.png")
-const EARTH_CINEMATIC_ATLAS: Texture2D = preload(
-	"res://assets/textures/pangaea_earth_4k.jpg")
+# Keep the public texture names without eagerly loading them while Net's
+# autoload dependencies are parsed, before the first menu can be drawn.
+static var TERRAIN_MICRODETAIL: Texture2D:
+	get:
+		return SharedTextureCache.get_texture(SharedTextureCache.MICRODETAIL_PATH)
+static var TERRAIN_FLOOR_ALBEDO: Texture2D:
+	get:
+		return SharedTextureCache.get_texture(SharedTextureCache.FLOOR_PATH)
+static var EARTH_CINEMATIC_ATLAS: Texture2D:
+	get:
+		return SharedTextureCache.get_texture(SharedTextureCache.EARTH_PATH)
 ## A complete 5x5 fine-water grid guarantees 96 m from a player standing at
 ## a chunk edge. Coarse water must already own every pixel at that boundary.
 const WATER_HANDOFF_BAND := 16.0

@@ -33,12 +33,15 @@ const GLOBE_ATLAS_SIZE := Vector2i(4096, 2048)
 const MOON_ATLAS_SIZE := Vector2i(4096, 2048)
 const GLOBE_LONGITUDE_STEPS := 96
 const GLOBE_LATITUDE_STEPS := 48
-const EARTH_ATLAS: Texture2D = preload(
-	"res://assets/textures/pangaea_earth_4k.jpg")
-const MOON_ATLAS: Texture2D = preload(
-	"res://assets/textures/lunar_surface_4k.jpg")
-const SATELLITE_DETAIL_OVERLAY: Texture2D = preload(
-	"res://assets/textures/satellite_microdetail_overlay.png")
+static var EARTH_ATLAS: Texture2D:
+	get:
+		return SharedTextureCache.get_texture(SharedTextureCache.EARTH_PATH)
+static var MOON_ATLAS: Texture2D:
+	get:
+		return SharedTextureCache.get_texture(SharedTextureCache.MOON_PATH)
+static var SATELLITE_DETAIL_OVERLAY: Texture2D:
+	get:
+		return SharedTextureCache.get_texture(SharedTextureCache.MICRODETAIL_PATH)
 const MOON_LIGHT_SCREEN := Vector3(-0.42, -0.30, 0.855)
 const MIN_VIEW_SPAN_M := 320.0
 const GLOBE_BLEND_START_FRACTION := 0.075

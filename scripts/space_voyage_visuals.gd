@@ -54,12 +54,15 @@ const RETURN_TERRAIN_REVEAL_START_SECONDS := 28.0
 const RETURN_TERRAIN_REVEAL_END_SECONDS := 36.0
 const RETURN_TERRAIN_HANDOFF_SECONDS := 40.0
 const LUNAR_ROCKET_SCRIPT_PATH := "res://scripts/lunar_rocket.gd"
-const EARTH_ATLAS: Texture2D = preload(
-	"res://assets/textures/pangaea_earth_4k.jpg")
-const MOON_ATLAS: Texture2D = preload(
-	"res://assets/textures/lunar_surface_4k.jpg")
-const PLANET_MICRODETAIL: Texture2D = preload(
-	"res://assets/textures/satellite_microdetail_overlay.png")
+static var EARTH_ATLAS: Texture2D:
+	get:
+		return SharedTextureCache.get_texture(SharedTextureCache.EARTH_PATH)
+static var MOON_ATLAS: Texture2D:
+	get:
+		return SharedTextureCache.get_texture(SharedTextureCache.MOON_PATH)
+static var PLANET_MICRODETAIL: Texture2D:
+	get:
+		return SharedTextureCache.get_texture(SharedTextureCache.MICRODETAIL_PATH)
 
 # One planet draw supplies both orbital-scale geography and close-atmosphere
 # structure. At the exact 24,000 km authored diameter, a 4K atlas texel spans

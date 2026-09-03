@@ -97,8 +97,16 @@ textures for readable globe and voyage views.
 
 ## What's new in 0.4 — ONE SMALL STEP
 
-Current source version: **0.4.9**, using **multiplayer protocol 11**.
+Current source version: **0.4.10**, using **multiplayer protocol 11**.
 Clients and server must use the same game version and multiplayer protocol.
+
+The 0.4.10 patch precompiles Metal engine shaders, defers shared gameplay
+textures until after the menu draws, and keeps stalled update requests and
+loading cancellation responsive. It requires the **full installer once**,
+including for 0.4.9 users. Local M4/macOS 27 cold-menu time fell from 29.43 s to
+2.51 s in engine timing (4.35 s launch-to-menu wall time); warm engine timing was
+1.23 s. A roughly 535 ms menu hitch remains, so not all
+native responsiveness gates have passed. M1/Tahoe acceptance is still pending.
 
 - **The generated wilderness is now a circumnavigable planet.** TROOP's
   deterministic playable sphere is **40,077,312 m around**, within a few
@@ -504,10 +512,12 @@ Bananas float along swing arcs; collect them for score (synced).
 
 For a quick download, setup, and connection checklist, see
 [Playing with classmates](docs/PLAY_WITH_CLASSMATES.md). The current release is
-**0.4.9 / protocol 11**. Version 0.4.5 can receive this content update
-automatically; earlier installations require the full installer. Restart after
-the update is ready and confirm **0.4.9** before joining the 0.4.9 server. All
-classmates must activate the same version, even though the protocol is unchanged.
+**0.4.10 / protocol 11**. All older installations, including 0.4.9, need the
+**0.4.10 full installer** once. Download it, close TROOP, and replace the old app;
+on a Mac, launch the replacement in Applications. Confirm **0.4.10** before
+joining the 0.4.10 server. All classmates must activate the same version, even
+though the protocol is unchanged. School networks may block outbound UDP 30623;
+use only school-approved devices and networks.
 
 Worldwide multiplayer uses a headless ENet authority on UDP **30623**. Clients
 rebuild identical jungle geometry from its seed while the server validates and
@@ -520,13 +530,16 @@ stutter on quick repeated presses. Voice volume and the PTT binding are configur
 ## Player installers & updates
 
 Versioned Windows and macOS player packages are written to `dist/`. On a Mac
-with Godot 4.7 export templates and NSIS installed, rebuild both with:
+with exact Godot `4.7.stable.official.5b4e0cb0f`, matching export templates,
+NSIS, and libzstd installed, rebuild both with:
 
 ```bash
 ./packaging/build_installers.sh
 ```
 
-See `packaging/README.md` for signing, notarization, and release notes.
+See [packaging/README.md](packaging/README.md) for signing, notarization, and the
+pinned Metal cache. Ordinary headless builds verify and inject the checked-in
+cache; only regeneration requires a Mac Metal GPU and Apple Metal toolchain.
 
 **Update from the terminal** — replaces the installed game with the latest
 release wherever it is installed (checksums verified; the game also updates
@@ -558,6 +571,9 @@ resource pack, are re-verified on every boot, and take effect on the next
 launch. Updates that change Godot itself, the updater bootstrap, native code, or
 project settings instead offer the full Windows installer or macOS disk image.
 The game remains fully playable when GitHub is offline.
+Version 0.4.10 raises the minimum updater bootstrap to **3** because the updater
+autoload and renderer initialize before hot PCK mounting can apply these fixes.
+Compatible content updates after that migration can remain automatic.
 
 <details>
 <summary><b>🍃 Day, night, seasons, and weather</b></summary>
@@ -778,6 +794,17 @@ hold SHIFT for a stronger stroke.
 <details>
 <summary><b>🧪 Tests</b></summary>
 
+Startup coverage separates loopback updater timeout/cancellation checks, shared
+texture identity/lazy-loading checks, and native first-menu timing. Headless
+checks do not prove graphics responsiveness. The native menu runner requires an
+explicit app, copies it without exporting a replacement pack, and isolates its
+user data. It measures through the first completed draw plus an eight-second
+menu heartbeat, with default limits of 5,000 ms to the menu and 500 ms per gap.
+Cold and optional warm results remain separate; it must run alone on the GPU.
+M1 first-launch performance is unverified until tested on actual M1 hardware;
+M4 results do not establish M1 coverage. Native graphics testing is not a release
+CI gate yet.
+
 ```bash
 godot --headless --path . res://scenes/main.tscn -- movetest
 godot --headless --path . res://scenes/main.tscn --quit-after 30000 -- freefalltest
@@ -799,6 +826,7 @@ godot --headless --path . -- rocketstagedsetuptest
 godot --headless --path . -- visualshadercachetest
 godot --headless --path . --script res://tests/worldstagedbuildtest.gd
 godot --headless --path . --script res://tests/scopeshadercachetest.gd
+godot --headless --path . --script res://tests/sharedtexturecachetest.gd
 godot --headless --path . --script res://tests/netjoinperformancetest.gd
 # Audit particle lifetimes separately from pacing-dependent headless exit RIDs:
 godot --headless --path . --script res://tests/headlessparticleshutdownprobe.gd
@@ -809,6 +837,13 @@ python3 tests/run_join_entry.py --godot godot --project . --rendered --warm-rest
 # Verify the installed release engine using a disposable, re-signed app copy:
 python3 tests/run_join_entry.py --godot godot --project . --rendered \
   --native-app /Applications/TROOP.app --warm-restart
+# Native menu only: supplied app/PCK, fresh isolated cache, then optional warm run:
+python3 tests/run_native_first_menu.py --app /Applications/TROOP.app --warm-restart
+# Pure-Python parser, metric and isolation safety tests; no native app is launched:
+python3 -m unittest discover -s tests -p test_run_native_first_menu.py
+# Pinned cache framing, bake isolation, and packed-cache verification tests:
+python3 -m unittest discover -s tests -p 'test_*metal*cache.py'
+python3 packaging/bake_metal_cache.py --verify packaging/metal_cache
 godot --headless --path . res://scenes/main.tscn --quit-after 6000 -- aitest
 godot --headless --path . res://scenes/main.tscn --quit-after 20000 -- debugtest
 godot --headless --path . res://scenes/main.tscn --quit-after 90000 -- vehicletest
@@ -818,6 +853,8 @@ godot --headless --path . --script res://tests/voicetest.gd
 godot --headless --path . --script res://tests/netsecuritytest.gd
 godot --headless --path . --script res://tests/netrostertest.gd
 godot --headless --path . --script res://tests/updatetest.gd
+# Stalled loopback HTTP only: timeout, cancel and teardown heartbeat checks:
+python3 tests/run_updater_http.py --godot godot --project .
 godot --headless --path . -- renderbackendtest
 python3 tests/run_dedicated_relay.py --godot godot --project .
 godot --headless --path . res://scenes/main.tscn --quit-after 30000 -- lunarexpeditiontest
