@@ -51,6 +51,10 @@ const HIGHSPEED_MAX_VEHICLE_NODES := 32
 
 
 func run(main, variant := "") -> void:
+	print("PERF_ENVIRONMENT driver=%s method=%s max_fps=%d saved_max_fps=%d vsync=%d" % [
+		RenderingServer.get_current_rendering_driver_name(),
+		RenderingServer.get_current_rendering_method(), Engine.max_fps,
+		Settings.fps_limit, DisplayServer.window_get_vsync_mode()])
 	if str(variant).to_lower() == "highspeed":
 		await _run_highspeed(main)
 		return

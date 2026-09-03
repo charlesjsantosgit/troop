@@ -16,6 +16,12 @@ func _run() -> void:
 	var net := root.get_node("Net")
 	var voice := root.get_node("Voice")
 	var gen := root.get_node("Gen")
+	_check(not net._moon_colony_persistence_allowed(),
+		"standalone diagnostics cannot read or overwrite ordinary Moon colony saves")
+	net._moon_colony_storage_root = "user://mooncolony_fixture_security"
+	_check(net._moon_colony_persistence_allowed(),
+		"standalone fixtures may explicitly opt into isolated colony storage")
+	net._moon_colony_storage_root = ""
 
 	_check(net.MAX_STATE_PACKETS_PER_SECOND == 30 \
 		and net.REGISTRATION_TIMEOUT_SECONDS == 5.0,
@@ -224,13 +230,13 @@ func _run() -> void:
 	net._peer_on_foot_positions[77] = moon_rocket_position
 	var moon_boarding_near: bool = net._rocket_boarding_in_range(77,
 		net.PlayerRealm.MOON)
-	net._peer_on_foot_positions[77] = net.MOON_CHEESE_SHOP_POSITION
+	net._peer_on_foot_positions[77] = net._moon_cheese_shop_position()
 	var moon_shop_near: bool = net._moon_cheese_purchase_in_range(77)
 	net.player_realms[77] = net.PlayerRealm.EARTH
 	var cross_realm_shop_rejected: bool = not \
 		net._moon_cheese_purchase_in_range(77)
 	net.player_realms[77] = net.PlayerRealm.MOON
-	net._peer_on_foot_positions[77] = net.MOON_CHEESE_SHOP_POSITION \
+	net._peer_on_foot_positions[77] = net._moon_cheese_shop_position() \
 		+ Vector3(net.MOON_CHEESE_SHOP_RANGE + 1.0, 0.0, 0.0)
 	var distant_shop_rejected: bool = not net._moon_cheese_purchase_in_range(77)
 	_check(earth_boarding_near and stale_earth_boarding_rejected \

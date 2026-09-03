@@ -861,7 +861,7 @@ func run(main) -> void:
 		elif not is_latest_required:
 			saw_nonrequired_queue_entry = true
 	minimap._bake_rows()
-	var bounded_bake_rows := minimap._last_baked_rows > 0 \
+	var bounded_bake_rows := minimap._last_baked_pixels > 0 \
 		and minimap._last_baked_rows <= Minimap.ROWS_PER_FRAME
 	check("heading sweep reuses a bounded prioritized minimap cache",
 		sweep_coverage_ok and initial_tiles_reused and queue_unique \

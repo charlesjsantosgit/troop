@@ -3,19 +3,21 @@
 importer="texture"
 type="CompressedTexture2D"
 uid="uid://hygsk00gsr82"
-path="res://.godot/imported/pangaea_earth_4k.jpg-f9beb057ba4a967f286492d2ceeae8cc.ctex"
+path.bptc="res://.godot/imported/pangaea_earth_4k.jpg-f9beb057ba4a967f286492d2ceeae8cc.bptc.ctex"
+path.astc="res://.godot/imported/pangaea_earth_4k.jpg-f9beb057ba4a967f286492d2ceeae8cc.astc.ctex"
 metadata={
-"vram_texture": false
+"imported_formats": ["s3tc_bptc", "etc2_astc"],
+"vram_texture": true
 }
 
 [deps]
 
 source_file="res://assets/textures/pangaea_earth_4k.jpg"
-dest_files=["res://.godot/imported/pangaea_earth_4k.jpg-f9beb057ba4a967f286492d2ceeae8cc.ctex"]
+dest_files=["res://.godot/imported/pangaea_earth_4k.jpg-f9beb057ba4a967f286492d2ceeae8cc.bptc.ctex", "res://.godot/imported/pangaea_earth_4k.jpg-f9beb057ba4a967f286492d2ceeae8cc.astc.ctex"]
 
 [params]
 
-compress/mode=0
+compress/mode=2
 compress/high_quality=true
 compress/lossy_quality=0.92
 compress/uastc_level=0

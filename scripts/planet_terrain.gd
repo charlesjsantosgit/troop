@@ -16,6 +16,7 @@ const RADIUS := CIRCUMFERENCE / TAU
 const SEA_LEVEL := 0.55
 const SUMMIT_ELEVATION := 6000.0
 const HOME_EFFECT_RADIUS := 6200.0
+const HOME_LOWLAND_RADIUS := 100_000.0
 const SUMMIT_EFFECT_RADIUS := 4200.0
 # All macro fields turn over across kilometres. Sampling their shared spherical
 # noise on this topology-aligned lattice and interpolating between nodes keeps
@@ -28,6 +29,7 @@ const MACRO_FIELD_COUNT := 6
 var seed := 1337
 var _summit_xz := Vector2.ZERO
 var _home_lake_center := Vector2.ZERO
+var _home_valley_axis := Vector2.RIGHT
 
 var _continent := FastNoiseLite.new()
 var _continent_detail := FastNoiseLite.new()
@@ -52,7 +54,7 @@ func setup(seed_value: int) -> void:
 	_configure_noise(_upland, 37, 0.00000018, 2, 0.50)
 	_configure_noise(_range_mask, 47, 0.00000155, 2, 0.50)
 	_configure_noise(_ridge, 59, 0.0000041, 2, 0.46)
-	# Fine relief is under 1.5 m and exists only to break up otherwise broad
+	# Fine relief stays within a few metres and breaks up otherwise broad
 	# slopes. One simplex octave preserves that readable surface variation while
 	# halving the only spherical noise still evaluated at every terrain vertex.
 	_configure_noise(_detail, 83, 0.0048, 1, 0.40)
@@ -75,6 +77,7 @@ func setup(seed_value: int) -> void:
 	var lake_angle := TAU * lake_hash.x
 	var lake_radius := lerpf(330.0, 430.0, lake_hash.y)
 	_home_lake_center = Vector2.from_angle(lake_angle) * lake_radius
+	_home_valley_axis = Vector2.from_angle(TAU * _hash_unit(seed_value, 1201).x)
 
 
 func _configure_noise(noise: FastNoiseLite, salt: int, frequency: float,
@@ -346,6 +349,21 @@ func _macro_noise_fields(canonical: Vector2) -> PackedFloat32Array:
 	return out
 
 
+## A long, gently meandering lowland passes through home. Mountains recover
+## across tens of kilometres on either side, leaving open valley exits instead
+## of raising every direction into the same circular wall 1-3 km from spawn.
+## Canonical coordinates keep this identical for every world image and LOD.
+func _home_lowland_weight(canonical: Vector2) -> float:
+	if canonical.length_squared() > HOME_LOWLAND_RADIUS * HOME_LOWLAND_RADIUS:
+		return 0.0
+	var along := canonical.dot(_home_valley_axis)
+	var across := canonical.dot(Vector2(-_home_valley_axis.y, _home_valley_axis.x))
+	var bend := sin(along / 14_000.0) * 1800.0 \
+		+ (cos(along / 23_000.0) - 1.0) * 800.0
+	var valley := 1.0 - smoothstep(5000.0, 30_000.0, absf(across - bend))
+	return valley * (1.0 - smoothstep(50_000.0, 90_000.0, absf(along)))
+
+
 ## Macro fields are returned together so Gen.height()/biome/minimap callers can
 ## reuse one coherent definition. The dictionary is deliberately value-only and
 ## has no streaming or network state.
@@ -405,10 +423,11 @@ func sample(world_xz: Vector2) -> Dictionary:
 	var ridge_raw := 1.0 - absf(float(macro_fields[4]))
 	var mountain := smoothstep(0.50, 0.78, range_raw) \
 		* smoothstep(0.34, 0.95, ridge_raw) * land
-	# Protect the origin's established jungle, runway search and vehicle routes;
-	# true continental uplands begin gradually beyond the playable home basin.
-	upland *= smoothstep(720.0, 1900.0, home_distance)
-	mountain *= smoothstep(1350.0, 2900.0, home_distance)
+	# The home region is a broad valley with gradual foothills. Recovering the
+	# full continental elevation over a short radius made an impassable ring.
+	var home_lowland := _home_lowland_weight(canonical)
+	upland *= 1.0 - home_lowland
+	mountain *= 1.0 - home_lowland
 	# The summit range is broad enough to read as a massif, not a lone spike.
 	var summit_range := 1.0 - smoothstep(850.0, 3600.0, summit_distance)
 	mountain = maxf(mountain, summit_range * land)
@@ -434,26 +453,21 @@ func sample(world_xz: Vector2) -> Dictionary:
 
 	var rolling := continent_detail_value
 	var fine_detail := _noise_3d(_detail, point)
-	var broad_land_height := 18.0 + upland * 470.0 \
-		+ rolling * lerpf(21.0, 49.0, upland)
+	var broad_land_height := lerpf(18.0, 6.0, home_lowland) + upland * 470.0 \
+		+ rolling * lerpf(21.0, 49.0, upland) * (1.0 - home_lowland * 0.80)
 	# Major ranges centre close to 1.2 km while remaining comfortably below the
-	# one authored 6 km summit. Local detail is intentionally under two metres.
+	# one authored 6 km summit. Local detail never scales with their altitude.
 	var ridge_shape := smoothstep(0.28, 1.0, ridge_raw)
-	# Crag modulation reuses the already-required direct detail sample, so nearby
-	# mountains gain sharp broken crests without another noise call. Distant LODs
-	# naturally sample it more sparsely and retain the broad range silhouette.
-	var crag := pow(absf(fine_detail), 0.58)
-	# Do not amplify the high-frequency crag signal in plains carrying only a
-	# trace of the broad mountain mask. Besides looking like stray gravel ridges,
-	# that nonlinear amplification could create >15% sub-metre cross-grades just
-	# beyond an otherwise smooth road shoulder. Rocky biomes retain the full
-	# broken crest once mountain influence is meaningful.
-	var crag_strength := smoothstep(0.18, 0.42, mountain)
-	var crag_factor := lerpf(1.0, lerpf(0.86, 1.18, crag), crag_strength)
-	var mountain_height := mountain * (700.0 + ridge_shape * 1140.0) \
-		* crag_factor
+	# Surface detail adds only a few metres, independent of mountain altitude.
+	# Multiplying kilometre-high ranges by fine noise made hundreds of metres of
+	# jagged cliffs between neighbouring collision vertices, even on foothills.
+	# Extra rock relief starts beyond the foothills so road shoulders stay gentle.
+	var crag_strength := smoothstep(0.34, 0.64, mountain)
+	var mountain_height := mountain * (700.0 + ridge_shape * 1140.0)
+	var surface_detail := fine_detail \
+		* (lerpf(1.45, 0.45, home_lowland) + crag_strength * 2.0)
 	var natural_land_height := broad_land_height + mountain_height \
-		+ fine_detail * 1.45
+		+ surface_detail
 	var ocean_floor := SEA_LEVEL - 65.0 - ocean * 310.0 \
 		+ rolling * 18.0
 	var elevation := lerpf(natural_land_height, ocean_floor, ocean)

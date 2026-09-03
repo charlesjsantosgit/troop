@@ -298,6 +298,7 @@ func _process(dt: float) -> void:
 		var pred := _target + _vel * minf(_age, 0.25)
 		global_position = global_position.lerp(pred,
 			1.0 - exp(-14.0 * dt))
+		_sync_surface_basis()
 		rig.set_yaw(lerp_angle(rig.yaw_angle(), _yaw,
 			1.0 - exp(-10.0 * dt)))
 	# rope before update_motion so the swing IK sees this frame's grip point
@@ -305,7 +306,7 @@ func _process(dt: float) -> void:
 	if _wraps.size() > 0:
 		pivot = _wraps[_wraps.size() - 1]
 	if _swinging and not _externally_driven:
-		rig.set_rope(true, _anchor, global_position + Vector3.UP * 1.05, _tail, _vel, _wraps, dt)
+		rig.set_rope(true, _anchor, global_position + global_basis.y * 1.05, _tail, _vel, _wraps, dt)
 	else:
 		rig.set_rope(false, Vector3.ZERO, Vector3.ZERO)
 	var weapon_recoil := gun.recoil
@@ -340,6 +341,28 @@ func _process(dt: float) -> void:
 	rig.update_motion(dt, presentation_anim, _vel,
 		presentation_anim <= MonkeyRig.Anim.SPRINT, pivot)
 	_update_water_effects()
+
+
+func _sync_surface_basis() -> void:
+	if Net.player_realm(peer_id) != Net.PlayerRealm.MOON:
+		global_basis = Basis.IDENTITY
+		return
+	var center := MoonWorld.PLAYABLE_CENTER \
+		+ Vector3(0.0, Net.MOON_WORLD_ORIGIN_Y, 0.0)
+	var up := (global_position - center).normalized()
+	var previous_basis := global_basis.orthonormalized()
+	var previous_facing := previous_basis \
+		* Basis(Vector3.UP, rig.yaw_angle()) * Vector3.FORWARD
+	var transported_facing := Basis(Quaternion(previous_basis.y, up)) \
+		* previous_facing
+	# The sender publishes yaw in this canonical tangent frame. Deriving the
+	# same frame from position makes remote feet and hitboxes point outward on
+	# every hemisphere, independently of the receiver's local travel history.
+	global_basis = MoonWorld.surface_basis(up)
+	# Canonical longitude has a pole seam. Preserve the visible world heading
+	# across that seam before easing toward the next packet's canonical yaw.
+	var local_facing := global_basis.inverse() * transported_facing
+	rig.set_yaw(atan2(-local_facing.x, -local_facing.z))
 
 
 func _sync_remote_reload(reloading: bool, replicated_ammo: int) -> void:
@@ -449,8 +472,13 @@ func begin_defeat(pos: Vector3, yaw: float, death_velocity: Vector3,
 	if is_instance_valid(death_ragdoll):
 		death_ragdoll.queue_free()
 	death_ragdoll = MonkeyRagdoll.new()
+	var death_basis := Basis.IDENTITY
+	if Net.player_realm(peer_id) == Net.PlayerRealm.MOON:
+		var center := MoonWorld.PLAYABLE_CENTER \
+			+ Vector3(0.0, Net.MOON_WORLD_ORIGIN_Y, 0.0)
+		death_basis = MoonWorld.surface_basis(pos - center)
 	death_ragdoll.configure(display_name, pos, yaw, death_velocity, impulse,
-		headshot)
+		headshot, death_basis)
 	get_parent().add_child(death_ragdoll)
 	defeated_visual = true
 	_defeat_guard_t = 1.75

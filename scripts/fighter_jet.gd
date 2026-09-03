@@ -1135,7 +1135,7 @@ func _build_burner_audio() -> void:
 	_burner_player.doppler_tracking = \
 		AudioStreamPlayer3D.DOPPLER_TRACKING_PHYSICS_STEP
 	add_child(_burner_player)
-	if _burner_player.stream:
+	if _burner_player.stream and Sfx.audio_enabled:
 		_burner_player.play()
 
 

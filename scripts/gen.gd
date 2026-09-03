@@ -110,6 +110,11 @@ const AIRSTRIP_HANGAR_TAXI_GAP := 8.0
 const AIRSTRIP_HANGAR_PAD_MARGIN := 6.0
 const ROCKET_PAD_RADIUS := 14.0
 const ROCKET_PAD_BLEND := 10.0
+# A launch pad needs a real flame/visibility exclusion zone, not only the
+# concrete footprint.  Keeping the nearest trunks outside 64 m prevents the
+# establishing camera and exhaust plume from being buried in the jungle while
+# leaving the surrounding streamed forest density unchanged.
+const ROCKET_TREE_CLEARANCE_EXTRA := 50.0
 
 # Seeded packed-dirt roads are part of the analytic height/color field rather
 # than separate meshes. That keeps collision, every visual LOD, the minimap,
@@ -1953,7 +1958,8 @@ func chunk_layout(cx: int, cz: int, include_decorations := true) -> Dictionary:
 		if local_height > TREE_LINE:
 			continue  # bare rock and snow above the canopy line
 		if point_on_airstrip(px, pz) or point_on_road(px, pz) \
-				or point_in_rocket_launch_clearance(px, pz, 1.5):
+				or point_in_rocket_launch_clearance(px, pz,
+					ROCKET_TREE_CLEARANCE_EXTRA):
 			continue  # nothing grows through packed runway or road dirt
 		tree_points.append(point)
 		var generated_tree := _make_tree(rng, Vector3(px, 0, pz), 0.0,
@@ -2385,7 +2391,8 @@ func skyline_tree_layout(cx: int, cz: int) -> Array:
 		if h < WATER_Y + 0.6 or h > TREE_LINE:
 			continue
 		if point_on_airstrip(px, pz) or point_on_road(px, pz) \
-				or point_in_rocket_launch_clearance(px, pz, 1.5):
+				or point_in_rocket_launch_clearance(px, pz,
+					ROCKET_TREE_CLEARANCE_EXTRA):
 			continue
 		var biome := biome_at_height(px, pz, h)
 		if density_roll > _tree_density(biome) * 0.82:
@@ -2407,7 +2414,8 @@ func canopy_cover(h: float, x: float, z: float) -> float:
 	if debug_world:
 		return 0.0
 	if point_on_road(x, z) or point_on_airstrip(x, z) \
-			or point_in_rocket_launch_clearance(x, z):
+			or point_in_rocket_launch_clearance(x, z,
+				ROCKET_TREE_CLEARANCE_EXTRA):
 		return 0.0
 	if h < WATER_Y + 0.5 or h > TREE_LINE:
 		return 0.0

@@ -248,7 +248,12 @@ func try_fire(origin: Vector3, direction: Vector3) -> bool:
 	_bolt_remaining = BOLT_CYCLE_TIME
 	recoil = 1.0
 	ammo_changed.emit(ammo, false)
-	var ballistic_direction := zeroed_direction(direction)
+	var up := Vector3.UP
+	var shot_gravity := BALLISTIC_GRAVITY
+	if actor is MonkeyPlayer and is_instance_valid(actor.lunar_world):
+		up = actor.up_direction
+		shot_gravity = MoonWorld.LUNAR_GRAVITY
+	var ballistic_direction := zeroed_direction(direction, shot_gravity, up)
 	# Precision shots follow the optic's ballistic solution exactly. Inheriting
 	# even a small share of rope velocity made the round drift outside the center
 	# dot while the scope correctly advertised zero spread.
@@ -565,22 +570,24 @@ func _finish_reload_visuals() -> void:
 
 ## A conventional 75 m zero: the shot starts fractionally high, crosses the
 ## sight line at ZERO_DISTANCE, then develops readable drop at long range.
-static func zeroed_direction(direction: Vector3) -> Vector3:
+static func zeroed_direction(direction: Vector3,
+		gravity_mps2: float = BALLISTIC_GRAVITY, up: Vector3 = Vector3.UP) -> Vector3:
 	var aim := direction.normalized()
 	var zero_time := ZERO_DISTANCE / MUZZLE_SPEED
-	var lift_at_zero := 0.5 * BALLISTIC_GRAVITY * zero_time * zero_time
-	return (aim + Vector3.UP * (lift_at_zero / ZERO_DISTANCE)).normalized()
+	var lift_at_zero := 0.5 * gravity_mps2 * zero_time * zero_time
+	return (aim + up.normalized() * (lift_at_zero / ZERO_DISTANCE)).normalized()
 
 
 ## Positive values are metres below the crosshair line; negative values are
 ## the small rise before the zero. Approximately 0.27 m at 100 m and 2.65 m at
 ## 200 m with the default 75 m zero.
-static func drop_below_zero_at(distance: float) -> float:
+static func drop_below_zero_at(distance: float,
+		gravity_mps2: float = BALLISTIC_GRAVITY) -> float:
 	var clamped_distance := maxf(distance, 0.0)
 	var flight_time := clamped_distance / MUZZLE_SPEED
-	var zero_lift_velocity := BALLISTIC_GRAVITY * ZERO_DISTANCE \
+	var zero_lift_velocity := gravity_mps2 * ZERO_DISTANCE \
 		/ (2.0 * MUZZLE_SPEED)
-	return 0.5 * BALLISTIC_GRAVITY * flight_time * flight_time \
+	return 0.5 * gravity_mps2 * flight_time * flight_time \
 		- zero_lift_velocity * flight_time
 
 

@@ -13,7 +13,8 @@ const DebugWorldBuilder = preload("res://scripts/debug_world_builder.gd")
 const FriendlyMonkeyScript = preload("res://scripts/friendly_monkey.gd")
 const MONKEY_NAMES := ["Bongo", "Mango", "Kiko", "Chimpy", "Zuzu", "Coco", "Peel", "Momo", "Banzai", "Ooki", "Jojo", "Tarz"]
 const RENDER_PIXEL_BUDGET := 1440000.0
-const MIN_RENDER_SCALE := 0.38
+const MIN_RENDER_SCALE := 0.72
+const MAX_ADAPTIVE_TARGET_FPS := 100.0
 const NETTEST_CYCLE_HOUR := 7.25
 const NETTEST_LIVE_CYCLE_HOUR := 21.5
 const NETTEST_CYCLE_TOLERANCE_HOURS := 0.20
@@ -41,10 +42,13 @@ var _perf_low_samples := 0
 var _perf_high_samples := 0
 var _render_scale := 1.0
 var _render_scale_ceiling := 1.0
+var _adaptive_reduced_effects := false
 var _display_resize_pending := false
 var _camera_mode_preference := CameraRig.ViewMode.SHOULDER
 var _mouse_sensitivity := 1.0
 var _world_paused_by_menu := false
+var _background_fps_restore := -1
+var _background_minimize_pending := false
 var _update_requires_installer := false
 var _update_version := ""
 var _update_restart_scheduled := false
@@ -54,11 +58,13 @@ func _ready() -> void:
 	process_mode = Node.PROCESS_MODE_ALWAYS
 	_register_inputs()
 	var args := OS.get_cmdline_user_args()
+	if args.has("background") and DisplayServer.get_name() != "headless":
+		call_deferred("_minimize_for_background")
 	if args.is_empty() and OS.has_feature("dedicated_server"):
 		args = PackedStringArray(["server"])
 	# Keep test fixtures on their canonical inputs, while every player-facing
 	# launch receives the bindings and look sensitivity saved in Settings.
-	if args.is_empty() or args[0] in ["solo", "host", "join", "online"]:
+	if args.is_empty() or args[0] in ["solo", "host", "join", "online", "moon"]:
 		Settings.apply_saved_bindings()
 	_mouse_sensitivity = Settings.mouse_sensitivity
 	Settings.fps_limit_changed.connect(_on_fps_limit_changed)
@@ -79,6 +85,24 @@ func _ready() -> void:
 		_show_menu()
 		return
 	match args[0]:
+		"renderbackendtest":
+			mode = args[0]
+			var render_test = load("res://tests/renderbackendtest.gd").new()
+			add_child(render_test)
+			render_test.call_deferred("run", self)
+		"moonspheretest", "moonmerchanttest", "lunarcombatpresentationtest", "mooncolonytest", "waterlandingprobe":
+			mode = args[0]
+			var lunar_test = load("res://tests/%s.gd" % args[0]).new()
+			add_child(lunar_test)
+			lunar_test.call_deferred("run")
+		"moonplaytest", "moonperftest", "mooncolonyplaytest", "mooncolonycapture", "lunarfirstpersontest":
+			_start_moon_world("LunarTester")
+			mode = args[0]
+			var play_test = load("res://tests/%s.gd" % args[0]).new()
+			add_child(play_test)
+			play_test.call_deferred("run", self)
+		"moon":
+			_start_moon_world(_rand_name())
 		"movetest":
 			mode = "movetest"
 			_start_solo("TestMonkey", 1337, 2)
@@ -179,6 +203,21 @@ func _ready() -> void:
 			var showcase = load("res://tests/animation_showcase.gd").new()
 			add_child(showcase)
 			showcase.call_deferred("run", self)
+		"rocket-capture":
+			mode = "rocket-capture"
+			_start_solo("RocketCamera", 2026, 2)
+			var rocket_capture = load(
+				"res://tests/rocket_animation_capture.gd").new()
+			add_child(rocket_capture)
+			var capture_args: Array = args.slice(1) if args.size() > 1 \
+				else ["outbound"]
+			rocket_capture.call_deferred("run", self, capture_args)
+		"rocketsmoothtest", "rocketsmoothcapture", "rocketlandingtest", "landingrealmscapture", "reusablerocketcapture":
+			mode = args[0]
+			_start_solo("RocketTester", 2026, 2)
+			var rocket_test = load("res://tests/%s.gd" % args[0]).new()
+			add_child(rocket_test)
+			rocket_test.call_deferred("run", self)
 		"aitest":
 			mode = "solo"
 			_start_solo("AiTestMonkey", 2026, 2)
@@ -310,6 +349,8 @@ func _add_mouse(action: String, btn: MouseButton) -> void:
 func _enter_world(pname: String, seed_v: int, warm_r: int) -> void:
 	Gen.setup(seed_v)
 	world = World.new()
+	# Main remains active to operate menus; gameplay must not inherit ALWAYS.
+	world.process_mode = Node.PROCESS_MODE_PAUSABLE
 	add_child(world)
 	world.build()
 	world.warm(warm_r)
@@ -335,7 +376,7 @@ func _enter_online_world(pname: String, seed_v: int) -> bool:
 	if mode != "join" or not Net.active or not is_instance_valid(world):
 		return false
 	_finish_world_entry(pname)
-	world.process_mode = Node.PROCESS_MODE_INHERIT
+	world.process_mode = Node.PROCESS_MODE_PAUSABLE
 	return true
 
 
@@ -347,9 +388,11 @@ func _finish_world_entry(pname: String) -> void:
 		world.spawn_practice_targets()
 		world.spawn_solo_ai()
 	hud = HUD.new()
+	hud.process_mode = Node.PROCESS_MODE_PAUSABLE
 	hud.player = world.local_player
 	add_child(hud)
 	expedition_manager = ExpeditionManager.new()
+	expedition_manager.process_mode = Node.PROCESS_MODE_PAUSABLE
 	add_child(expedition_manager)
 	expedition_manager.configure(self, world)
 	world.expedition_manager = expedition_manager
@@ -366,12 +409,14 @@ func _finish_world_entry(pname: String) -> void:
 ## per session and torn down with the world.
 func _build_session_ui() -> void:
 	_session_ui_layer = CanvasLayer.new()
+	_session_ui_layer.process_mode = Node.PROCESS_MODE_PAUSABLE
 	_session_ui_layer.layer = 60
 	add_child(_session_ui_layer)
 	chat_box = ChatBox.new()
 	chat_box.set_anchors_preset(Control.PRESET_FULL_RECT)
 	_session_ui_layer.add_child(chat_box)
 	admin_controller = AdminController.new()
+	admin_controller.process_mode = Node.PROCESS_MODE_PAUSABLE
 	add_child(admin_controller)
 	admin_controller.configure(self, world, chat_box)
 	chat_box.command_submitted.connect(admin_controller.run_command)
@@ -408,16 +453,33 @@ func _teardown_session_ui() -> void:
 
 
 func _reset_adaptive_rendering() -> void:
-	_perf_warmup = 5.0
+	_perf_warmup = 2.0
 	_perf_sample_t = 0.0
 	_perf_low_samples = 0
 	_perf_high_samples = 0
-	get_viewport().scaling_3d_mode = Viewport.SCALING_3D_MODE_METALFX_SPATIAL
+	# Temporal reconstruction preserves fine terrain/planet detail when dynamic
+	# resolution has to move below native. Spatial MetalFX made the same scene
+	# look soft while throwing away temporal information that is already present.
+	get_viewport().scaling_3d_mode = scaling_mode_for_backend(
+		RenderingServer.get_current_rendering_driver_name(),
+		RenderingServer.get_current_rendering_method())
 	_render_scale_ceiling = _preferred_render_scale()
 	_render_scale = _render_scale_ceiling
-	get_viewport().scaling_3d_scale = _render_scale
 	world.set_expensive_effects(false)
-	world.set_fullscreen_performance(_render_scale_ceiling < 0.75)
+	_adaptive_reduced_effects = _render_scale_ceiling < 0.75
+	_apply_adaptive_render_scale()
+
+
+static func scaling_mode_for_backend(driver: String, method: String) -> int:
+	# MetalFX is Apple/Metal-only. Windows Vulkan/D3D12 use FSR2; compatibility
+	# and headless renderers must not request an unsupported temporal upscaler.
+	if method != "forward_plus":
+		return Viewport.SCALING_3D_MODE_BILINEAR
+	if driver == "metal":
+		return Viewport.SCALING_3D_MODE_METALFX_TEMPORAL
+	if driver in ["vulkan", "d3d12"]:
+		return Viewport.SCALING_3D_MODE_FSR2
+	return Viewport.SCALING_3D_MODE_BILINEAR
 
 
 func _preferred_render_scale() -> float:
@@ -441,8 +503,8 @@ func _apply_display_render_budget() -> void:
 		return
 	_render_scale_ceiling = _preferred_render_scale()
 	_render_scale = _render_scale_ceiling
-	get_viewport().scaling_3d_scale = _render_scale
-	world.set_fullscreen_performance(_render_scale_ceiling < 0.75)
+	_adaptive_reduced_effects = _render_scale_ceiling < 0.75
+	_apply_adaptive_render_scale()
 	_perf_warmup = 2.0
 	_perf_sample_t = 0.0
 	_perf_low_samples = 0
@@ -450,6 +512,13 @@ func _apply_display_render_budget() -> void:
 
 
 func _process(dt: float) -> void:
+	if _background_fps_restore >= 0:
+		if _background_minimize_pending:
+			return
+		if DisplayServer.window_get_mode() == DisplayServer.WINDOW_MODE_MINIMIZED:
+			return
+		Engine.max_fps = _background_fps_restore
+		_background_fps_restore = -1
 	if get_tree().paused or DisplayServer.get_name() == "headless" \
 			or not world or not is_instance_valid(world):
 		return
@@ -457,19 +526,18 @@ func _process(dt: float) -> void:
 		_perf_warmup -= dt
 		return
 	_perf_sample_t += dt
-	if _perf_sample_t < 1.25:
+	if _perf_sample_t < 1.0:
 		return
 	_perf_sample_t = 0.0
 
 	var refresh := DisplayServer.screen_get_refresh_rate()
 	if refresh <= 1.0:
 		refresh = 60.0
-	# Hold at least a 120 FPS quality target on a 60 Hz panel for low input
-	# latency, then match high-refresh displays up to 160 FPS. This target only
-	# guides dynamic 3D resolution; it never limits rendering. Respect a lower
-	# player-selected cap so choosing 30/60/90 FPS does not needlessly reduce 3D
-	# resolution while the limiter is working as intended.
-	var target := clampf(refresh, 120.0, 160.0)
+	# Dynamic resolution can only react to frames the active display path can
+	# present. Chasing 120 FPS on a compositor-capped 60 Hz panel permanently
+	# drove the image below native resolution without producing visible frames.
+	# High-refresh displays still receive a 100 FPS quality target.
+	var target := minf(maxf(refresh, 60.0), MAX_ADAPTIVE_TARGET_FPS)
 	if Engine.max_fps > 0:
 		target = minf(target, float(Engine.max_fps))
 	var fps := float(Engine.get_frames_per_second())
@@ -485,12 +553,24 @@ func _process(dt: float) -> void:
 
 	if _perf_low_samples >= 2:
 		_perf_low_samples = 0
-		_render_scale = maxf(MIN_RENDER_SCALE, _render_scale - 0.04)
-		get_viewport().scaling_3d_scale = _render_scale
+		_render_scale = maxf(MIN_RENDER_SCALE, _render_scale - 0.06)
+		_apply_adaptive_render_scale()
 	elif _perf_high_samples >= 4 and _render_scale < _render_scale_ceiling:
 		_perf_high_samples = 0
 		_render_scale = minf(_render_scale_ceiling, _render_scale + 0.02)
-		get_viewport().scaling_3d_scale = _render_scale
+		_apply_adaptive_render_scale()
+
+
+func _apply_adaptive_render_scale() -> void:
+	get_viewport().scaling_3d_scale = _render_scale
+	# First reduce costly screen-space effects, weather density, and shadow reach;
+	# only then allow resolution to approach its 0.72 clarity floor. Hysteresis
+	# avoids rebuilding those resources while performance hovers near a boundary.
+	if _render_scale <= 0.86:
+		_adaptive_reduced_effects = true
+	elif _render_scale >= 0.93 and _render_scale_ceiling >= 0.93:
+		_adaptive_reduced_effects = false
+	world.set_fullscreen_performance(_adaptive_reduced_effects)
 
 
 func _on_fps_limit_changed(_value: int) -> void:
@@ -503,7 +583,8 @@ func _on_fps_limit_changed(_value: int) -> void:
 	_perf_high_samples = 0
 	if world and is_instance_valid(world):
 		_render_scale = _render_scale_ceiling
-		get_viewport().scaling_3d_scale = _render_scale
+		_adaptive_reduced_effects = _render_scale_ceiling < 0.75
+		_apply_adaptive_render_scale()
 
 
 func _start_debug_world(pname: String) -> void:
@@ -524,6 +605,42 @@ func _start_debug_world(pname: String) -> void:
 func _start_solo(pname: String, seed_v: int, warm_r: int) -> void:
 	Net.solo(pname, seed_v)
 	_enter_world(pname, seed_v, warm_r)
+
+
+func _start_moon_world(pname: String) -> void:
+	mode = "moon"
+	_close_menu()
+	_start_solo(pname, 4041969, 0)
+	# Offline expeditions start with the lander and a small supply allowance.
+	Net.rocket_state.phase = Net.RocketMissionPhase.MOON_READY
+	Net.ensure_moon_colony(Net.local_id(), 12)
+	expedition_manager._apply_authoritative_state(Net.expedition_state_snapshot())
+	expedition_manager.admin_travel(Net.PlayerRealm.MOON)
+	if DisplayServer.get_name() != "headless":
+		Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
+
+
+func _minimize_for_background() -> void:
+	_background_fps_restore = Engine.max_fps
+	_background_minimize_pending = true
+	Engine.max_fps = 10
+	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
+	if world:
+		_open_pause_menu()
+	# macOS must finish presenting the native window before miniaturizing it.
+	# Keep the low cap during that asynchronous transition; an early WINDOWED
+	# result must not be mistaken for the user restoring the game.
+	await get_tree().create_timer(0.5, true).timeout
+	for attempt in range(4):
+		DisplayServer.window_set_mode(DisplayServer.WINDOW_MODE_MINIMIZED)
+		await get_tree().create_timer(0.3, true).timeout
+		if DisplayServer.window_get_mode() == DisplayServer.WINDOW_MODE_MINIMIZED:
+			break
+	_background_minimize_pending = false
+	print("BACKGROUND_READY minimized=%s paused=%s frame_cap=%d" % [
+		DisplayServer.window_get_mode() == DisplayServer.WINDOW_MODE_MINIMIZED,
+		get_tree().paused, Engine.max_fps])
+
 
 
 func _begin_host(pname: String) -> void:
@@ -716,8 +833,8 @@ func _on_net_error(msg: String) -> void:
 
 ## A version or protocol rejection means this build and the server disagree —
 ## almost always because the server is ahead. Instead of leaving the player
-## stranded, force an immediate signed-update check: the pack downloads,
-## stages, and the menu restarts itself onto the matching version.
+## stranded, force an immediate signed-update check. Compatible content applies
+## automatically; protocol/bootstrap migrations offer the full installer.
 func _maybe_update_after_version_rejection(msg: String) -> void:
 	if not (msg.begins_with("Server is running TROOP")
 			or msg.begins_with("Game protocol mismatch")):
@@ -726,9 +843,9 @@ func _maybe_update_after_version_rejection(msg: String) -> void:
 	if status_label:
 		if err == OK:
 			status_label.text = ("The server is on a different TROOP version. "
-				+ "Checking for the update now — if one is available it "
-				+ "downloads and the menu restarts itself.")
-		elif err == ERR_UNCONFIGURED:
+				+ "Checking for an update — compatible content applies "
+				+ "automatically; larger updates ask you to open the installer.")
+		elif err in [ERR_UNCONFIGURED, ERR_UNAVAILABLE]:
 			status_label.text = ("Version mismatch with the server. This "
 				+ "source build does not self-update — pull the latest and "
 				+ "rebuild.")
@@ -956,6 +1073,11 @@ func _show_menu() -> void:
 		_close_menu()
 		_start_debug_world(_pname()))
 
+	var moon_b := _menu_action_card(play_column, "MOON EXPEDITION",
+		"Grow cheese · trade with Muenster · build your lunar farm",
+		Color("46566e"), Color("9dc5ed"))
+	moon_b.pressed.connect(func(): _start_moon_world(_pname()))
+
 	var setup_column := VBoxContainer.new()
 	setup_column.add_theme_constant_override("separation", 10)
 	setup_column.size_flags_horizontal = Control.SIZE_EXPAND_FILL
@@ -1110,6 +1232,8 @@ func _set_update_chip(status: String) -> void:
 		return
 	var text := "AUTO-UPDATE · READY"
 	match status:
+		"source":
+			text = "LOCAL SOURCE BUILD · %s" % Updater.current_version()
 		"disabled":
 			text = "AUTO-UPDATE · SOURCE BUILD (RELEASES SELF-UPDATE)"
 		"checking":
@@ -1270,16 +1394,18 @@ func _open_pause_menu(open_settings := false) -> void:
 	pause_layer.process_mode = Node.PROCESS_MODE_ALWAYS
 	add_child(pause_layer)
 	pause_layer.add_child(pause_menu)
-	pause_menu.configure(mode in ["host", "join"] or Net.active)
+	var online_session := mode in ["host", "join"] or Net.active
+	pause_menu.configure(online_session)
 	pause_menu.resume_requested.connect(_resume_from_pause)
 	pause_menu.main_menu_requested.connect(_return_to_main_menu)
 	pause_menu.sensitivity_changed.connect(_apply_mouse_sensitivity)
 	if open_settings:
 		pause_menu.open_settings()
-	# A solo world can freeze completely. Multiplayer must keep receiving and
-	# simulating peers, while Player's visible-cursor guard neutralizes local input.
-	if mode == "solo":
+	# Every offline entry (including the Moon and debug world) freezes completely.
+	# Multiplayer keeps its authority and peer simulation running.
+	if not online_session:
 		_world_paused_by_menu = true
+		Net.set_offline_expedition_paused(true)
 		get_tree().paused = true
 
 
@@ -1289,6 +1415,7 @@ func _resume_from_pause() -> void:
 
 func _close_pause_menu(capture_mouse := true) -> void:
 	if _world_paused_by_menu:
+		Net.set_offline_expedition_paused(false)
 		get_tree().paused = false
 		_world_paused_by_menu = false
 	if pause_layer and is_instance_valid(pause_layer):
@@ -1335,9 +1462,9 @@ func _unhandled_input(e: InputEvent) -> void:
 		DisplayServer.window_set_mode(next_mode)
 		get_viewport().set_input_as_handled()
 		return
-	if expedition_manager and expedition_manager.is_ui_open() \
-			and e.is_action_pressed("menu"):
-		expedition_manager.close_ui()
+	if expedition_manager and expedition_manager.is_ui_open():
+		if e.is_action_pressed("menu"):
+			expedition_manager.close_ui()
 		get_viewport().set_input_as_handled()
 		return
 	# The atlas owns keyboard focus while open. Escape and X both close it, and
@@ -1360,9 +1487,12 @@ func _unhandled_input(e: InputEvent) -> void:
 		return
 	if not pause_menu and e.is_action_pressed("camera_mode") and world and world.local_player \
 			and world.local_player.cam:
-		_camera_mode_preference = world.local_player.cam.toggle_view()
-		if hud:
-			hud.show_camera_mode(_camera_mode_preference)
+		if expedition_manager and expedition_manager.is_local_player_aboard():
+			expedition_manager.set_cabin_view(not expedition_manager.cabin_view_active())
+		else:
+			_camera_mode_preference = world.local_player.cam.toggle_view()
+			if hud:
+				hud.show_camera_mode(_camera_mode_preference)
 		get_viewport().set_input_as_handled()
 		return
 	if world and menu == null and not pause_menu and hud and hud.minimap:
@@ -1937,36 +2067,22 @@ func _do_lunar_shot(what: String, out: String) -> void:
 				true, LunarRocket.OUTBOUND_DURATION_SECONDS)
 			rocket.set_physics_process(false)
 			rocket.voyage_visuals.end_voyage()
-			# A close/medium composition keeps the suited monkey and shop readable,
-			# with the crater, Earth, and lander layered behind them.
-			var player_xz := Vector2(68.0, -10.0)
-			player.global_position = moon.to_global(Vector3(player_xz.x,
-				moon.height_at(player_xz.x, player_xz.y) + 0.04, player_xz.y))
+			# Use the production shop frame and exact surface at every Moon scale.
+			# Keep the kiosk and lander at their real gameplay positions.
+			var shop := moon.cheese_shop
+			player.admin_teleport(moon.surface_position_at(
+				shop.to_global(Vector3(0.8, 0.0, -7.5)), 0.02))
 			player.velocity = Vector3.ZERO
-			player.reset_physics_interpolation()
 			if expedition_manager.local_suit:
 				expedition_manager.local_suit.set_physics_process(false)
-			# Move only the regression lander pose into the same scenic basin. The
-			# production model/state remain untouched; this avoids a thumbnail-sized
-			# interactive scene while retaining the rocket as a background landmark.
-			var scenic_rocket_xz := Vector2(-3.0, -22.0)
-			rocket.global_position = moon.to_global(Vector3(scenic_rocket_xz.x,
-				moon.height_at(scenic_rocket_xz.x, scenic_rocket_xz.y)
-					+ LunarRocket.ORIGIN_ABOVE_LANDING_SURFACE,
-				scenic_rocket_xz.y))
-			# Keep the articulated suit large enough to inspect while the shop stays
-			# aligned behind the astronaut and Earth remains readable in the sky.
-			var camera_local := Vector3(72.0, 3.8, -3.5)
+			camera.environment = moon.lunar_environment
+			camera.far = 14000.0
 			camera.fov = 58.0
-			camera.global_position = moon.to_global(camera_local)
-			camera.look_at(moon.to_global(Vector3(player_xz.x, 1.05,
-				player_xz.y)), Vector3.UP)
-			# Turn the kiosk frontage toward this regression view so its sign and
-			# cheese-hatted villager prove the actual interactive model is present.
-			if moon.cheese_shop:
-				moon.cheese_shop.look_at(camera.global_position, Vector3.UP)
-			var facing := camera.global_position - player.global_position
-			facing.y = 0.0
+			camera.global_position = shop.to_global(Vector3(8.0, 3.4, -12.0))
+			camera.look_at(shop.to_global(Vector3(0.0, 0.75, -4.0)),
+				shop.global_basis.y)
+			var facing := (camera.global_position - player.global_position).slide(
+				player.up_direction)
 			player.rig.face(facing.normalized(), 1.0)
 			player.rig.update_motion(1.0, MonkeyRig.Anim.IDLE, Vector3.ZERO,
 				true, Vector3.ZERO)
@@ -1993,6 +2109,8 @@ func _do_shot(args: Array) -> void:
 	mode = "shot"
 	var what: String = args[1] if args.size() > 1 else "vista"
 	var out: String = args[2] if args.size() > 2 else "user://shot.png"
+	var terrain_diagnostic := what in ["terrain-spawn", "terrain-ground"]
+	var shot_seed := int(args[3]) if terrain_diagnostic and args.size() > 3 else 2026
 	var movement_diagnostic_clip := what in [
 		"clip-sprint-play", "clip-sprint-first", "clip-sprint-side", "clip-sprint-front",
 		"clip-sprint-exit-side",
@@ -2026,7 +2144,7 @@ func _do_shot(args: Array) -> void:
 	if what.begins_with("debug-"):
 		await _do_debug_shot(what, out)
 		return
-	_start_solo("Bongo", 2026, 1 if seasonal_diagnostic else 3)
+	_start_solo("Bongo", shot_seed, 1 if seasonal_diagnostic else 3)
 	if what in ["lunar-launch", "lunar-voyage", "lunar-surface"]:
 		await _do_lunar_shot(what, out)
 		return
@@ -2897,6 +3015,40 @@ func _do_shot(args: Array) -> void:
 		print("BIOME_VISTA %s position=(%.1f,%.1f) horizon=%.0fm" % [
 			Gen.biome_name(requested_biome), vista.x, vista.z,
 			Gen.HORIZON_DISTANCE])
+	elif what in ["terrain-spawn", "terrain-ground"]:
+		# Fixed clear-day terrain views make spawn relief changes comparable.
+		world.set_season_override(SeasonalCycle.Season.SUMMER)
+		world.set_time_of_day_override(12.5)
+		var p := world.local_player
+		p.test_mode = true
+		p.set_fly_mode(true)
+		p.set_physics_process(false)
+		p.visible = false
+		if hud:
+			hud.visible = false
+		if _session_ui_layer:
+			_session_ui_layer.visible = false
+		cam.far = 30000.0
+		if what == "terrain-spawn":
+			cam.fov = 68.0
+			cam.global_position = Vector3(0.0, 3900.0, 3300.0)
+			cam.look_at(Vector3(0.0, Gen.height(0.0, 0.0), -1100.0))
+		else:
+			cam.fov = 70.0
+			cam.global_position = Vector3(0.0, Gen.height(0.0, 0.0) + 50.0, 0.0)
+			cam.look_at(Vector3(0.0, cam.global_position.y + 250.0, -2800.0))
+		p.admin_teleport(cam.global_position)
+		cam.current = true
+		for i in range(760):
+			await get_tree().process_frame
+		# Keep distant relief legible without changing the game's atmosphere.
+		var terrain_environment: Environment = world._environment.duplicate()
+		terrain_environment.fog_enabled = false
+		terrain_environment.volumetric_fog_enabled = false
+		cam.environment = terrain_environment
+		print("TERRAIN_SPAWN_SHOT name=%s seed=%d camera=%s far=%.0f stratos=%d" % [
+			what, shot_seed, str(cam.global_position), world.current_view_distance,
+			world.stratos_chunks.size()])
 	elif what == "highview":
 		# The 15-mile shot: fly high, let the far plane and stratos ring grow
 		# in, then frame the horizon with the HUD (and minimap) visible.

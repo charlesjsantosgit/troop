@@ -42,7 +42,10 @@ textures for readable globe and voyage views.
   672 m horizon ring, a ~1.9 km skyline tier, and an altitude-gated stratos
   tier: climb a peak (or fly) and the view stretches seamlessly to 24 km
   while fog, camera, and detail budgets scale to keep triple-digit FPS.
--  **Minimap + planetary atlas** — M keeps the quick satellite minimap, while
+-  **Minimap + planetary atlas** — M keeps a satellite minimap of the current
+  dimension: Earth's terrain or the Moon's spherical crater surface, with lunar
+  farm, trader, cellar, oxygen, crystal and landing-pad markers. It follows the
+  player around the whole Moon and hides during transit. Meanwhile,
   X opens a smooth full-screen map generated from the exact terrain, canopy,
   water, biome, and road fields. Pan and zoom from a local player-facing map to
   the whole atmospheric globe, with live named player arrows, then select the
@@ -50,8 +53,10 @@ textures for readable globe and voyage views.
 -  **A four-monkey Moon expedition** — board a physical rocket, watch Earth
   recede during a 60-second outbound flight, land under 1.62 m/s²
   gravity in a pressure suit, refill oxygen at the ship, and buy Moon Cheese
-  from a tiny lunar villager. The fiery 45-second return ends with an ocean
-  splashdown and one shared 18-second recovery on Earth.
+  from Muenster, an animated lunar merchant who patrols, greets visitors,
+  and reacts to trades. The fiery 45-second return lands vertically on the
+  original Earth launchpad. After a three-second engine shutdown, press E to
+  leave the cabin; the rocket stays ready for another expedition.
 -  **Physical vine swinging** — a real verlet pendulum: slack rope is free fall,
   the rope bends around trunks and unwinds again, grabs redirect your full
   momentum, and a perfectly timed taut release pays ×1.12.
@@ -81,7 +86,7 @@ textures for readable globe and voyage views.
   original apparent size, and each shared world seed has a deterministic 30%
   chance to give it a cheerful `:D` face.
 -  **Proximity voice chat** — hold-T push-to-talk with a 58 m spatial radius and
-  a loss-proof custom ADPCM codec; the microphone is only live while T is held.
+  a loss-proof custom ADPCM codec; audio is transmitted only while T is held.
 -  **Worldwide multiplayer** — one managed dedicated ENet authority on UDP
   30623. Players never host, forward ports, or expose a home computer.
 -  **Self-updating** — RSA-signed release manifests, crash-safe two-phase
@@ -92,9 +97,8 @@ textures for readable globe and voyage views.
 
 ## What's new in 0.4 — ONE SMALL STEP
 
-Current Windows/package patch: **0.4.1 — FLIGHT READY**. This is a full
-installer update because multiplayer protocol 8 changes the project network
-contract; launch the downloaded installer once when TROOP offers the update.
+Current source version: **0.4.5**, using **multiplayer protocol 11**.
+Matching client and server builds are required.
 
 - **The generated wilderness is now a circumnavigable planet.** TROOP's
   deterministic playable sphere is **40,077,312 m around**, within a few
@@ -113,6 +117,12 @@ contract; launch the downloaded installer once when TROOP offers the update.
   much larger inland lakes separate broad, gradual uplands; major mountain
   samples target about 1,200 m, permanent snow builds above 3,000 m, and one
   normalized summit reaches exactly 6,000 m.
+- **Spawn opens into gentle lowlands.** A broad, seeded valley winds through
+  the home region, keeping the first several kilometres mostly flat and
+  blending into distant foothills over tens of kilometres. There is no circular
+  mountain wall around the clearing. Mountain surface detail adds only a few
+  metres of relief, so distant ranges retain their shape without turning each
+  small ground bump into a sheer cliff.
 - **Roads form an organic planet-wide hierarchy.** Seed-curved arterials follow
   Pangaea's coast and broad hill and mountain corridors instead of producing a
   rigid grid. Regional roads meet them at non-orthogonal junctions, span the
@@ -146,13 +156,25 @@ contract; launch the downloaded installer once when TROOP offers the update.
   from the live generator.
 - **The Moon is playable, not a sky prop.** E boards one of four
   authority-arbitrated rocket seats and L starts the voyage when seated. The
-  exact **60-second outbound** presentation begins with a progressive 10-second
+  vehicle is **30 metres tall and 7 metres in diameter**, with a complete
+  four-seat pressure cabin, solid floor, controls and twelve glass windows.
+  **C switches between the first-person cabin and exterior view**; use the mouse
+  to look around inside. The exact **60-second outbound** presentation begins
+  with a progressive 14-second
   vertical launch above the pad before bending into its lateral arc, then moves
   through atmosphere exit, star/planet/constellation/nebula/galaxy vistas, a
-  shrinking Earth, lunar approach, and touchdown. A three-second camera handoff
-  blends the launch framing into the orbital chase view without a focus snap.
+  shrinking Earth, lunar approach, and touchdown. The exterior camera follows
+  a continuous path from launch into orbit.
   The exact **45-second return** adds visible re-entry plasma and flames before
-  an ocean splashdown, followed by an authority-owned **18-second recovery**.
+  a powered vertical landing on the **original Earth launchpad**. Shared landing
+  legs unfold and their suspension compresses against the landing surface on
+  both worlds as thrust and dust settle. Crew and nearby observers see the same
+  clock-driven mechanisms; late arrivals see the current landed pose.
+  The Moon stays at its physical location during departure, and the approaching
+  Earth blends into the real launch-site terrain. An authority-owned
+  **three-second engine shutdown** keeps the crew aboard on the same pad.
+  **Press E to exit explicitly**; staying seated does not relocate the rocket
+  or start another flight.
 - **Lunar survival has readable rules.** Arrival equips every crew member with
   a fitted articulated pressure suit whose helmet, torso, sleeves, gloves, and
   boots follow the monkey rig, twin oxygen tanks, and an **18-slot space
@@ -166,7 +188,7 @@ contract; launch the downloaded installer once when TROOP offers the update.
   bananas each, only when it fits in the pack.
 - **Planet and expedition state are multiplayer-authoritative.** The server owns
   the four-seat manifest, exact voyage clock, realm changes, banana spending,
-  and late-join state under **network protocol 8**. Local and remote monkeys also
+  and late-join state under **network protocol 11**. Local and remote monkeys also
   reset every authored joint and transient look, recoil, hand, and vehicle solver
   after vehicle exit, defeat, and revive, so a seated or death pose cannot leak
   into ordinary movement on another peer. Admins can use `/moon [player]` or
@@ -174,6 +196,77 @@ contract; launch the downloaded installer once when TROOP offers the update.
   `/tp moon` and `/tp earth` for themselves) for safe direct realm travel; lunar
   arrival automatically supplies a suit and oxygen instead of exposing an
   unprotected monkey to vacuum.
+
+## Spherical Moon preview
+
+Choose **MOON EXPEDITION** from the menu for a solo expedition with a landed
+return rocket, pressure suit, backpack, and 12 starter bananas on your first visit. The existing
+rocket route from Earth remains available. E interacts, Space jumps, I opens the
+backpack, and L launches while seated. The lander bearing shows the route back
+to oxygen and the return flight.
+
+The playable Moon is a closed **450 m radius** sphere (about **2.83 km around**).
+This compact gameplay scale is separate from the astronomical dimensions used
+by the planetary atlas. Terrain, pole crossings, footsteps, and spawn queries
+share one welded mesh and its exact collider; gravity, cameras, weapons, suits,
+and remote actors follow the radial surface frame. Walking around the globe
+requires no edge teleport. This scale makes the distant horizon visibly curve
+from ground level. Shadow-receiving regolith, contact occlusion, and matching
+rock/building bases keep actors and props planted on the surface. The lunar surface uses 24,578 vertices, 49,152
+triangles, one terrain draw, and no terrain rebuilds during play.
+
+Muenster uses the same articulated monkey rig as the debug villagers, with a
+custom pressure suit and cheese-shop outfit, grounded patrol, greeting gesture,
+trade reactions, and collision. Buy Moon Cheese from the open forecourt for
+three bananas each. His shop remains available after stray shots.
+
+The **Lunar Co-op** adds a playable farming and exploration loop:
+
+- Follow the farm bearing and press **E** beside a cheese bed. Two beds start ripe;
+  harvest them, plant free cultures, and tend each new crop once to shorten its
+  45-second growing time. Four beds are available initially; buy two more later.
+- Harvests enter your **sealed colony cargo**, separate from the personal
+  backpack. Muenster buys fresh cheese for **2 bananas** and aged cheese for **6**.
+  Store-bought backpack snacks cannot be sold as farm harvests.
+- At the aging cellar, **E** converts three fresh wedges into two aged wedges in
+  50 seconds. Three batches can mature together. Deliver Muenster's three orders
+  in sequence for rewards of 12, 30, and 70 bananas.
+- Buy richer cultures, faster growth, extra beds, and a monkey farmhand from the
+  counter. The farmhand walks between the beds while the colony simulation
+  plants, tends, harvests, and replants an available bed every eight seconds.
+- Survey **Earthrise Observatory**, **Far-side Relay**, and **Crystal Garden**
+  with E for one-time rewards. All three unlock 10% faster growth. The farm and
+  counter provide oxygen; surveying an outpost activates its refill station.
+- Press **J** for the colony journal: crop timers, cargo, delivery requirements,
+  and buttons that set a bearing to the farm, cellar, market, or each landmark.
+  Trade and buy upgrades in person at Muenster's counter.
+
+Solo colony progress and banana balance save per world seed. Crops do not advance
+while solo play is paused, while you are away from the Moon, or while the game is
+closed. Test/capture modes use fresh state without reading or writing your colony.
+Network colonies are personal, host-owned session ledgers: harvests, spending,
+range checks, and one-time rewards are validated by the host. This source build
+uses network protocol 11; matching clients and servers are required. The public
+hosted release has not been redeployed by this local change.
+
+```bash
+godot --path . -- moon                 # direct solo expedition
+godot --path . -- moon background      # start minimized and paused
+godot --headless --path . --fixed-fps 60 -- moonspheretest
+godot --headless --path . --fixed-fps 60 -- moonplaytest
+godot --headless --path . --fixed-fps 60 -- moonmerchanttest
+godot --headless --path . --fixed-fps 60 -- mooncolonytest
+godot --headless --path . --fixed-fps 60 -- mooncolonyplaytest
+godot --path . --resolution 1600x900 -- mooncolonycapture
+godot --headless --path . --fixed-fps 60 -- lunarcombatpresentationtest
+godot --path . --resolution 1600x900 -- moonperftest
+godot --path . --resolution 1600x900 -- moonperftest ground-review
+```
+
+A minimized background launch pauses solo simulation and renders at 10 FPS;
+restoring the window restores the configured frame cap. Resume from the pause
+menu when ready. Rendered review images and repair test logs are under
+`artifacts/repair/`.
 
 ## What's new in 0.3 — THE VEHICLE UPDATE
 
@@ -369,7 +462,7 @@ Fly and GitHub setup.
 | RMB (hold) | aim in first person; the sniper enters its magnified optic |
 | Z | cycle the sniper optic through 2.5× / 5× / 10× |
 | Q | toggle melee mode — stow the weapon on the back; LMB chains a straight, hook, and two-paw hammer strike |
-| C | toggle first person / collision-safe right-shoulder camera |
+| C | toggle first person / collision-safe right-shoulder camera; aboard the rocket, switch between the first-person cabin and exterior view |
 | 1 / 2 / 3 / 4 | switch between the banana gun, six-shell pump shotgun, 20-round SMG, and five-round sniper rifle |
 | R | reload with a weapon-specific trick animation |
 | H | use a bandage while grounded to restore 42 health; taking damage interrupts the wrap |
@@ -382,6 +475,7 @@ Fly and GitHub setup.
 | M | cycle minimap size (small / large / hidden) |
 | [ / ] | minimap zoom out / in (auto-zooms with altitude) |
 | X | open/close the planetary atlas — drag or WASD/arrows to pan, wheel to zoom, use the on-screen recenter/Earth/Moon buttons; Esc also closes it |
+| J | open/close the Moon colony journal; set bearings to farms, the market, or survey landmarks |
 | I | open/close backpack inventory (available only with a normal or space backpack) |
 | L | launch the rocket when seated; the server locks the current four-seat manifest |
 | F8 | admin console (when this session has admin) |
@@ -408,11 +502,17 @@ Bananas float along swing arcs; collect them for score (synced).
 
 ## Online
 
+For a quick download, setup, and connection checklist, see
+[Playing with classmates](docs/PLAY_WITH_CLASSMATES.md). The current release is
+**0.4.5 / protocol 11** and requires a one-time full installer update.
+
 Worldwide multiplayer uses a headless ENet authority on UDP **30623**. Clients
 rebuild identical jungle geometry from its seed while the server validates and
 relays players, projectiles, collectibles, supply-chest claims, and proximity
 voice. Hold **T** for low-latency positional push-to-talk; microphone capture is
-off whenever T is released. Voice volume and the PTT binding are configurable.
+used for the held transmission, and releasing T stops sending immediately.
+The input device stays warm for up to 850 ms before capture closes to avoid
+stutter on quick repeated presses. Voice volume and the PTT binding are configurable.
 
 ## Player installers & updates
 
@@ -635,10 +735,11 @@ hold SHIFT for a stronger stroke.
 - Spherical continent fields create islands, multi-kilometre oceans, and warped
   freshwater basins hundreds of metres across. Near shores retain the animated
   refraction water and pooled ripple/splash system, while distant submerged
-  cells use a much cheaper wave shader.
+  cells use a much cheaper wave shader. Distant water reaches full coverage
+  inside the near tile boundary, including when the camera is raised.
 - Trees are submitted as four batched surfaces per chunk: cross-faded high and
   low trunk/canopy LODs replace thousands of individual tree draw calls.
-- Ferns, broadleaf plants, wetland reeds, grass, vines, rocks, water and
+- Ferns, broadleaf plants, wetland reeds, grass, vines, rocks and
   collectibles use batched meshes, distance ranges, and soft fades; distant LOD
   canopies stop casting shadows.
 - Water combines layered directional waves, animated micro-normal detail,
@@ -662,7 +763,9 @@ hold SHIFT for a stronger stroke.
   of the full-resolution HUD. At the lower tier it also disables SSIL and
   volumetric fog, shortens shadow distance, and reduces ambient particles.
 - Shader materials are cached and shared, bananas are single batched meshes,
-  water tessellation is distance-capped, and 3D uses lightweight FXAA.
+  detailed water geometry is bounded by streamed tiles, and 3D uses lightweight FXAA.
+- The minimap shows a quick terrain preview, then refines it in small batches
+  under a frame-time budget so changing dimensions does not stall gameplay.
 - Seasonal color and snow coverage are shared shader parameters rather than
   rebuilt terrain or per-tree materials. Rain, leaves, and snow use bounded GPU
   particle fields whose density follows the same adaptive performance tiers.
@@ -695,8 +798,27 @@ godot --headless --path . res://scenes/main.tscn --quit-after 40000 -- vehiclewo
 godot --headless --path . --script res://tests/voicetest.gd
 godot --headless --path . --script res://tests/netsecuritytest.gd
 godot --headless --path . --script res://tests/updatetest.gd
+godot --headless --path . -- renderbackendtest
+python3 tests/run_dedicated_relay.py --godot godot --project .
 godot --headless --path . res://scenes/main.tscn --quit-after 30000 -- lunarexpeditiontest
+godot --headless --path . -- lunarcombatpresentationtest
 godot --headless --path . --quit-after 30000 --script res://tests/expeditionintegrationtest.gd
+# Complete outbound/return path, camera continuity, refresh-rate independence,
+# network clock correction and pause/resume checks against production motion:
+godot --headless --path . -- rocketsmoothtest
+# Shared landing mechanisms, observer visibility and real local ENet receivers:
+godot --headless --path . -- rocketlandingtest
+# Native round-trip, four-seat cabin, powered landing and explicit hatch exit:
+godot --resolution 1600x900 --path . -- reusablerocketcapture
+# Screenshots and render report: artifacts/reusable-rocket/.
+# Real-renderer flight proof with screenshots and per-frame projection traces:
+godot --resolution 1600x900 --path . -- rocketsmoothcapture
+# Shorter boundary-window render (both directions):
+godot --resolution 1600x900 --path . -- rocketsmoothcapture --rocket-capture-windows
+# Four-second launch diagnostic with streaming, draw and frame-time counters:
+godot --resolution 1600x900 --path . -- rocketsmoothcapture --rocket-capture-launch
+# Reports and screenshots: artifacts/rocket-smooth/ (launch/ for the short run).
+# Reports distinguish native window rendering from forced offscreen delivery.
 godot --resolution 1600x900 --max-fps 0 --path . res://scenes/main.tscn -- perftest
 godot --resolution 1600x900 --max-fps 0 --path . res://scenes/main.tscn -- perftest spring
 godot --resolution 1600x900 --max-fps 0 --path . res://scenes/main.tscn -- perftest summer
@@ -738,6 +860,23 @@ godot --resolution 1600x900 --path . res://scenes/main.tscn -- \
   shot lunar-voyage /tmp/lunar-voyage.png
 godot --resolution 1600x900 --path . res://scenes/main.tscn -- \
   shot lunar-surface /tmp/lunar-surface.png
+# fixed-step 60 fps rocket proof clips (exact-frame MJPEG Movie Maker sources,
+# independent of wall time; the outbound clip keeps one opaque, 24,000 km
+# scaled-space Earth from live terrain through orbit with no scene dissolve).
+# Outbound records a 90-frame renderer-settle lead-in; trim those exact frames
+# when making the delivery MP4 so its opening starts on stable detailed terrain:
+godot --resolution 1600x900 --path . \
+	--write-movie artifacts/rocket/final/earth_to_moon_60fps_preroll.avi \
+	--fixed-fps 60 --disable-vsync res://scenes/main.tscn -- \
+	rocket-capture outbound
+ffmpeg -i artifacts/rocket/final/earth_to_moon_60fps_preroll.avi \
+	-vf "trim=start_frame=90,setpts=PTS-STARTPTS,format=yuv420p" -an \
+	-c:v libx264 -preset slow -crf 18 -r 60 -movflags +faststart \
+	artifacts/rocket/final/earth_to_moon_60fps.mp4
+godot --resolution 1600x900 --path . \
+  --write-movie artifacts/rocket/final/moon_departure_60fps.avi \
+	--fixed-fps 60 --disable-vsync res://scenes/main.tscn -- \
+	rocket-capture moon-departure
 # forced seasonal and lighting fixtures (independent of the current month/time):
 godot --path . res://scenes/main.tscn -- shot season-autumn /tmp/autumn.png
 godot --path . res://scenes/main.tscn -- shot season-winter /tmp/winter.png
@@ -753,6 +892,9 @@ godot --path . res://scenes/main.tscn -- shot reload-banana /tmp/reload.png
 godot --path . res://scenes/main.tscn -- shot bandage /tmp/bandage.png
 godot --path . res://scenes/main.tscn -- shot supply-hut /tmp/supply-hut.png
 godot --path . res://scenes/main.tscn -- shot mountains /tmp/mountains.png
+# Clear summer-noon views of the Earth spawn lowlands:
+godot --path . res://scenes/main.tscn -- shot terrain-spawn /tmp/terrain-spawn.png
+godot --path . res://scenes/main.tscn -- shot terrain-ground /tmp/terrain-ground.png
 godot --path . res://scenes/main.tscn -- shot airstrip /tmp/airstrip.png
 godot --path . res://scenes/main.tscn -- shot debug-vehicles /tmp/vehicles.png
 godot --path . res://scenes/main.tscn -- shot debug-jet /tmp/jet.png

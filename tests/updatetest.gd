@@ -12,6 +12,14 @@ var failures := 0
 
 
 func _initialize() -> void:
+	if OS.has_feature("editor"):
+		var source_updater := UpdaterScript.new()
+		_check(source_updater.status == "source", "source build is labeled honestly")
+		_check(source_updater._state.is_empty(), "source build does not load installed update state")
+		_check(not source_updater._should_check_automatically(), "source build disables automatic checks")
+		_check(source_updater.check_for_updates(true) == ERR_UNAVAILABLE,
+			"forced source checks cannot mutate installed update state")
+		source_updater.free()
 	var envelope_bytes := FileAccess.get_file_as_bytes(VALID_ENVELOPE)
 	_check(not envelope_bytes.is_empty(), "signed fixture is readable")
 

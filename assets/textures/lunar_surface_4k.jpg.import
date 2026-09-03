@@ -3,19 +3,21 @@
 importer="texture"
 type="CompressedTexture2D"
 uid="uid://brqvsnwsa2llu"
-path="res://.godot/imported/lunar_surface_4k.jpg-bd5bac288caa3433ba7a8d850b099c3e.ctex"
+path.bptc="res://.godot/imported/lunar_surface_4k.jpg-bd5bac288caa3433ba7a8d850b099c3e.bptc.ctex"
+path.astc="res://.godot/imported/lunar_surface_4k.jpg-bd5bac288caa3433ba7a8d850b099c3e.astc.ctex"
 metadata={
-"vram_texture": false
+"imported_formats": ["s3tc_bptc", "etc2_astc"],
+"vram_texture": true
 }
 
 [deps]
 
 source_file="res://assets/textures/lunar_surface_4k.jpg"
-dest_files=["res://.godot/imported/lunar_surface_4k.jpg-bd5bac288caa3433ba7a8d850b099c3e.ctex"]
+dest_files=["res://.godot/imported/lunar_surface_4k.jpg-bd5bac288caa3433ba7a8d850b099c3e.bptc.ctex", "res://.godot/imported/lunar_surface_4k.jpg-bd5bac288caa3433ba7a8d850b099c3e.astc.ctex"]
 
 [params]
 
-compress/mode=0
+compress/mode=2
 compress/high_quality=true
 compress/lossy_quality=0.92
 compress/uastc_level=0

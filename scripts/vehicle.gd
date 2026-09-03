@@ -930,7 +930,7 @@ func _build_engine_audio() -> void:
 	_engine_player.attenuation_model = \
 		AudioStreamPlayer3D.ATTENUATION_LOGARITHMIC
 	add_child(_engine_player)
-	if _engine_player.stream:
+	if _engine_player.stream and Sfx.audio_enabled:
 		_engine_player.play()
 	_wind_player = AudioStreamPlayer3D.new()
 	_wind_player.stream = Sfx.streams.get("wind")
@@ -938,7 +938,7 @@ func _build_engine_audio() -> void:
 	_wind_player.max_distance = 60.0
 	_wind_player.volume_db = -60.0
 	add_child(_wind_player)
-	if _wind_player.stream:
+	if _wind_player.stream and Sfx.audio_enabled:
 		_wind_player.play()
 
 

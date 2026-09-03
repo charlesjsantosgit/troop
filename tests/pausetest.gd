@@ -22,6 +22,7 @@ func run(main) -> void:
 	var original_render_scale_ceiling: float = main._render_scale_ceiling
 	var original_viewport_scale := get_viewport().scaling_3d_scale
 	await get_tree().process_frame
+	await _verify_offline_simulation_pause(main)
 	main.hud._fps_refresh_remaining = 0.0
 	main.hud._update_fps_meter(HUD.FPS_REFRESH_SECONDS)
 	_check(main.hud.fps_label != null and main.hud.fps_label.visible \
@@ -188,6 +189,83 @@ func run(main) -> void:
 	print("PAUSETEST %d/%d %s" % [
 		passed, total, "PASS" if passed == total else "FAIL"])
 	get_tree().quit(0 if passed == total else 1)
+
+
+func _verify_offline_simulation_pause(main) -> void:
+	# Exercise the real gameplay hierarchy already loaded by this suite. A real
+	# suit on a lightweight actor proves oxygen callbacks pause without spawning
+	# another whole world or waiting through a flight.
+	var original_mode: String = main.mode
+	var player: MonkeyPlayer = main.world.local_player
+	var original_test_mode := player.test_mode
+	var original_velocity := player.velocity
+	var original_toast: float = main.expedition_manager._toast_remaining
+	var original_rocket_state := Net.rocket_state.duplicate(true)
+	var original_rocket_started := Net._rocket_started_msec
+	var actor := Node3D.new()
+	actor.name = "PausedLifeSupportProbe"
+	main.world.add_child(actor)
+	var suit := SpaceSuitSystem.new()
+	suit.equip_for(actor)
+	suit.set_vacuum_exposure(true)
+	player.test_mode = true
+	player.velocity = Vector3(4.0, 1.0, 0.0)
+	main.expedition_manager._toast_remaining = 5.0
+	Net.rocket_state = {"phase": Net.RocketMissionPhase.OUTBOUND,
+		"crew": [], "elapsed": 0.001, "duration": Net.ROCKET_OUTBOUND_SECONDS,
+		"serial": int(original_rocket_state.get("serial", 0)) + 1}
+	# Keep the real clock anchor positive even when this fixture starts less
+	# than two seconds after the engine; nonpositive anchors mean no voyage.
+	Net._rocket_started_msec = maxi(Time.get_ticks_msec() - 1, 1)
+	main.mode = "moon"
+	main._open_pause_menu()
+	var paused_position := player.global_position
+	var paused_actor_time := player._now
+	var paused_oxygen := suit.oxygen_seconds
+	var paused_toast: float = main.expedition_manager._toast_remaining
+	var paused_clock := float(Net.expedition_state_snapshot().elapsed)
+	_check(get_tree().paused and main._world_paused_by_menu
+		and not main.pause_menu._online_warning.visible,
+		"offline Moon entry uses a real pause rather than the online pause overlay")
+	# A short real wall-clock gap catches the old Time.get_ticks_msec jump even
+	# under --fixed-fps. Actual subsequent frames catch inherited ALWAYS modes.
+	OS.delay_msec(80)
+	for frame in range(8):
+		await get_tree().physics_frame
+		await get_tree().process_frame
+	_check(player.global_position == paused_position and player._now == paused_actor_time
+		and player.velocity == Vector3(4.0, 1.0, 0.0),
+		"paused frames preserve actual player position, velocity and simulation time")
+	_check(suit.oxygen_seconds == paused_oxygen
+		and main.expedition_manager._toast_remaining == paused_toast
+		and not main.world.can_process() and not main.expedition_manager.can_process(),
+		"paused gameplay stops life-support oxygen and expedition timers while the menu runs")
+	_check(is_equal_approx(float(Net.expedition_state_snapshot().elapsed), paused_clock),
+		"offline authoritative voyage snapshots exclude real time spent paused")
+	main._close_pause_menu(false)
+	var resumed_clock := float(Net.expedition_state_snapshot().elapsed)
+	_check(absf(resumed_clock - paused_clock) <= 0.003,
+		"resuming a paused voyage preserves progress instead of skipping to arrival")
+	OS.delay_msec(20)
+	_check(float(Net.expedition_state_snapshot().elapsed) >= resumed_clock + 0.015,
+		"the offline voyage clock advances again after resume")
+	Net.rocket_state = original_rocket_state
+	Net._rocket_started_msec = original_rocket_started
+	for frame in range(4):
+		await get_tree().physics_frame
+	_check(suit.oxygen_seconds < paused_oxygen and player._now > paused_actor_time,
+		"resuming reactivates real life support and player simulation")
+	main.mode = "debugworld"
+	main._open_pause_menu()
+	_check(get_tree().paused and not main.pause_menu._online_warning.visible,
+		"offline debug sessions share the same genuine pause behavior")
+	main._close_pause_menu(false)
+	main.mode = original_mode
+	player.test_mode = original_test_mode
+	player.velocity = original_velocity
+	main.expedition_manager._toast_remaining = original_toast
+	actor.queue_free()
+	await get_tree().process_frame
 
 
 func _check(condition: bool, label: String) -> void:

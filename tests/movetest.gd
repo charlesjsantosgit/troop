@@ -722,6 +722,11 @@ func run(main) -> void:
 	var sprint_leg_twist := 0.0
 	for joint in leg_joints:
 		sprint_leg_twist += absf(joint.rotation.y) + absf(joint.rotation.z)
+	# On a perfectly flat stride the analytic elbows can already be pure
+	# hinges. Seed a known contact twist so this tests recovery regardless of
+	# which gait phase the preceding checks ended on.
+	motion_rig.el_l.rotation.y += 0.16
+	motion_rig.el_r.rotation.z -= 0.12
 	var sprint_elbow_twist: float = absf(motion_rig.el_l.rotation.y) \
 		+ absf(motion_rig.el_l.rotation.z) + absf(motion_rig.el_r.rotation.y) \
 		+ absf(motion_rig.el_r.rotation.z)

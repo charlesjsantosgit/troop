@@ -123,6 +123,9 @@ var _stratos_target_focus := Vector2(INF, INF)
 var _stratos_prefetch_focus := Vector2(INF, INF)
 var _stratos_target_radius := -1.0
 var current_view_distance := Gen.VIEW_BASE_DISTANCE
+## A return voyage prepares its physical landing site without streaming around
+## a cabin that is thousands of metres above a different dimension.
+var _expedition_stream_focus := Vector3(INF, INF, INF)
 var _altitude_quality_low := false
 var _stream_center := Vector2i(0x3fffffff, 0x3fffffff)
 var _prefetch_center := Vector2i(0x3fffffff, 0x3fffffff)
@@ -206,8 +209,14 @@ var _t := 0.0
 var _biome_sample_timer := 0.0
 var _biome_fog_target := Color(0.43, 0.61, 0.43)
 var _biome_density_target := 0.0017
-var _biome_saturation_target := 1.08
+var _biome_saturation_target := 1.0
 var _earth_streaming_enabled := true
+var _earth_transit_surface_visible := true
+var _earth_transit_light_weight := 1.0
+var _sun_daylight_energy := 1.34
+var _moon_daylight_energy := 0.14
+var _lunar_shadow_quality_active := false
+var _earth_shadow_filter_quality := 2
 
 
 ## Bounded altitude-to-horizon curve used by runtime streaming. The square root
@@ -304,7 +313,7 @@ func build() -> void:
 	env.background_mode = Environment.BG_SKY
 	env.sky = sky
 	env.ambient_light_source = Environment.AMBIENT_SOURCE_SKY
-	env.ambient_light_energy = 0.58
+	env.ambient_light_energy = 0.44
 	env.reflected_light_source = Environment.REFLECTION_SOURCE_SKY
 	env.tonemap_mode = Environment.TONE_MAPPER_FILMIC
 	env.tonemap_exposure = 0.92
@@ -313,8 +322,8 @@ func build() -> void:
 	env.glow_strength = 0.62
 	env.glow_bloom = 0.06
 	env.ssao_enabled = true
-	env.ssao_radius = 2.2
-	env.ssao_intensity = 1.7
+	env.ssao_radius = 1.35
+	env.ssao_intensity = 1.48
 	env.ssao_power = 1.3
 	# SSAO supplies the important canopy depth. SSIL and volumetrics cost much
 	# more on an integrated GPU, so the performance tier leaves them optional.
@@ -325,7 +334,10 @@ func build() -> void:
 	env.fog_light_color = Color(0.43, 0.61, 0.43)
 	env.fog_density = 0.00100
 	env.fog_height = 2.0
-	env.fog_height_density = 0.055
+	# Keep the humid horizon without painting the playable forest floor the fog
+	# colour. The former dense two-metre layer erased all albedo detail below the
+	# canopy, even within a few metres of the camera.
+	env.fog_height_density = 0.024
 	env.fog_sky_affect = 0.12
 	env.fog_aerial_perspective = 0.55
 	env.volumetric_fog_enabled = false
@@ -338,7 +350,7 @@ func build() -> void:
 	env.adjustment_enabled = true
 	env.adjustment_brightness = 0.96
 	env.adjustment_contrast = 1.13
-	env.adjustment_saturation = 1.08
+	env.adjustment_saturation = 1.0
 	Visuals.stratos_ground_material()
 	var we := WorldEnvironment.new()
 	we.environment = env
@@ -348,7 +360,7 @@ func build() -> void:
 	_sun = sun
 	sun.rotation_degrees = Vector3(-40, -34, 0)
 	sun.light_color = Color(1.0, 0.91, 0.70)
-	sun.light_energy = 1.18
+	sun.light_energy = 1.34
 	sun.light_angular_distance = 0.62
 	sun.sky_mode = DirectionalLight3D.SKY_MODE_LIGHT_AND_SKY
 	sun.shadow_enabled = true
@@ -1336,7 +1348,7 @@ func _refresh_terrain_clearance_probe(player_pos: Vector3,
 
 
 func _update_collision_requirement(player_pos: Vector3) -> void:
-	var velocity := local_player.velocity if local_player else Vector3.ZERO
+	var velocity := _stream_focus_velocity()
 	_refresh_terrain_clearance_probe(player_pos, velocity)
 	var clearance := player_pos.y - _terrain_probe_ground
 	# Sample the complete forward trajectory as well as vertical descent. A level
@@ -1441,7 +1453,7 @@ func _update_altitude_lod_handoffs() -> void:
 			else FLIGHT_TERRAIN_NEAR_FADE)
 
 func center_chunk() -> Vector2i:
-	var c := local_player.global_position if local_player else Vector3.ZERO
+	var c := _stream_focus_position()
 	return Vector2i(floori(c.x / Gen.CHUNK), floori(c.z / Gen.CHUNK))
 
 
@@ -1461,9 +1473,13 @@ func _process(dt: float) -> void:
 	_update_day_night(dt)
 	if _earth_streaming_enabled:
 		_wrap_local_planet_actor()
+	if _earth_streaming_enabled or _expedition_stream_focus.is_finite():
+		if _expedition_stream_focus.is_finite():
+			current_view_distance = Gen.VIEW_BASE_DISTANCE
+			Visuals.set_stratos_view_radius(current_view_distance)
 		_stream()
 	if local_player:
-		Visuals.set_far_focus(local_player.global_position)
+		Visuals.set_far_focus(_stream_focus_position())
 		if _earth_streaming_enabled:
 			_update_biome_ambience(dt)
 		_particles.global_position = local_player.global_position
@@ -1499,8 +1515,93 @@ func set_earth_streaming_enabled(enabled: bool) -> void:
 		_reset_planet_stream_focus()
 
 
+## The voyage keeps already-built ground visible while it is still readable,
+## then retires the four bounded terrain tiers and Earth lighting once the
+## opaque globe is directly behind them. This does not free or rebuild chunks, so return to
+## Earth is immediate and the handoff costs no per-frame allocations.
+func set_earth_transit_surface_visible(enabled: bool, light_weight := -1.0) -> void:
+	# Return flight approaches a remote ocean tile before local chunks are
+	# resident. Its sunlight must fade in independently of that terrain reveal.
+	var desired_light := (1.0 if enabled else 0.0) if light_weight < 0.0 \
+		else clampf(light_weight, 0.0, 1.0)
+	if not is_equal_approx(_earth_transit_light_weight, desired_light):
+		_earth_transit_light_weight = desired_light
+		_apply_earth_transit_light()
+	if _earth_transit_surface_visible == enabled:
+		return
+	_earth_transit_surface_visible = enabled
+	_set_lunar_shadow_filter(not enabled)
+	for tier: Dictionary in [chunks, horizon_chunks, skyline_chunks,
+			stratos_chunks]:
+		for node_value: Variant in tier.values():
+			var terrain_node := node_value as Node3D
+			if is_instance_valid(terrain_node):
+				terrain_node.visible = enabled
+
+
+func _apply_earth_transit_light() -> void:
+	# Keep the seasonal energy unscaled so day/night updates cannot cancel the
+	# cinematic fade, and returning to gameplay restores the exact current light.
+	if _sun:
+		_sun.visible = _earth_transit_light_weight > 0.001
+		_sun.light_energy = _sun_daylight_energy * _earth_transit_light_weight
+	if _moon:
+		_moon.visible = _earth_transit_light_weight > 0.001
+		_moon.light_energy = _moon_daylight_energy * _earth_transit_light_weight
+
+
+func _set_lunar_shadow_filter(enabled: bool) -> void:
+	if enabled == _lunar_shadow_quality_active:
+		return
+	if enabled:
+		_earth_shadow_filter_quality = int(ProjectSettings.get_setting(
+			"rendering/lights_and_shadows/directional_shadow/soft_shadow_filter_quality", 2))
+		# Crisp, airless lunar sunlight needs one depth sample, not a broad
+		# filtered penumbra that blurs the boot contact and costs fill rate.
+		RenderingServer.directional_soft_shadow_filter_set_quality(RenderingServer.SHADOW_QUALITY_HARD)
+	else:
+		RenderingServer.directional_soft_shadow_filter_set_quality(_earth_shadow_filter_quality)
+	_lunar_shadow_quality_active = enabled
+
+
+func _exit_tree() -> void:
+	_set_lunar_shadow_filter(false)
+
+
+func earth_transit_surface_visible() -> bool:
+	return _earth_transit_surface_visible
+
+
 func earth_streaming_enabled() -> bool:
 	return _earth_streaming_enabled
+
+
+func set_expedition_stream_focus(position: Vector3) -> void:
+	if not position.is_finite():
+		clear_expedition_stream_focus()
+		return
+	if _expedition_stream_focus.is_finite() \
+			and _expedition_stream_focus.distance_squared_to(position) < 0.01:
+		return
+	_expedition_stream_focus = position
+	_reset_planet_stream_focus()
+
+
+func clear_expedition_stream_focus() -> void:
+	if not _expedition_stream_focus.is_finite():
+		return
+	_expedition_stream_focus = Vector3(INF, INF, INF)
+	_reset_planet_stream_focus()
+
+
+func _stream_focus_position() -> Vector3:
+	return _expedition_stream_focus if _expedition_stream_focus.is_finite() \
+		else (local_player.global_position if local_player else Vector3.ZERO)
+
+
+func _stream_focus_velocity() -> Vector3:
+	return Vector3.ZERO if _expedition_stream_focus.is_finite() \
+		else (local_player.velocity if local_player else Vector3.ZERO)
 
 
 func _wrap_local_planet_actor() -> void:
@@ -1584,7 +1685,7 @@ func _update_biome_ambience(dt: float) -> void:
 			Gen.Biome.BAMBOO_GROVE:
 				_biome_fog_target = Color(0.53, 0.66, 0.38)
 				_biome_density_target = 0.00086
-				_biome_saturation_target = 1.06
+				_biome_saturation_target = 1.02
 			Gen.Biome.WETLAND:
 				_biome_fog_target = Color(0.34, 0.58, 0.53)
 				_biome_density_target = 0.00120
@@ -1600,7 +1701,7 @@ func _update_biome_ambience(dt: float) -> void:
 			Gen.Biome.GRASSLAND:
 				_biome_fog_target = Color(0.52, 0.69, 0.43)
 				_biome_density_target = 0.00076
-				_biome_saturation_target = 1.08
+				_biome_saturation_target = 1.02
 			Gen.Biome.ROCKY_MOUNTAINS:
 				_biome_fog_target = Color(0.69, 0.74, 0.78)
 				_biome_density_target = 0.00058
@@ -1628,7 +1729,7 @@ func _update_biome_ambience(dt: float) -> void:
 			_:
 				_biome_fog_target = Color(0.43, 0.61, 0.43)
 				_biome_density_target = 0.00100
-				_biome_saturation_target = 1.08
+				_biome_saturation_target = 1.0
 	# Altitude buys horizon, but over the planet's complete elevation range. The
 	# old linear Gen helper saturated by ~83 m and forced an 81-sector satellite
 	# square over ordinary hills.
@@ -1733,15 +1834,16 @@ func _apply_day_night(update_sky: bool) -> void:
 	var sunrise_color := Color(1.0, 0.42, 0.16)
 	var noon_color := Color(1.0, 0.955, 0.86)
 	_sun.light_color = sunrise_color.lerp(noon_color, high_sun)
-	_sun.light_energy = daylight_amount * lerpf(0.42, 1.24, high_sun) \
+	_sun_daylight_energy = daylight_amount * lerpf(0.44, 1.36, high_sun) \
 		* weather_light
 	_sun.shadow_enabled = daylight_amount > 0.08
-	_moon.light_energy = (1.0 - daylight_amount) * 0.27 * weather_light
+	_moon_daylight_energy = (1.0 - daylight_amount) * 0.27 * weather_light
+	_apply_earth_transit_light()
 	# Cloudy seasonal weather attenuates the visible disc more strongly than the
 	# diffuse moonlight, so rain and snow do not leave a pasted-on white circle.
 	_moon_visual_strength = (1.0 - daylight_amount) * MOON_SKY_ENERGY \
 		* weather_light * weather_light
-	_environment.ambient_light_energy = lerpf(0.23, 0.60,
+	_environment.ambient_light_energy = lerpf(0.20, 0.46,
 		daylight_amount) * lerpf(0.90, weather_light, 0.58)
 	_environment.tonemap_exposure = lerpf(0.87, 0.96, daylight_amount)
 	_environment.adjustment_brightness = lerpf(0.91, 0.98, daylight_amount)
@@ -1781,10 +1883,9 @@ func _apply_day_night(update_sky: bool) -> void:
 
 func _stream() -> void:
 	var cc := center_chunk()
-	var player_pos := local_player.global_position if local_player else Vector3.ZERO
-	var horizontal_velocity := Vector2.ZERO
-	if local_player:
-		horizontal_velocity = Vector2(local_player.velocity.x, local_player.velocity.z)
+	var player_pos := _stream_focus_position()
+	var stream_velocity := _stream_focus_velocity()
+	var horizontal_velocity := Vector2(stream_velocity.x, stream_velocity.z)
 	_stream_speed_mps = horizontal_velocity.length()
 	_update_collision_requirement(player_pos)
 
@@ -2224,19 +2325,19 @@ func _build_one_far_tree_step() -> bool:
 
 
 func center_horizon_sector() -> Vector2i:
-	var c := local_player.global_position if local_player else Vector3.ZERO
+	var c := _stream_focus_position()
 	var sector_size := Gen.CHUNK * Gen.HORIZON_SECTOR_CHUNKS
 	return Vector2i(floori(c.x / sector_size), floori(c.z / sector_size))
 
 
 func center_skyline_sector() -> Vector2i:
-	var c := local_player.global_position if local_player else Vector3.ZERO
+	var c := _stream_focus_position()
 	var sector_size := Gen.CHUNK * Gen.SKYLINE_SECTOR_CHUNKS
 	return Vector2i(floori(c.x / sector_size), floori(c.z / sector_size))
 
 
 func _predicted_near_center(cc: Vector2i) -> Vector2i:
-	if not local_player:
+	if not local_player or _expedition_stream_focus.is_finite():
 		return cc
 	var lead := local_player.global_position \
 		+ local_player.velocity * NEAR_PREDICTION_TIME

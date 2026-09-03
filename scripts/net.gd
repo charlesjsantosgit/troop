@@ -44,11 +44,13 @@ signal expedition_state_changed(state: Dictionary)
 signal player_realm_changed(peer_id: int, realm: int)
 signal moon_cheese_purchase_result(quantity: int, accepted: bool,
 	new_balance: int, reason: String)
+signal moon_colony_changed(snapshot: Dictionary)
+signal moon_colony_result(action: String, ok: bool, reason: String)
 
 const PORT := 30623
 const MAX_CLIENTS := 24
 const CHANNEL_COUNT := 2
-const PROTOCOL_VERSION := 9
+const PROTOCOL_VERSION := 11
 const MAX_NAME_LENGTH := 20
 const REGISTRATION_TIMEOUT_SECONDS := 5.0
 const MAX_STATE_PACKETS_PER_SECOND := 30
@@ -83,7 +85,7 @@ const MAX_ADMIN_SIGNATURE_BYTES := 512
 const MAX_ROCKET_CREW := 4
 const ROCKET_OUTBOUND_SECONDS := 60.0
 const ROCKET_RETURN_SECONDS := 45.0
-const ROCKET_RECOVERY_SECONDS := 18.0
+const ROCKET_RECOVERY_SECONDS := 3.0
 const ROCKET_SYNC_SECONDS := 1.0
 const MOON_CHEESE_PRICE := 3
 const MAX_MOON_CHEESE_QUANTITY := 8
@@ -94,7 +96,6 @@ const MAX_MOON_CHEESE_QUANTITY := 8
 ## y=48,000 retains sub-4 mm coordinate steps; the 36 km realm boundary still
 ## leaves six times the planet's tallest 6 km summit for Earth aviation.
 const MOON_WORLD_ORIGIN_Y := 48000.0
-const MOON_CHEESE_SHOP_POSITION := Vector3(58.0, MOON_WORLD_ORIGIN_Y, -32.0)
 const MOON_CHEESE_SHOP_RANGE := 12.0
 # Earth terrain and aircraft live far below the elevated lunar scene. Keep a
 # wide dead band between them so a packet can belong to exactly one playable
@@ -175,7 +176,22 @@ var _vehicle_positions: Dictionary = {} # authority: id -> spawn/rest/live pos
 var player_realms: Dictionary = {} # peer id -> PlayerRealm
 var rocket_state: Dictionary = {} # phase, crew, elapsed, duration, serial
 var _rocket_started_msec := 0
+var _offline_expedition_pause_msec := -1
 var _rocket_sync_remaining := 0.0
+var _moon_colonies: Dictionary = {} # authority: peer id -> MoonColony
+var _moon_colony_client_snapshot: Dictionary = {}
+var _moon_colony_requests: Dictionary = {} # authority: peer id -> last request id
+var _moon_colony_request_serial := 0
+var _moon_colony_sync_remaining := 0.0
+var _moon_colony_save_remaining := 5.0
+var _moon_colony_dirty := false
+var _moon_colony_last_saved_balance := -1
+var _moon_colony_player: Node3D
+var _moon_colony_positions: Dictionary = {}
+var _moon_colony_flying_peers: Dictionary = {}
+## Explicit isolated fixture directory; ordinary test CLI modes never read or
+## write player saves. Tests may opt into their own user:// test directory.
+var _moon_colony_storage_root := ""
 
 var _wired := false
 var _registered: Dictionary = {}
@@ -201,17 +217,39 @@ func _reset_expedition_state(include_local_player: bool) -> void:
 	}
 	_rocket_started_msec = 0
 	_rocket_sync_remaining = 0.0
+	_offline_expedition_pause_msec = -1
+
+
+func set_offline_expedition_paused(paused: bool) -> void:
+	if active:
+		return
+	if paused:
+		if _offline_expedition_pause_msec < 0:
+			_offline_expedition_pause_msec = Time.get_ticks_msec()
+	elif _offline_expedition_pause_msec >= 0:
+		# Shift the existing phase anchor instead of advancing the mission when
+		# the player returns. Network sessions retain their wall-clock authority.
+		if _rocket_started_msec > 0:
+			_rocket_started_msec += Time.get_ticks_msec() - _offline_expedition_pause_msec
+		_offline_expedition_pause_msec = -1
+
+
+func _expedition_clock_msec() -> int:
+	if not active and _offline_expedition_pause_msec >= 0:
+		return _offline_expedition_pause_msec
+	return Time.get_ticks_msec()
 
 
 func _process(delta: float) -> void:
 	if delta <= 0.0 or not _owns_expedition_authority():
 		return
+	_process_moon_colonies(delta)
 	var phase := int(rocket_state.get("phase",
 		RocketMissionPhase.EARTH_READY))
 	var duration := _rocket_phase_duration(phase)
 	if duration <= 0.0:
 		return
-	var elapsed := minf(float(Time.get_ticks_msec() - _rocket_started_msec)
+	var elapsed := minf(float(_expedition_clock_msec() - _rocket_started_msec)
 		/ 1000.0, duration)
 	rocket_state.elapsed = elapsed
 	rocket_state.duration = duration
@@ -311,6 +349,7 @@ func _wire() -> void:
 
 ## Playable host retained for loopback diagnostics and offline development.
 func host(pname: String, seed_v: int, port := PORT) -> Error:
+	_save_offline_moon_colony()
 	_wire()
 	_session_epoch += 1
 	var peer := ENetMultiplayerPeer.new()
@@ -318,6 +357,7 @@ func host(pname: String, seed_v: int, port := PORT) -> Error:
 	if err != OK:
 		return err
 	multiplayer.multiplayer_peer = peer
+	_reset_moon_colonies()
 	active = true
 	is_host = true
 	is_dedicated = false
@@ -352,6 +392,7 @@ func host(pname: String, seed_v: int, port := PORT) -> Error:
 ## Headless authority. Peer 1 never appears in the player roster or world.
 func start_dedicated(seed_v: int, port := PORT, bind_ip := "*",
 		max_clients := MAX_CLIENTS) -> Error:
+	_save_offline_moon_colony()
 	_wire()
 	_session_epoch += 1
 	# A dedicated authority has no World node to stream trusted spawn definitions.
@@ -375,6 +416,7 @@ func start_dedicated(seed_v: int, port := PORT, bind_ip := "*",
 	if err != OK:
 		return err
 	multiplayer.multiplayer_peer = peer
+	_reset_moon_colonies()
 	active = true
 	is_host = true
 	is_dedicated = true
@@ -406,6 +448,7 @@ func start_dedicated(seed_v: int, port := PORT, bind_ip := "*",
 
 
 func join(address: String, pname: String, port := PORT) -> Error:
+	_save_offline_moon_colony()
 	_wire()
 	_session_epoch += 1
 	var host_address := address.strip_edges()
@@ -420,6 +463,7 @@ func join(address: String, pname: String, port := PORT) -> Error:
 	if err != OK:
 		return err
 	multiplayer.multiplayer_peer = peer
+	_reset_moon_colonies()
 	local_name = _sanitize_name(pname, 0)
 	is_host = false
 	is_dedicated = false
@@ -449,6 +493,8 @@ func join(address: String, pname: String, port := PORT) -> Error:
 
 
 func solo(pname: String, seed_v: int) -> void:
+	_save_offline_moon_colony()
+	_reset_moon_colonies()
 	_session_epoch += 1
 	active = false
 	is_host = false
@@ -483,6 +529,8 @@ func solo(pname: String, seed_v: int) -> void:
 
 
 func shutdown() -> void:
+	_save_offline_moon_colony()
+	_reset_moon_colonies()
 	_session_epoch += 1
 	if multiplayer.multiplayer_peer:
 		multiplayer.multiplayer_peer.close()
@@ -915,6 +963,9 @@ func _on_peer_disconnected(id: int) -> void:
 	_registered.erase(id)
 	_pending_registrations.erase(id)
 	_peer_on_foot_positions.erase(id)
+	_moon_colonies.erase(id)
+	_moon_colony_requests.erase(id)
+	_moon_colony_flying_peers.erase(id)
 	names.erase(id)
 	scores.erase(id)
 	_admins.erase(id)
@@ -1094,8 +1145,13 @@ func _reject_peer(id: int, reason: String) -> void:
 
 
 func _disconnect_rejected_peer(id: int) -> void:
+	var epoch := _session_epoch
 	await get_tree().create_timer(0.25).timeout
-	if is_host and multiplayer.multiplayer_peer:
+	# Well-behaved clients close immediately after cl_rejected. A delayed
+	# rejection must not disconnect an already-gone peer, or a peer in a new
+	# session that happened to reuse the same ENet id.
+	if epoch == _session_epoch and is_host and multiplayer.multiplayer_peer \
+			and multiplayer.get_peers().has(id):
 		multiplayer.multiplayer_peer.disconnect_peer(id)
 
 
@@ -1204,7 +1260,7 @@ func expedition_state_snapshot() -> Dictionary:
 	var duration := _rocket_phase_duration(phase)
 	if _owns_expedition_authority() and duration > 0.0 \
 			and _rocket_started_msec > 0:
-		snapshot.elapsed = clampf(float(Time.get_ticks_msec()
+		snapshot.elapsed = clampf(float(_expedition_clock_msec()
 			- _rocket_started_msec) / 1000.0, 0.0, duration)
 		snapshot.duration = duration
 	return snapshot
@@ -1297,7 +1353,7 @@ func _host_start_rocket(requester: int) -> bool:
 	rocket_state.duration = ROCKET_OUTBOUND_SECONDS \
 		if next_phase == RocketMissionPhase.OUTBOUND else ROCKET_RETURN_SECONDS
 	rocket_state.serial = int(rocket_state.get("serial", 0)) + 1
-	_rocket_started_msec = Time.get_ticks_msec()
+	_rocket_started_msec = _expedition_clock_msec()
 	_rocket_sync_remaining = 0.0
 	_broadcast_expedition_state()
 	return true
@@ -1320,14 +1376,11 @@ func _complete_rocket_voyage(completed_phase: int) -> void:
 		rocket_state.duration = 0.0
 		_rocket_started_msec = 0
 	else:
-		# Splashdown is a shared mission phase, not a per-client visual delay. Keeping
-		# its clock authoritative makes the ocean pose and boarding lock identical for
-		# existing peers, late joiners, and the dedicated server. Retain the recovery
-		# manifest until the clock ends so every peer knows exactly which actors must
-		# stay in the capsule and return to the launch pad.
+		# Brief shared engine shutdown on the actual launch pad. Crew remain in
+		# their cabin seats until they request the nearby hatch exit themselves.
 		rocket_state.phase = RocketMissionPhase.SPLASHDOWN_RECOVERY
 		rocket_state.duration = ROCKET_RECOVERY_SECONDS
-		_rocket_started_msec = Time.get_ticks_msec()
+		_rocket_started_msec = _expedition_clock_msec()
 	_rocket_sync_remaining = 0.0
 	_broadcast_expedition_state()
 
@@ -1337,7 +1390,6 @@ func _complete_splashdown_recovery() -> void:
 			!= RocketMissionPhase.SPLASHDOWN_RECOVERY:
 		return
 	rocket_state.phase = RocketMissionPhase.EARTH_READY
-	rocket_state.crew = []
 	rocket_state.elapsed = 0.0
 	rocket_state.duration = 0.0
 	_rocket_started_msec = 0
@@ -1378,9 +1430,18 @@ func _rocket_boarding_in_range(peer_id: int, realm: int) -> bool:
 			or _peer_has_vehicle_claim(peer_id):
 		return false
 	var actor_position: Vector3 = _peer_on_foot_positions[peer_id]
-	var rocket_position := _earth_rocket_position() if realm == PlayerRealm.EARTH \
-		else Vector3(-54.0, MOON_WORLD_ORIGIN_Y + 2.0, 42.0)
-	return _realm_distance(actor_position, rocket_position, realm) <= 16.0
+	# Match the physical ground hatch instead of the old, smaller hull centre.
+	# The margin covers one client movement update without widening interaction
+	# across the whole pad or rejecting the outer edge of the visible E prompt.
+	return _realm_distance(actor_position, _rocket_boarding_position(realm), realm) <= 9.75
+
+
+func _rocket_boarding_position(realm: int) -> Vector3:
+	var pad := _earth_rocket_position() if realm == PlayerRealm.EARTH \
+		else Vector3(MoonWorld.LANDING_XZ.x, MOON_WORLD_ORIGIN_Y, MoonWorld.LANDING_XZ.y)
+	var hatch_from_pad := LunarRocket.BOARDING_LOCAL_POSITION \
+		+ Vector3.UP * LunarRocket.ORIGIN_ABOVE_LANDING_SURFACE
+	return pad + Basis(Vector3.UP, PI) * hatch_from_pad
 
 
 func _earth_rocket_position() -> Vector3:
@@ -1545,8 +1606,15 @@ func _moon_cheese_purchase_in_range(peer_id: int) -> bool:
 			or _peer_has_vehicle_claim(peer_id):
 		return false
 	var actor_position: Vector3 = _peer_on_foot_positions[peer_id]
-	return actor_position.distance_to(MOON_CHEESE_SHOP_POSITION) \
+	return actor_position.distance_to(_moon_cheese_shop_position()) \
 		<= MOON_CHEESE_SHOP_RANGE
+
+
+func _moon_cheese_shop_position() -> Vector3:
+	# The spherical shop is projected onto seeded terrain, so its world Y and
+	# XZ coordinates no longer equal the old flat landing-zone constants.
+	return MoonWorld.shop_position_for_seed(Gen.world_seed ^ 0x4d4f4f4e) \
+		+ Vector3(0.0, MOON_WORLD_ORIGIN_Y, 0.0)
 
 
 func _send_moon_cheese_result(peer_id: int, quantity: int, accepted: bool,
@@ -1569,6 +1637,311 @@ func cl_moon_cheese_result(quantity: int, accepted: bool, new_balance: int,
 		_sanitize_chat(reason).left(120))
 
 
+# ---- authoritative Moon colony -------------------------------------------
+
+func bind_moon_colony_player(player: Node3D) -> void:
+	_moon_colony_player = player
+
+
+func _exit_tree() -> void:
+	# Closing the native window also preserves the last few seconds of active
+	# progress, even when no explicit return-to-menu shutdown was requested.
+	_save_offline_moon_colony()
+
+
+func ensure_moon_colony(peer_id: int = -1, starter_balance: int = 12) -> Dictionary:
+	var resolved := local_id() if peer_id < 0 else peer_id
+	if not _owns_expedition_authority():
+		return moon_colony_snapshot(resolved)
+	if not names.has(resolved):
+		return {}
+	if not _moon_colonies.has(resolved):
+		var colony := MoonColony.new(world_seed)
+		var loaded := false
+		if resolved == local_id() and _moon_colony_persistence_allowed():
+			loaded = _load_moon_colony(colony)
+		_moon_colonies[resolved] = colony
+		var session_earnings := clampi(int(scores.get(resolved, 0)), 0, MoonColony.MAX_BALANCE)
+		scores[resolved] = mini(colony.restored_balance + session_earnings, MoonColony.MAX_BALANCE) \
+			if loaded else maxi(session_earnings, clampi(starter_balance, 0, 12))
+		_moon_colony_dirty = not loaded or int(scores[resolved]) != colony.restored_balance
+		_moon_colony_last_saved_balance = colony.restored_balance if loaded else -1
+		score_changed.emit()
+		roster_changed.emit()
+		if active and is_host and multiplayer.multiplayer_peer:
+			rpc("cl_roster", names, scores)
+		_send_moon_colony_snapshot(resolved)
+	return moon_colony_snapshot(resolved)
+
+
+## Reading a journal never starts a colony, advances time, or grants currency.
+func moon_colony_snapshot(peer_id: int = -1) -> Dictionary:
+	var resolved := local_id() if peer_id < 0 else peer_id
+	if not _owns_expedition_authority():
+		return _moon_colony_client_snapshot.duplicate(true) if resolved == local_id() else {}
+	if not _moon_colonies.has(resolved):
+		return {}
+	var colony: MoonColony = _moon_colonies[resolved]
+	return colony.snapshot(int(scores.get(resolved, 0)))
+
+
+## Terrain sampling uses exactly the rendered collider's three vertices, with
+## no Moon scene, shader, mesh or NPC construction on a dedicated authority.
+func colony_action_position(action: String, target: int = 0) -> Vector3:
+	if not MoonColony.valid_action(action, target):
+		return Vector3(INF, INF, INF)
+	var direction := MoonColony.action_direction(action, target)
+	var key := "%d:%s" % [world_seed, str(direction)]
+	if not _moon_colony_positions.has(key):
+		var sampler := MoonWorld.new()
+		sampler.moon_seed = world_seed ^ 0x4d4f4f4e
+		_moon_colony_positions[key] = sampler.surface_position(direction) \
+			+ Vector3(0.0, MOON_WORLD_ORIGIN_Y, 0.0)
+		sampler.free()
+	return _moon_colony_positions[key]
+
+
+func request_moon_colony(action: String, target: int = 0) -> bool:
+	if not MoonColony.valid_action(action, target):
+		moon_colony_result.emit(action.left(24), false, "Invalid colony request.")
+		return false
+	_moon_colony_request_serial += 1
+	if _owns_expedition_authority():
+		return _host_moon_colony_action(local_id(), _moon_colony_request_serial, action, target)
+	if not multiplayer.multiplayer_peer:
+		return false
+	rpc_id(1, "srv_moon_colony_action", _moon_colony_request_serial, action, target)
+	return true
+
+
+@rpc("any_peer", "call_remote", "reliable", 0)
+func srv_moon_colony_action(request_id: int, action: String, target: int) -> void:
+	var sender := multiplayer.get_remote_sender_id()
+	if is_host and _registered_peer(sender):
+		_host_moon_colony_action(sender, request_id, action, target)
+
+
+func _host_moon_colony_action(peer_id: int, request_id: int,
+		action: String, target: int) -> bool:
+	if not _owns_expedition_authority() or not names.has(peer_id) \
+			or (active and peer_id != local_id() and not _registered_peer(peer_id)):
+		return false
+	if not _allow_rate(peer_id, "moon_colony", 8):
+		_send_moon_colony_result(peer_id, action, false, "Please wait a moment before trying again.")
+		return false
+	if request_id <= int(_moon_colony_requests.get(peer_id, 0)) or request_id > 0x7fffffff:
+		_send_moon_colony_result(peer_id, action, false, "This colony request was already handled.")
+		return false
+	_moon_colony_requests[peer_id] = request_id
+	if not MoonColony.valid_action(action, target):
+		_send_moon_colony_result(peer_id, action, false, "Invalid colony request.")
+		return false
+	if not active and (_offline_expedition_pause_msec >= 0 or get_tree().paused):
+		_send_moon_colony_result(peer_id, action, false, "Resume your game to use the colony.")
+		return false
+	if not _moon_colony_interaction_in_range(peer_id, action, target):
+		_send_moon_colony_result(peer_id, action, false, "Walk up to this colony station on the Moon.")
+		return false
+	ensure_moon_colony(peer_id)
+	var colony: MoonColony = _moon_colonies[peer_id]
+	var result := colony.perform(action, target, int(scores.get(peer_id, 0)))
+	if bool(result.ok):
+		if int(result.balance) != int(scores.get(peer_id, 0)):
+			scores[peer_id] = int(result.balance)
+			score_changed.emit()
+			roster_changed.emit()
+			if active and is_host and multiplayer.multiplayer_peer:
+				rpc("cl_roster", names, scores)
+		if bool(result.changed):
+			_moon_colony_dirty = true
+			_save_offline_moon_colony()
+	_send_moon_colony_snapshot(peer_id)
+	_send_moon_colony_result(peer_id, action, bool(result.ok), str(result.reason))
+	return bool(result.ok)
+
+
+func _moon_colony_interaction_in_range(peer_id: int, action: String, target: int) -> bool:
+	if player_realm(peer_id) != PlayerRealm.MOON or _peer_has_vehicle_claim(peer_id) \
+			or bool(_moon_colony_flying_peers.get(peer_id, false)) \
+			or rocket_state.get("crew", []).has(peer_id):
+		return false
+	if peer_id == local_id() and not is_dedicated and is_instance_valid(_moon_colony_player):
+		if not _moon_colony_player.is_inside_tree() or _moon_colony_player.get("vehicle") != null \
+				or bool(_moon_colony_player.get("fly_mode")):
+			return false
+		var health: Variant = _moon_colony_player.get("health")
+		if (health is float or health is int) and float(health) <= 0.0:
+			return false
+		_remember_authoritative_state_position(peer_id, _moon_colony_player.global_position, -1, "")
+	if not _peer_on_foot_position_in_realm(peer_id, PlayerRealm.MOON):
+		return false
+	var position: Vector3 = _peer_on_foot_positions[peer_id]
+	if action in ["sell_fresh", "sell_aged", "upgrade", "contract"]:
+		var shop_position := colony_action_position(action, target)
+		var shop_basis := MoonWorld.surface_basis(MoonColony.facility_direction(&"market"))
+		var local_position := shop_basis.inverse() * (position - shop_position)
+		return position.distance_to(shop_position) <= MOON_CHEESE_SHOP_RANGE \
+			and local_position.z <= -1.7 and absf(local_position.y) <= 3.0
+	var distance := 5.5 if action in ["plant", "tend", "harvest"] else 9.0
+	return position.distance_to(colony_action_position(action, target)) <= distance
+
+
+func _process_moon_colonies(delta: float) -> void:
+	if not _owns_expedition_authority() or not is_finite(delta) or delta <= 0.0 \
+			or (not active and (_offline_expedition_pause_msec >= 0 or get_tree().paused)):
+		return
+	var moon_peers: Array[int] = []
+	for id in names:
+		if player_realm(int(id)) == PlayerRealm.MOON:
+			moon_peers.append(int(id))
+	if moon_peers.is_empty():
+		if _moon_colony_dirty:
+			_save_offline_moon_colony()
+		return
+	for peer_id in moon_peers:
+		if not _moon_colonies.has(peer_id):
+			ensure_moon_colony(peer_id)
+		var colony: MoonColony = _moon_colonies[peer_id]
+		# Hitches cannot grant a time jump; active simulation catches up at most
+		# one second per engine frame. Offline paused time is explicitly excluded.
+		if colony.advance(minf(delta, 1.0)):
+			_moon_colony_dirty = true
+	_moon_colony_sync_remaining -= delta
+	if _moon_colony_sync_remaining <= 0.0:
+		_moon_colony_sync_remaining = 1.0
+		for peer_id in moon_peers:
+			_send_moon_colony_snapshot(peer_id)
+	_moon_colony_save_remaining -= delta
+	if _moon_colony_save_remaining <= 0.0:
+		_moon_colony_save_remaining = 5.0
+		_save_offline_moon_colony()
+
+
+func _send_moon_colony_snapshot(peer_id: int) -> void:
+	if not _moon_colonies.has(peer_id):
+		return
+	var colony: MoonColony = _moon_colonies[peer_id]
+	var balance := int(scores.get(peer_id, 0))
+	if peer_id == local_id() and not is_dedicated:
+		moon_colony_changed.emit(colony.snapshot(balance))
+	elif active and is_host and _registered_peer(peer_id):
+		# The compact authoritative record is expanded to UI fields by the client.
+		rpc_id(peer_id, "cl_moon_colony_state", colony.serialize(balance))
+
+
+@rpc("authority", "call_remote", "reliable", 0)
+func cl_moon_colony_state(record: Dictionary) -> void:
+	if not active or is_host:
+		return
+	var replica := MoonColony.new(world_seed)
+	if not replica.restore(record):
+		return
+	_moon_colony_client_snapshot = replica.snapshot(replica.restored_balance)
+	if int(scores.get(local_id(), 0)) != replica.restored_balance:
+		scores[local_id()] = replica.restored_balance
+		score_changed.emit()
+	moon_colony_changed.emit(_moon_colony_client_snapshot.duplicate(true))
+
+
+func _send_moon_colony_result(peer_id: int, action: String, ok: bool, reason: String) -> void:
+	if peer_id == local_id() and not is_dedicated:
+		moon_colony_result.emit(action.left(24), ok, reason.left(180))
+	elif active and is_host and _registered_peer(peer_id):
+		rpc_id(peer_id, "cl_moon_colony_result", action.left(24), ok, reason.left(180))
+
+
+@rpc("authority", "call_remote", "reliable", 0)
+func cl_moon_colony_result(action: String, ok: bool, reason: String) -> void:
+	if active and not is_host and MoonColony.ACTIONS.has(action):
+		moon_colony_result.emit(action, ok, _sanitize_chat(reason).left(180))
+
+
+func _moon_colony_persistence_allowed() -> bool:
+	if active or is_host or is_dedicated:
+		return false
+	if not _moon_colony_storage_root.is_empty():
+		var fixture_name := _moon_colony_storage_root.trim_prefix("user://")
+		return _moon_colony_storage_root.begins_with("user://mooncolony_fixture_") \
+			and fixture_name.is_valid_filename() and not fixture_name.contains("..")
+	# Standalone SceneTree diagnostics do not run main's CLI entry routing and
+	# often have no user arguments. Never mistake them for a normal play session
+	# and read or replace the player's colony; fixtures must opt into their own
+	# isolated storage root above.
+	var engine_args := OS.get_cmdline_args()
+	if engine_args.has("--script") or engine_args.has("-s"):
+		return false
+	var args := OS.get_cmdline_user_args()
+	if args.is_empty():
+		return true
+	# Only ordinary playable entry modes may touch player progress. Every test,
+	# benchmark, screenshot, capture and unknown CLI mode is isolated by default.
+	return args[0].to_lower() in ["moon", "solo", "debugworld", "background"]
+
+
+func moon_colony_save_path() -> String:
+	var directory := _moon_colony_storage_root if not _moon_colony_storage_root.is_empty() \
+		else "user://moon_colonies"
+	return directory.path_join("seed_%d.json" % world_seed)
+
+
+func _load_moon_colony(colony: MoonColony) -> bool:
+	if not _moon_colony_persistence_allowed():
+		return false
+	var path := moon_colony_save_path()
+	if not FileAccess.file_exists(path):
+		return false
+	var file := FileAccess.open(path, FileAccess.READ)
+	if file == null or file.get_length() > 65536:
+		return false
+	var text := file.get_as_text()
+	file.close()
+	var parser := JSON.new()
+	if parser.parse(text) != OK:
+		return false
+	return parser.data is Dictionary and colony.restore(parser.data)
+
+
+func _save_offline_moon_colony() -> bool:
+	if not _moon_colony_persistence_allowed() or not _moon_colonies.has(local_id()):
+		return false
+	var balance := int(scores.get(local_id(), 0))
+	if not _moon_colony_dirty and balance == _moon_colony_last_saved_balance:
+		return true
+	var colony: MoonColony = _moon_colonies[local_id()]
+	var path := moon_colony_save_path()
+	var absolute := ProjectSettings.globalize_path(path)
+	if DirAccess.make_dir_recursive_absolute(absolute.get_base_dir()) != OK:
+		return false
+	var temporary := absolute + ".tmp"
+	var file := FileAccess.open(temporary, FileAccess.WRITE)
+	if file == null:
+		return false
+	file.store_string(JSON.stringify(colony.serialize(balance)))
+	file.flush()
+	var write_error := file.get_error()
+	file.close()
+	if write_error != OK or DirAccess.rename_absolute(temporary, absolute) != OK:
+		DirAccess.remove_absolute(temporary)
+		return false
+	_moon_colony_dirty = false
+	_moon_colony_last_saved_balance = balance
+	return true
+
+
+func _reset_moon_colonies() -> void:
+	_moon_colonies.clear()
+	_moon_colony_client_snapshot.clear()
+	_moon_colony_requests.clear()
+	_moon_colony_request_serial = 0
+	_moon_colony_sync_remaining = 0.0
+	_moon_colony_save_remaining = 5.0
+	_moon_colony_dirty = false
+	_moon_colony_last_saved_balance = -1
+	_moon_colony_player = null
+	_moon_colony_positions.clear()
+	_moon_colony_flying_peers.clear()
+
+
 # ---- movement --------------------------------------------------------------
 
 func send_state(pos: Vector3, yaw: float, vel: Vector3, anim: int,
@@ -1582,6 +1955,7 @@ func send_state(pos: Vector3, yaw: float, vel: Vector3, anim: int,
 	if is_host:
 		_remember_authoritative_state_position(local_id(), pos, vehicle_kind,
 			vehicle_id)
+		_moon_colony_flying_peers[local_id()] = flying
 		rpc("cl_state", local_id(), pos, yaw, vel, anim, swinging, anchor,
 			rope_tail, wraps, weapon_kind, weapon_stowed, melee_mode,
 			weapon_ammo, weapon_reloading, healing_progress, flying,
@@ -1611,6 +1985,7 @@ func srv_state(pos: Vector3, yaw: float, vel: Vector3, anim: int,
 			or not _sender_owns_vehicle_state(sender, vehicle_kind, vehicle_id):
 		return
 	_remember_authoritative_state_position(sender, pos, vehicle_kind, vehicle_id)
+	_moon_colony_flying_peers[sender] = authorized_flying
 	peer_state.emit(sender, pos, yaw, vel, anim, swinging, anchor, rope_tail,
 		wraps, weapon_kind, weapon_stowed, melee_mode, weapon_ammo,
 		weapon_reloading, healing_progress, authorized_flying, vehicle_kind,

@@ -10,6 +10,15 @@ extends Control
 const TILE_PX := 96
 const TIER_METERS_PER_PX := [4.0, 16.0, 64.0]
 const ROWS_PER_FRAME := 24
+const MOON_TIER_METERS_PER_PX := [1.5, 4.0, 8.0]
+const MOON_ROWS_PER_FRAME := 3
+const BAKE_TIME_BUDGET_USEC := 1500
+const MOON_BAKE_TIME_BUDGET_USEC := BAKE_TIME_BUDGET_USEC
+const BAKE_CHUNK_PIXELS := 8
+const PREVIEW_BLOCK_PX := 8
+const PREVIEW_GRID_PX := 12
+const PREVIEW_SAMPLES := PREVIEW_GRID_PX * PREVIEW_GRID_PX
+const MOON_CHART_REANCHOR_ANGLE := 0.45
 # A large view near a tier boundary can expose more than 70 tiles while
 # diagonal. Keeping 128 retains a complete heading sweep without unbounded
 # memory growth or evicting a tile that is still visible.
@@ -28,6 +37,19 @@ var _font: Font
 var _last_required_tier := -1
 var _last_required_keys: Dictionary = {}
 var _last_baked_rows := 0
+var _last_baked_pixels := 0
+var _last_preview_samples := 0
+var _last_bake_usec := 0
+var _last_bake_chunk_usec := 0
+var _last_texture_uploads := 0
+var _map_realm := Net.PlayerRealm.EARTH
+var _moon: MoonWorld
+var _moon_chart_up := Vector3.UP
+var _moon_chart_east := Vector3.RIGHT
+var _moon_chart_south := Vector3.BACK
+var _moon_chart_revision := 0
+var _moon_landmarks: Array[Dictionary] = []
+var _drawn_label_rects: Array[Rect2] = []
 ## Heading-up is deliberately a local-driver presentation state. The last
 ## usable ground-plane heading survives a vertical jet loop, where projecting
 ## the aircraft nose onto XZ has no meaningful direction.
@@ -82,6 +104,163 @@ func _player() -> Node3D:
 	return world.local_player if world and world.get("local_player") else null
 
 
+func map_realm() -> int:
+	return _map_realm
+
+
+func map_cache_key() -> String:
+	return "%d:%d:%d" % [_map_realm, _baked_seed,
+		_moon_chart_revision if _map_realm == Net.PlayerRealm.MOON else 0]
+
+
+func preview_ready() -> bool:
+	if _last_required_tier < 0 or _last_required_keys.is_empty():
+		return false
+	for key in _last_required_keys:
+		var tile: Dictionary = _tiles[_last_required_tier].get(key, {})
+		if int(tile.get("preview_cursor", 0)) < PREVIEW_SAMPLES:
+			return false
+	return true
+
+
+func _reset_tiles() -> void:
+	_tiles = [{}, {}, {}]
+	_bake_queue.clear()
+	_last_required_tier = -1
+	_last_required_keys.clear()
+	_last_baked_rows = 0
+	_last_baked_pixels = 0
+	_last_preview_samples = 0
+	_last_texture_uploads = 0
+
+
+func _sync_map_context() -> bool:
+	var realm := Net.player_realm()
+	if realm not in [Net.PlayerRealm.EARTH, Net.PlayerRealm.MOON]:
+		return false
+	var source_moon: MoonWorld
+	var seed_value := Gen.world_seed
+	var reanchor := false
+	if realm == Net.PlayerRealm.MOON:
+		var manager: ExpeditionManager = world.get("expedition_manager")
+		if not is_instance_valid(manager) or not is_instance_valid(manager.moon_world):
+			return false
+		source_moon = manager.moon_world
+		seed_value = source_moon.moon_seed
+		var direction := (source_moon.to_local(_player().global_position)
+			- MoonWorld.PLAYABLE_CENTER).normalized()
+		if direction.is_zero_approx():
+			return false
+		reanchor = source_moon != _moon or _map_realm != realm \
+			or seed_value != _baked_seed \
+			or _moon_chart_up.dot(direction) < cos(MOON_CHART_REANCHOR_ANGLE)
+		if reanchor:
+			if source_moon == _moon and _map_realm == realm:
+				# Carry the chart's orientation over the sphere. This remains stable
+				# at poles, where choosing world north afresh would spin the map.
+				var transport := Quaternion(_moon_chart_up, direction)
+				_moon_chart_east = (transport * _moon_chart_east).slide(direction).normalized()
+			else:
+				_moon_chart_east = MoonWorld.surface_basis(direction).x
+			_moon_chart_up = direction
+			_moon_chart_south = _moon_chart_east.cross(direction).normalized()
+			_moon_chart_revision += 1
+	if realm != _map_realm or seed_value != _baked_seed or reanchor:
+		_reset_tiles()
+		_map_realm = realm
+		_baked_seed = seed_value
+		_moon = source_moon
+		_cache_moon_landmarks()
+	return true
+
+
+## Azimuthal coordinates preserve surface distance from a radial chart origin.
+## Re-anchoring before half a hemisphere keeps the visible chart well behaved.
+func moon_map_coordinates(world_position: Vector3) -> Vector2:
+	if not is_instance_valid(_moon):
+		return Vector2.ZERO
+	var direction := (_moon.to_local(world_position) - MoonWorld.PLAYABLE_CENTER).normalized()
+	var dot_up := clampf(_moon_chart_up.dot(direction), -1.0, 1.0)
+	var tangent := direction - _moon_chart_up * dot_up
+	if tangent.length_squared() < 0.00000001:
+		return Vector2(PI * MoonWorld.PLAYABLE_RADIUS_METERS, 0.0) if dot_up < 0.0 else Vector2.ZERO
+	# atan2 retains small walking distances that acos loses when a float32
+	# near-parallel dot product rounds to one.
+	var angle := atan2(tangent.length(), dot_up)
+	var distance := angle * MoonWorld.PLAYABLE_RADIUS_METERS
+	tangent = tangent.normalized()
+	return Vector2(tangent.dot(_moon_chart_east), tangent.dot(_moon_chart_south)) * distance
+
+
+func moon_direction_at(chart_position: Vector2) -> Vector3:
+	var distance := chart_position.length()
+	if distance < 0.000001:
+		return _moon_chart_up
+	var angle := distance / MoonWorld.PLAYABLE_RADIUS_METERS
+	var tangent := (_moon_chart_east * chart_position.x
+		+ _moon_chart_south * chart_position.y) / distance
+	return (_moon_chart_up * cos(angle) + tangent * sin(angle)).normalized()
+
+
+func map_height_at(chart_position: Vector2) -> float:
+	if _map_realm == Net.PlayerRealm.MOON and is_instance_valid(_moon):
+		return _moon.surface_position(moon_direction_at(chart_position)).distance_to(
+			MoonWorld.PLAYABLE_CENTER) - MoonWorld.PLAYABLE_RADIUS_METERS
+	return Gen.height(chart_position.x, chart_position.y)
+
+
+func _map_coordinates(world_position: Vector3) -> Vector2:
+	return moon_map_coordinates(world_position) if _map_realm == Net.PlayerRealm.MOON \
+		else Vector2(world_position.x, world_position.z)
+
+
+func _meters_per_px(tier: int) -> float:
+	return float(MOON_TIER_METERS_PER_PX[tier] if _map_realm == Net.PlayerRealm.MOON \
+		else TIER_METERS_PER_PX[tier])
+
+
+func _cache_moon_landmarks() -> void:
+	_moon_landmarks.clear()
+	if not is_instance_valid(_moon):
+		return
+	for definition in [[&"farm", "FARM", Color(0.98, 0.83, 0.30)],
+			[&"market", "MUENSTER", Color(1.0, 0.66, 0.24)],
+			[&"aging", "CELLAR", Color(0.97, 0.74, 0.51)],
+			[&"observatory", "OBSERVATORY", Color(0.50, 0.83, 1.0)],
+			[&"relay", "O₂ RELAY", Color(0.42, 0.96, 0.80)],
+			[&"crystal_garden", "CRYSTALS", Color(0.80, 0.61, 1.0)]]:
+		_moon_landmarks.append({"id": str(definition[0]), "name": definition[1],
+			"position": _moon.to_global(_moon.surface_position(
+				MoonColony.facility_direction(definition[0]))), "color": definition[2]})
+	_moon_landmarks.append({"id": "rocket", "name": "LANDING PAD",
+		"position": _moon.to_global(_moon.landing_transform().origin),
+		"color": Color(0.94, 0.98, 1.0)})
+
+
+func marker_snapshot() -> Array[Dictionary]:
+	var markers: Array[Dictionary] = []
+	if not world:
+		return markers
+	for peer_id in world.puppets:
+		var actor: Node3D = world.puppets[peer_id]
+		if is_instance_valid(actor) and Net.player_realm(int(peer_id)) == _map_realm:
+			markers.append({"id": peer_id, "name": str(Net.names.get(peer_id, "")),
+				"position": actor.global_position, "color": Color(0.35, 0.75, 1.0),
+				"kind": "player"})
+	if _map_realm == Net.PlayerRealm.EARTH and is_instance_valid(world.ai_opponent):
+		markers.append({"id": -1, "name": "Captain Peel", "kind": "player",
+			"position": world.ai_opponent.global_position, "color": Color(1.0, 0.42, 0.30)})
+	if _map_realm == Net.PlayerRealm.MOON:
+		for landmark in _moon_landmarks:
+			var marker := landmark.duplicate()
+			marker.kind = "landmark"
+			if str(marker.id) == "rocket" and int(Net.rocket_state.get("phase", -1)) \
+					== Net.RocketMissionPhase.MOON_READY:
+				marker.name = "ROCKET"
+			markers.append(marker)
+	return markers
+
+
 ## Only the machine actually driven by this world's local player can rotate the
 ## map. A remote claim, nearby vehicle, or not-yet-completed seat request must
 ## never steer another client's presentation.
@@ -104,6 +283,8 @@ func _vehicle_flat_heading(vehicle: Vehicle) -> Vector2:
 ## Read-only diagnostic hook: radians applied to north-up map data. A driven
 ## vehicle is always heading-up; ordinary on-foot play remains exactly north-up.
 func map_rotation_radians() -> float:
+	if _map_realm == Net.PlayerRealm.MOON:
+		return 0.0
 	var vehicle := locally_driven_vehicle()
 	if vehicle == null:
 		_heading_vehicle_id = 0
@@ -121,6 +302,16 @@ func map_rotation_radians() -> float:
 
 ## Read-only diagnostic hook for the local yellow triangle after map rotation.
 func local_arrow_forward() -> Vector2:
+	if _map_realm == Net.PlayerRealm.MOON and is_instance_valid(_moon):
+		var actor := _player()
+		var rig: MonkeyRig = actor.get("rig") if actor else null
+		if rig and rig.yaw_node:
+			var forward := -rig.yaw_node.global_basis.z.normalized()
+			var projected := moon_map_coordinates(actor.global_position + forward) \
+				- moon_map_coordinates(actor.global_position)
+			if projected.length_squared() > 0.000001:
+				return projected.normalized()
+		return Vector2.UP
 	var rotation := map_rotation_radians()
 	if locally_driven_vehicle() != null:
 		return _last_vehicle_heading.rotated(rotation).normalized()
@@ -161,9 +352,10 @@ static func rotated_tile_visible(rect: Rect2, rotation: float, px: float) -> boo
 ## Start from the rotated view's conservative AABB, then discard its unused
 ## corners so a diagonal request does not spend cache or bake work off-screen.
 static func required_tile_keys(tier: int, center: Vector2, window: float,
-		rotation: float, px: float) -> Array[Vector2i]:
+		rotation: float, px: float, meters_per_pixel := -1.0) -> Array[Vector2i]:
 	var result: Array[Vector2i] = []
-	var tile_world := float(TIER_METERS_PER_PX[tier]) * TILE_PX
+	var tile_world := (float(TIER_METERS_PER_PX[tier]) if meters_per_pixel <= 0.0 \
+		else meters_per_pixel) * TILE_PX
 	var half := tile_request_half_extent(window, rotation)
 	var min_tx := floori((center.x - half) / tile_world)
 	var max_tx := floori((center.x + half) / tile_world)
@@ -182,6 +374,10 @@ static func required_tile_keys(tier: int, center: Vector2, window: float,
 
 ## World metres shown across the map: wider the higher the player is.
 func window_meters() -> float:
+	if _map_realm == Net.PlayerRealm.MOON and is_instance_valid(_moon) and _player():
+		var altitude := maxf(_moon.altitude_at(_player().global_position), 0.0)
+		return clampf(clampf(240.0 + altitude * 1.5, 240.0, 360.0) \
+			* zoom_multiplier, 96.0, 720.0)
 	var altitude: float = _player().global_position.y if _player() else 0.0
 	return clampf(300.0 + maxf(altitude - 6.0, 0.0) * 40.0, 300.0, 8000.0) \
 		* zoom_multiplier
@@ -189,34 +385,43 @@ func window_meters() -> float:
 
 func _pick_tier(needed_m_per_px: float) -> int:
 	for tier in range(TIER_METERS_PER_PX.size()):
-		if needed_m_per_px <= float(TIER_METERS_PER_PX[tier]) * 2.2:
+		if needed_m_per_px <= _meters_per_px(tier) * 2.2:
 			return tier
 	return TIER_METERS_PER_PX.size() - 1
 
 
 func _process(_dt: float) -> void:
-	if not visible or not _player():
+	_last_baked_rows = 0
+	_last_baked_pixels = 0
+	_last_preview_samples = 0
+	_last_bake_usec = 0
+	_last_bake_chunk_usec = 0
+	_last_texture_uploads = 0
+	if not is_visible_in_tree() or not _player():
 		return
-	if Gen.world_seed != _baked_seed:
-		_baked_seed = Gen.world_seed
-		_tiles = [{}, {}, {}]
-		_bake_queue.clear()
-		_last_required_tier = -1
-		_last_required_keys.clear()
-		_last_baked_rows = 0
+	# The HUD is a CanvasLayer, so checking this Control's own visible flag is
+	# insufficient. Hidden captures previously kept baking thousands of terrain
+	# samples per frame, even with Earth's streaming scheduler stopped.
+	var canvas_layer := get_canvas_layer_node()
+	if canvas_layer and not canvas_layer.visible:
+		return
+	# Guard here as well as in HUD: realm packets can precede its next update.
+	# A cabin's position does not describe either playable surface map.
+	if not _sync_map_context():
+		return
 	_request_visible_tiles()
 	_bake_rows()
 	queue_redraw()
 
 
 func _tile_world(tier: int) -> float:
-	return float(TIER_METERS_PER_PX[tier]) * TILE_PX
+	return _meters_per_px(tier) * TILE_PX
 
 
 func _request_visible_tiles() -> void:
 	var window := window_meters()
 	var center_3d: Vector3 = _player().global_position
-	_request_tiles_for_view(Vector2(center_3d.x, center_3d.z), window,
+	_request_tiles_for_view(_map_coordinates(center_3d), window,
 		map_rotation_radians(), map_px())
 
 
@@ -225,7 +430,7 @@ func _request_visible_tiles() -> void:
 func _request_tiles_for_view(center: Vector2, window: float, rotation: float,
 		px: float) -> Dictionary:
 	var tier := _pick_tier(window / px)
-	var keys := required_tile_keys(tier, center, window, rotation, px)
+	var keys := required_tile_keys(tier, center, window, rotation, px, _meters_per_px(tier))
 	var required: Dictionary = {}
 	for key in keys:
 		required[key] = true
@@ -239,7 +444,10 @@ func _request_tiles_for_view(center: Vector2, window: float, rotation: float,
 				"image": image,
 				"texture": ImageTexture.create_from_image(image),
 				"rows": 0,
+				"cursor": 0,
+				"preview_cursor": 0,
 				"prev_heights": PackedFloat32Array(),
+				"preview_heights": PackedFloat32Array(),
 			}
 			_bake_queue.append([tier, key])
 	_evict(tier, center, required)
@@ -253,6 +461,8 @@ func _placeholder_color(tier: int, key: Vector2i) -> Color:
 	var tile_world := _tile_world(tier)
 	var x := (float(key.x) + 0.5) * tile_world
 	var z := (float(key.y) + 0.5) * tile_world
+	if _map_realm == Net.PlayerRealm.MOON:
+		return _moon_ground_color(map_height_at(Vector2(x, z)))
 	var h := Gen.height(x, z)
 	if h < Gen.WATER_Y:
 		var depth := clampf((Gen.WATER_Y - h) / 5.0, 0.0, 1.0)
@@ -260,6 +470,11 @@ func _placeholder_color(tier: int, key: Vector2i) -> Color:
 			Color(0.05, 0.22, 0.38), depth)
 	var ground := Gen.ground_color(h, x, z)
 	return Color(ground.r * 0.82, ground.g * 0.82, ground.b * 0.82)
+
+
+func _moon_ground_color(height: float) -> Color:
+	var relief := clampf(0.90 + height * 0.035, 0.53, 1.12)
+	return Color(0.59, 0.60, 0.65) * relief
 
 
 func _evict(tier: int, center: Vector2, protected: Dictionary) -> void:
@@ -306,65 +521,139 @@ func _prioritize_bake_queue(tier: int, required: Dictionary,
 	_bake_queue = current
 
 
-## Bake a bounded number of pixel rows per frame across the pending tiles.
+## Visible coarse previews take priority over exact pixels. Each sample block
+## is resumable, so even a cold Earth row cannot monopolize a frame.
+func _next_bake_queue_index() -> int:
+	for index in range(_bake_queue.size()):
+		var entry: Array = _bake_queue[index]
+		if entry[0] != _last_required_tier or not _last_required_keys.has(entry[1]):
+			continue
+		var tile: Dictionary = _tiles[entry[0]].get(entry[1], {})
+		if not tile.is_empty() and int(tile.get("preview_cursor", 0)) < PREVIEW_SAMPLES:
+			return index
+	return 0
+
+
+## A time check every eight samples bounds both terrain types; row ceilings
+## remain a secondary work cap. Changed textures upload only once per frame.
 func _bake_rows() -> void:
-	var budget := ROWS_PER_FRAME
+	var started := Time.get_ticks_usec()
+	var lunar := _map_realm == Net.PlayerRealm.MOON
+	var budget := (MOON_ROWS_PER_FRAME if lunar else ROWS_PER_FRAME) * TILE_PX
 	_last_baked_rows = 0
+	_last_baked_pixels = 0
+	_last_preview_samples = 0
+	_last_bake_chunk_usec = 0
+	_last_texture_uploads = 0
+	var changed: Dictionary = {}
 	while budget > 0 and not _bake_queue.is_empty():
-		var entry: Array = _bake_queue[0]
+		if _last_baked_pixels > 0 \
+				and Time.get_ticks_usec() - started >= BAKE_TIME_BUDGET_USEC:
+			break
+		var queue_index := _next_bake_queue_index()
+		var entry: Array = _bake_queue[queue_index]
 		var tier: int = entry[0]
 		var key: Vector2i = entry[1]
 		var tile: Dictionary = _tiles[tier].get(key, {})
 		if tile.is_empty():
-			_bake_queue.pop_front()
+			_bake_queue.remove_at(queue_index)
 			continue
 		var rows_done: int = tile.rows
-		var rows_now := mini(budget, TILE_PX - rows_done)
-		_bake_tile_rows(tier, key, tile, rows_done, rows_now)
-		tile.rows = rows_done + rows_now
-		budget -= rows_now
-		_last_baked_rows += rows_now
-		if tile.rows >= TILE_PX:
-			(tile.texture as ImageTexture).update(tile.image)
-			_bake_queue.pop_front()
+		var count := mini(budget, BAKE_CHUNK_PIXELS)
+		var chunk_started := Time.get_ticks_usec()
+		if int(tile.get("preview_cursor", 0)) < PREVIEW_SAMPLES:
+			count = mini(count, PREVIEW_SAMPLES - int(tile.get("preview_cursor", 0)))
+			_bake_preview_pixels(tier, key, tile, count)
+			_last_preview_samples += count
 		else:
-			(tile.texture as ImageTexture).update(tile.image)
+			count = mini(count, TILE_PX * TILE_PX - int(tile.get("cursor", 0)))
+			_bake_tile_pixels(tier, key, tile, count)
+		_last_bake_chunk_usec = maxi(_last_bake_chunk_usec, Time.get_ticks_usec() - chunk_started)
+		budget -= count
+		_last_baked_pixels += count
+		_last_baked_rows += int(tile.rows) - rows_done
+		changed[Vector3i(tier, key.x, key.y)] = tile
+		if tile.rows >= TILE_PX:
+			_bake_queue.remove_at(queue_index)
+	for tile in changed.values():
+		(tile.texture as ImageTexture).update(tile.image)
+	_last_texture_uploads = changed.size()
+	_last_bake_usec = Time.get_ticks_usec() - started
 
 
-func _bake_tile_rows(tier: int, key: Vector2i, tile: Dictionary,
-		start_row: int, count: int) -> void:
-	var m_per_px := float(TIER_METERS_PER_PX[tier])
+func _sample_color(height: float, x: float, z: float, left_height: float,
+		previous_height: float, has_previous_row: bool) -> Color:
+	if _map_realm == Net.PlayerRealm.MOON:
+		var shade := 0.93 + clampf((left_height - height) * 0.11, -0.23, 0.23)
+		if has_previous_row:
+			shade += clampf((previous_height - height) * 0.11, -0.23, 0.23)
+		return _moon_ground_color(height) * clampf(shade, 0.55, 1.22)
+	if height < Gen.WATER_Y:
+		var depth := clampf((Gen.WATER_Y - height) / 5.0, 0.0, 1.0)
+		return Color(0.22, 0.52, 0.66).lerp(Color(0.05, 0.22, 0.38), depth)
+	var color := Gen.ground_color(height, x, z)
+	var shade := 0.82 + clampf((left_height - height) * 0.030, -0.16, 0.16)
+	if has_previous_row:
+		shade += clampf((previous_height - height) * 0.030, -0.16, 0.16)
+	return Color(color.r * shade, color.g * shade, color.b * shade)
+
+
+func _bake_preview_pixels(tier: int, key: Vector2i, tile: Dictionary, count: int) -> void:
+	var spacing := _meters_per_px(tier) * PREVIEW_BLOCK_PX
+	var origin := Vector2(key) * _tile_world(tier)
+	var image: Image = tile.image
+	var previous: PackedFloat32Array = tile.preview_heights
+	if previous.size() != PREVIEW_GRID_PX:
+		previous.resize(PREVIEW_GRID_PX)
+	var cursor := int(tile.get("preview_cursor", 0))
+	var end := mini(cursor + count, PREVIEW_SAMPLES)
+	var left_height := float(tile.get("preview_left_height", 0.0))
+	for index in range(cursor, end):
+		var row := floori(float(index) / PREVIEW_GRID_PX)
+		var column := index % PREVIEW_GRID_PX
+		var x := origin.x + (float(column) + 0.5) * spacing
+		var z := origin.y + (float(row) + 0.5) * spacing
+		if column == 0:
+			left_height = map_height_at(Vector2(x - spacing, z))
+		var height := map_height_at(Vector2(x, z))
+		var color := _sample_color(height, x, z, left_height, previous[column], row > 0)
+		image.fill_rect(Rect2i(column * PREVIEW_BLOCK_PX, row * PREVIEW_BLOCK_PX,
+			PREVIEW_BLOCK_PX, PREVIEW_BLOCK_PX), color)
+		previous[column] = height
+		left_height = height
+	tile.preview_cursor = end
+	tile.preview_heights = previous
+	tile.preview_left_height = left_height
+
+
+## Carry both the west sample and north row through a yield. Interrupted and
+## uninterrupted refinement therefore produce identical final terrain pixels.
+func _bake_tile_pixels(tier: int, key: Vector2i, tile: Dictionary, count: int) -> void:
+	var m_per_px := _meters_per_px(tier)
 	var origin_x := float(key.x) * _tile_world(tier)
 	var origin_z := float(key.y) * _tile_world(tier)
 	var image: Image = tile.image
 	var prev: PackedFloat32Array = tile.prev_heights
 	if prev.size() != TILE_PX:
 		prev.resize(TILE_PX)
-	for row in range(start_row, start_row + count):
+	var cursor := int(tile.get("cursor", 0))
+	var end := mini(cursor + count, TILE_PX * TILE_PX)
+	var left_h := float(tile.get("left_height", 0.0))
+	for index in range(cursor, end):
+		var row := floori(float(index) / TILE_PX)
+		var px := index % TILE_PX
 		var z := origin_z + (float(row) + 0.5) * m_per_px
-		var left_h := Gen.height(origin_x - m_per_px * 0.5, z)
-		for px in range(TILE_PX):
-			var x := origin_x + (float(px) + 0.5) * m_per_px
-			var h := Gen.height(x, z)
-			var color: Color
-			if h < Gen.WATER_Y:
-				var depth: float = clampf((Gen.WATER_Y - h) / 5.0, 0.0, 1.0)
-				color = Color(0.22, 0.52, 0.66).lerp(
-					Color(0.05, 0.22, 0.38), depth)
-			else:
-				color = Gen.ground_color(h, x, z)
-				# Hillshade from the west and north neighbours already sampled
-				# this pass — sun-from-northwest relief like map tiles.
-				var shade := 0.82
-				shade += clampf((left_h - h) * 0.030, -0.16, 0.16)
-				if start_row + row > 0 or prev[px] != 0.0:
-					shade += clampf((prev[px] - h) * 0.030, -0.16, 0.16)
-				color = Color(color.r * shade, color.g * shade,
-					color.b * shade)
-			image.set_pixel(px, row, color)
-			left_h = h
-			prev[px] = h
+		var x := origin_x + (float(px) + 0.5) * m_per_px
+		if px == 0:
+			left_h = map_height_at(Vector2(origin_x - m_per_px * 0.5, z))
+		var h := map_height_at(Vector2(x, z))
+		image.set_pixel(px, row, _sample_color(h, x, z, left_h, prev[px], row > 0))
+		left_h = h
+		prev[px] = h
+	tile.cursor = end
+	tile.rows = floori(float(end) / TILE_PX)
 	tile.prev_heights = prev
+	tile.left_height = left_h
 
 
 func _world_to_map(world_pos: Vector3, center: Vector3,
@@ -372,19 +661,21 @@ func _world_to_map(world_pos: Vector3, center: Vector3,
 	var scale_px := map_px() / window
 	var active_rotation: float = map_rotation_radians() \
 		if is_nan(rotation) else float(rotation)
-	var offset := Vector2(world_pos.x - center.x,
-		world_pos.z - center.z) * scale_px
+	var offset := (_map_coordinates(world_pos) - _map_coordinates(center)) * scale_px
 	return Vector2.ONE * map_px() * 0.5 + offset.rotated(active_rotation)
 
 
 func _draw() -> void:
-	if not _player():
+	if not _player() or Net.player_realm() != _map_realm:
 		return
 	var px := map_px()
 	var window := window_meters()
 	var tier := _pick_tier(window / px)
 	var center: Vector3 = _player().global_position
+	var chart_center := _map_coordinates(center)
 	var map_rotation := map_rotation_radians()
+	_drawn_label_rects.clear()
+	_drawn_label_rects.append(Rect2(Vector2.ONE * (px * 0.5 - 9.0), Vector2.ONE * 18.0))
 	draw_rect(Rect2(0, 0, px, px), Color(0.05, 0.10, 0.14))
 	var tile_world := _tile_world(tier)
 	var scale_px := px / window
@@ -396,25 +687,28 @@ func _draw() -> void:
 	for key in cache:
 		var tile: Dictionary = cache[key]
 		var top_left := Vector2(
-			(float(key.x) * tile_world - center.x) * scale_px,
-			(float(key.y) * tile_world - center.z) * scale_px)
+			(float(key.x) * tile_world - chart_center.x) * scale_px,
+			(float(key.y) * tile_world - chart_center.y) * scale_px)
 		var rect := Rect2(top_left, Vector2.ONE * tile_world * scale_px)
 		if not rotated_tile_visible(rect, map_rotation, px):
 			continue
 		draw_texture_rect(tile.texture, rect, false)
 	draw_set_transform(Vector2.ZERO, 0.0, Vector2.ONE)
 
-	# markers: remote players + AI, then the local arrow on top
-	if world:
-		for peer_id in world.puppets:
-			var puppet: Node3D = world.puppets[peer_id]
-			if is_instance_valid(puppet):
-				_draw_marker(puppet.global_position, center, window,
-					Color(0.35, 0.75, 1.0),
-					str(Net.names.get(peer_id, "")), map_rotation)
-		if world.ai_opponent and is_instance_valid(world.ai_opponent):
-			_draw_marker(world.ai_opponent.global_position, center, window,
-				Color(1.0, 0.42, 0.30), "Captain Peel", map_rotation)
+	# Realm filtering prevents a Moon astronaut appearing as an Earth marker.
+	for marker in marker_snapshot():
+		var marker_name := str(marker.name)
+		if _map_realm == Net.PlayerRealm.MOON and str(marker.kind) == "landmark":
+			var direction := (_moon.to_local(marker.position) - MoonWorld.PLAYABLE_CENTER).normalized()
+			var player_direction := (_moon.to_local(center) - MoonWorld.PLAYABLE_CENTER).normalized()
+			var distance := direction.angle_to(player_direction) * MoonWorld.PLAYABLE_RADIUS_METERS
+			if distance > window * 0.72:
+				# One colony bearing stays useful on the far side, instead of six
+				# overlapping destination names piled on the same map edge.
+				if str(marker.id) != "rocket":
+					continue
+				marker_name = "CO-OP %dm" % roundi(distance)
+		_draw_marker(marker.position, center, window, marker.color, marker_name, map_rotation)
 	var arrow_center := Vector2(px * 0.5, px * 0.5)
 	var forward := local_arrow_forward()
 	var points := PackedVector2Array([
@@ -433,6 +727,11 @@ func _draw() -> void:
 	var footer := "%d, %d  ·  %s across" % [int(center.x), int(center.z),
 		("%.1f km" % (window / 1000.0)) if window >= 1000.0
 			else "%d m" % int(window)]
+	if _map_realm == Net.PlayerRealm.MOON:
+		footer = "MOON  ·  %d m across" % roundi(window)
+		draw_rect(Rect2(5, 5, 43, 16), Color(0.08, 0.10, 0.17, 0.90))
+		draw_string(_font, Vector2(9, 17), "MOON", HORIZONTAL_ALIGNMENT_LEFT,
+			-1, 10, Color(0.89, 0.91, 1.0))
 	draw_string(_font, Vector2(2, px + 12), footer,
 		HORIZONTAL_ALIGNMENT_LEFT, px, 10, Color(0.85, 0.92, 0.8))
 
@@ -446,6 +745,15 @@ func _draw_marker(world_pos: Vector3, center: Vector3, window: float,
 	draw_circle(pos, 3.0, color)
 	if not marker_name.is_empty():
 		var text_pos := pos + Vector2(-marker_name.length() * 2.5, -6.0)
+		if _map_realm == Net.PlayerRealm.MOON:
+			var text_size := _font.get_string_size(marker_name, HORIZONTAL_ALIGNMENT_LEFT, -1, 10)
+			text_pos.x = clampf(pos.x - text_size.x * 0.5, 3.0, maxf(3.0, px - text_size.x - 3.0))
+			text_pos.y = clampf(text_pos.y, 29.0, px - 5.0)
+			var bounds := Rect2(text_pos - Vector2(1, text_size.y - 3), text_size + Vector2(2, 2))
+			for used in _drawn_label_rects:
+				if used.intersects(bounds):
+					return
+			_drawn_label_rects.append(bounds)
 		draw_string(_font, text_pos + Vector2(1, 1), marker_name,
 			HORIZONTAL_ALIGNMENT_LEFT, -1, 10, Color(0, 0, 0, 0.85))
 		draw_string(_font, text_pos, marker_name,

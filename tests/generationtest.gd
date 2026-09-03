@@ -137,9 +137,9 @@ func run() -> void:
 	_check(road_clear,
 		"trees, rocks, understory, and wilderness huts stay off every road surface")
 
-	# Measure rolling relief away from lakes, authored flat zones, roads, and the
-	# existing mountain-range layer. This isolates the strengthened ordinary
-	# jungle hills instead of letting one mountain peak satisfy the assertion.
+	# Home jungle should retain gentle ground variation while staying mostly
+	# flat. Exclude lakes, roads, and authored platforms so their grading cannot
+	# stand in for natural relief. Distant ranges are covered by planettest.
 	var rolling_min := INF
 	var rolling_max := -INF
 	var rolling_samples := 0
@@ -158,10 +158,9 @@ func run() -> void:
 			rolling_max = maxf(rolling_max, rolling_h)
 			rolling_samples += 1
 	var rolling_relief := rolling_max - rolling_min
-	_check(Gen.BASE_RELIEF_AMPLITUDE >= 10.0 \
-		and Gen.ROLLING_HILL_AMPLITUDE >= 7.5 \
-		and rolling_samples > 80 and rolling_relief >= 18.0,
-		"ordinary jungle now has broad, deterministic rolling hills",
+	_check(rolling_samples > 80 and rolling_relief >= 0.25 \
+		and rolling_relief <= 8.0,
+		"home jungle stays mostly flat with gentle natural ground variation",
 		"relief=%.2fm samples=%d" % [rolling_relief, rolling_samples])
 
 	var arena_a: Dictionary = Gen.arena_layout()

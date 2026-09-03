@@ -13,12 +13,48 @@ static var _stratos_far_fade := Gen.VIEW_BASE_DISTANCE
 static var _spring_amount := 0.0
 static var _autumn_amount := 0.0
 static var _snow_amount := 0.0
+static var _cinematic_curve_focus := Vector2.ZERO
+static var _cinematic_curve_surface_y := 0.0
+static var _cinematic_curve_radius := 12_000_000.0
+static var _cinematic_curve_strength := 0.0
+static var _cinematic_curve_cap_radius := 1_000_000_000.0
+static var _cinematic_render_surface := Vector3.ZERO
+static var _cinematic_render_radius := 12_000_000.0
+static var _cinematic_materials: Array[ShaderMaterial] = []
+const TERRAIN_MICRODETAIL: Texture2D = preload(
+	"res://assets/textures/satellite_microdetail_overlay.png")
+const TERRAIN_FLOOR_ALBEDO: Texture2D = preload(
+	"res://assets/textures/jungle_floor_albedo.png")
+const EARTH_CINEMATIC_ATLAS: Texture2D = preload(
+	"res://assets/textures/pangaea_earth_4k.jpg")
+## A complete 5x5 fine-water grid guarantees 96 m from a player standing at
+## a chunk edge. Coarse water must already own every pixel at that boundary.
+const WATER_HANDOFF_BAND := 16.0
+const WATER_HANDOFF_DISTANCE := Gen.CHUNK * Gen.VIEW_R - WATER_HANDOFF_BAND
+
+const CINEMATIC_CURVE_UNIFORMS := [
+	"cinematic_curve_focus_xz", "cinematic_curve_surface_y",
+	"cinematic_curve_radius", "cinematic_curve_strength",
+	"cinematic_curve_cap_radius", "cinematic_render_surface",
+	"cinematic_render_radius",
+]
 
 const GROUND_SHADER := """
 shader_type spatial;
 render_mode diffuse_burley, specular_schlick_ggx;
 
 uniform float snow_amount : hint_range(0.0, 1.0) = 0.0;
+uniform vec2 cinematic_curve_focus_xz = vec2(0.0);
+uniform float cinematic_curve_surface_y = 0.0;
+uniform float cinematic_curve_radius = 12000000.0;
+uniform float cinematic_curve_strength : hint_range(0.0, 1.0) = 0.0;
+uniform float cinematic_curve_cap_radius = 1000000000.0;
+uniform vec3 cinematic_render_surface = vec3(0.0);
+uniform float cinematic_render_radius = 12000000.0;
+uniform sampler2D terrain_microdetail : source_color, repeat_enable,
+	filter_linear_mipmap_anisotropic;
+uniform sampler2D terrain_floor_albedo : source_color, repeat_enable,
+	filter_linear_mipmap_anisotropic;
 varying vec3 world_pos;
 varying vec3 world_normal;
 varying vec4 vertex_tint;
@@ -29,22 +65,85 @@ float hash21(vec2 p) {
 	return fract(p.x * p.y);
 }
 
+vec3 curved_planet_position(vec3 flat_position) {
+	float physical_radius = max(cinematic_curve_radius, 1.0);
+	float render_radius = max(cinematic_render_radius, 0.001);
+	vec2 offset = flat_position.xz - cinematic_curve_focus_xz;
+	float planar_distance = length(offset);
+	vec2 direction = planar_distance > 0.0001
+		? offset / planar_distance : vec2(1.0, 0.0);
+	float angle = min(planar_distance / physical_radius, 3.135);
+	vec3 centre = cinematic_render_surface - vec3(0.0, render_radius, 0.0);
+	vec3 radial = vec3(direction.x * sin(angle), cos(angle),
+		direction.y * sin(angle));
+	float render_height = (flat_position.y - cinematic_curve_surface_y)
+		* render_radius / physical_radius;
+	vec3 curved = cinematic_render_surface + vec3(
+		radial.x * (render_radius + render_height),
+		-2.0 * pow(sin(angle * 0.5), 2.0) * render_radius
+			+ radial.y * render_height,
+		radial.z * (render_radius + render_height));
+	return mix(flat_position, curved, cinematic_curve_strength);
+}
+
 void vertex() {
-	world_pos = (MODEL_MATRIX * vec4(VERTEX, 1.0)).xyz;
+	vec3 flat_position = (MODEL_MATRIX * vec4(VERTEX, 1.0)).xyz;
+	world_pos = flat_position;
 	world_normal = normalize(MODEL_NORMAL_MATRIX * NORMAL);
 	vertex_tint = COLOR;
+	// POSITION is written by the cinematic branch, so the ordinary branch must
+	// explicitly provide its normal clip-space position too. Leaving it unset
+	// collapsed every gameplay terrain vertex and exposed the sky's cyan nadir.
+	POSITION = PROJECTION_MATRIX * VIEW_MATRIX * vec4(flat_position, 1.0);
+	if (cinematic_curve_strength > 0.0001) {
+		// The trigonometric life-size curvature path is cinematic-only. Keeping
+		// it inside this branch restores the ordinary streamed-world fast path.
+		vec3 curved_position = curved_planet_position(flat_position);
+		vec3 centre = cinematic_render_surface
+			- vec3(0.0, cinematic_render_radius, 0.0);
+		vec3 radial_normal = normalize(curved_position - centre);
+		world_normal = normalize(mix(world_normal, radial_normal,
+			cinematic_curve_strength));
+		POSITION = PROJECTION_MATRIX * VIEW_MATRIX * vec4(curved_position, 1.0);
+	}
 }
 
 void fragment() {
+	if (cinematic_curve_strength > 0.0001) {
+		if (distance(world_pos.xz, cinematic_curve_focus_xz)
+				> cinematic_curve_cap_radius) { discard; }
+	}
 	float broad = hash21(floor(world_pos.xz * 0.18));
 	float fine = hash21(floor(world_pos.xz * 1.4));
+	// Preserve metre-scale breakup in gameplay, but widen the same mipmapped
+	// field during the orbital shot so it remains visible across kilometres
+	// instead of averaging into one beige value. No extra texture lookup.
+	float detail_world_scale = mix(512.0, 16384.0,
+		cinematic_curve_strength);
+	float mapped_detail = texture(terrain_microdetail,
+		world_pos.xz / detail_world_scale).r;
+	// One shared, mipmapped albedo lookup replaces the old flat biome colour at
+	// walking distance with real leaf litter, roots, pebbles and damp soil. It is
+	// deliberately disabled for the orbital curvature path, whose 4K atlas owns
+	// the kilometre-scale appearance. This adds no material instances or draws.
+	vec3 floor_albedo = texture(terrain_floor_albedo,
+		world_pos.xz / 36.0).rgb;
+	float floor_luma = dot(floor_albedo, vec3(0.2126, 0.7152, 0.0722));
 	float slope = 1.0 - clamp(world_normal.y, 0.0, 1.0);
-	float mottled = mix(0.82, 1.13, broad) * mix(0.93, 1.06, fine);
+	float mottled = mix(0.82, 1.13, broad) * mix(0.93, 1.06, fine)
+		* mix(mix(0.88, 0.68, cinematic_curve_strength),
+			mix(1.12, 1.34, cinematic_curve_strength), mapped_detail);
 	vec3 earth = vec3(0.20, 0.14, 0.075);
 	vec3 base = vertex_tint.rgb * mottled * 0.66;
 	base = mix(base, earth, slope * 0.28);
 	float damp = smoothstep(0.75, 0.2, world_pos.y);
-	vec3 ground = mix(base, base * vec3(0.58, 0.72, 0.68), damp * 0.35);
+	vec3 ground = mix(base, base * vec3(0.66, 0.72, 0.54), damp * 0.24);
+	vec3 biome_material_tint = mix(vec3(0.92),
+		clamp(vertex_tint.rgb * 2.7, vec3(0.42), vec3(1.18)), 0.42);
+	vec3 textured_floor = floor_albedo * 1.52 * biome_material_tint;
+	float floor_weight = (1.0 - cinematic_curve_strength)
+		* mix(0.52, 0.30, slope);
+	ground = mix(ground, textured_floor, floor_weight);
 	// Let soil texture and broad terrain variation remain legible below the
 	// accumulation.  Fully replacing the ground with a flat near-white made
 	// winter hills clip into one featureless value under the noon sun.
@@ -57,9 +156,11 @@ void fragment() {
 	vec3 snow_color = vec3(0.70, 0.77, 0.82)
 		* mix(0.88, 1.08, broad) * mix(0.94, 1.03, fine);
 	ALBEDO = mix(ground, snow_color, snow);
-	ROUGHNESS = mix(mix(0.96, 0.72, damp), 0.62, snow);
+	ROUGHNESS = mix(mix(0.98, 0.72, damp), 0.62, snow)
+		- mapped_detail * (1.0 - snow) * 0.06
+		+ (0.5 - floor_luma) * floor_weight * 0.10;
 	SPECULAR = 0.18;
-	AO = 0.78 + fine * 0.18;
+	AO = 0.76 + fine * 0.14 + mapped_detail * 0.08;
 	RIM = 0.08;
 	RIM_TINT = 0.55;
 }
@@ -155,9 +256,8 @@ void fragment() {
 	ROUGHNESS = 0.88;
 	SPECULAR = 0.24;
 	AO = mix(0.72, 1.0, upper);
-	RIM = 0.34;
+	RIM = 0.12;
 	RIM_TINT = 0.58;
-	EMISSION = leaf_color * pow(1.0 - max(dot(NORMAL, VIEW), 0.0), 3.0) * 0.028;
 }
 """
 
@@ -207,9 +307,8 @@ void fragment() {
 	ROUGHNESS = 0.89;
 	SPECULAR = 0.22;
 	AO = 0.82;
-	RIM = 0.32;
+	RIM = 0.10;
 	RIM_TINT = 0.58;
-	EMISSION = leaf_color * pow(1.0 - max(dot(NORMAL, VIEW), 0.0), 3.0) * 0.024;
 }
 """
 
@@ -223,6 +322,17 @@ uniform float fade_band = 18.0;
 uniform float far_fade = 600.0;
 uniform float far_fade_band = 96.0;
 uniform float snow_amount : hint_range(0.0, 1.0) = 0.0;
+uniform vec2 cinematic_curve_focus_xz = vec2(0.0);
+uniform float cinematic_curve_surface_y = 0.0;
+uniform float cinematic_curve_radius = 12000000.0;
+uniform float cinematic_curve_strength : hint_range(0.0, 1.0) = 0.0;
+uniform float cinematic_curve_cap_radius = 1000000000.0;
+uniform vec3 cinematic_render_surface = vec3(0.0);
+uniform float cinematic_render_radius = 12000000.0;
+uniform sampler2D terrain_microdetail : source_color, repeat_enable,
+	filter_linear_mipmap_anisotropic;
+uniform sampler2D earth_cinematic_atlas : source_color,
+	filter_linear_mipmap_anisotropic;
 varying vec3 world_pos;
 varying vec4 vertex_tint;
 
@@ -232,12 +342,43 @@ float hash21(vec2 p) {
 	return fract(p.x * p.y);
 }
 
+vec3 curved_planet_position(vec3 flat_position) {
+	float physical_radius = max(cinematic_curve_radius, 1.0);
+	float render_radius = max(cinematic_render_radius, 0.001);
+	vec2 offset = flat_position.xz - cinematic_curve_focus_xz;
+	float planar_distance = length(offset);
+	vec2 direction = planar_distance > 0.0001
+		? offset / planar_distance : vec2(1.0, 0.0);
+	float angle = min(planar_distance / physical_radius, 3.135);
+	vec3 centre = cinematic_render_surface - vec3(0.0, render_radius, 0.0);
+	vec3 radial = vec3(direction.x * sin(angle), cos(angle),
+		direction.y * sin(angle));
+	float render_height = (flat_position.y - cinematic_curve_surface_y)
+		* render_radius / physical_radius;
+	return mix(flat_position, cinematic_render_surface + vec3(
+		radial.x * (render_radius + render_height),
+		-2.0 * pow(sin(angle * 0.5), 2.0) * render_radius
+			+ radial.y * render_height,
+		radial.z * (render_radius + render_height)),
+		cinematic_curve_strength);
+}
+
 void vertex() {
-	world_pos = (MODEL_MATRIX * vec4(VERTEX, 1.0)).xyz;
+	vec3 flat_position = (MODEL_MATRIX * vec4(VERTEX, 1.0)).xyz;
+	world_pos = flat_position;
 	vertex_tint = COLOR;
+	POSITION = PROJECTION_MATRIX * VIEW_MATRIX * vec4(flat_position, 1.0);
+	if (cinematic_curve_strength > 0.0001) {
+		POSITION = PROJECTION_MATRIX * VIEW_MATRIX
+			* vec4(curved_planet_position(flat_position), 1.0);
+	}
 }
 
 void fragment() {
+	if (cinematic_curve_strength > 0.0001) {
+		if (distance(world_pos.xz, cinematic_curve_focus_xz)
+				> cinematic_curve_cap_radius) { discard; }
+	}
 	float distance_to_focus = distance(world_pos.xz, focus_xz);
 	float coverage = near_fade <= 0.0 ? 1.0 : smoothstep(
 		near_fade - fade_band, near_fade + fade_band, distance_to_focus);
@@ -246,16 +387,36 @@ void fragment() {
 	float outgoing = smoothstep(far_fade - far_fade_band,
 		far_fade + far_fade_band, distance_to_focus);
 	if (cell_hash <= outgoing) { discard; }
-	vec3 ground = vertex_tint.rgb * 0.84;
+	float detail_world_scale = mix(1024.0, 16384.0,
+		cinematic_curve_strength);
+	float mapped_detail = texture(terrain_microdetail,
+		world_pos.xz / detail_world_scale).r;
+	vec3 ground = vertex_tint.rgb * mix(0.76, 0.92, mapped_detail);
 	float snow_noise = hash21(floor(world_pos.xz * 0.12));
 	float alt_snow = smoothstep(3000.0, 4300.0, world_pos.y);
 	float snow = max(snow_amount, alt_snow) * mix(0.68, 0.90, snow_noise);
 	vec3 snow_color = vec3(0.68, 0.75, 0.81)
 		* mix(0.90, 1.07, snow_noise);
 	ALBEDO = mix(ground, snow_color, snow);
-	ROUGHNESS = 0.98;
+	if (cinematic_curve_strength > 0.0001) {
+		float physical_radius = max(cinematic_curve_radius, 1.0);
+		vec2 offset = world_pos.xz - cinematic_curve_focus_xz;
+		float planar_distance = length(offset);
+		vec2 direction = planar_distance > 0.0001
+			? offset / planar_distance : vec2(1.0, 0.0);
+		float angle = min(planar_distance / physical_radius, 3.135);
+		vec3 radial = vec3(direction.x * sin(angle), cos(angle),
+			direction.y * sin(angle));
+		vec3 atlas_direction = vec3(radial.x, radial.z, -radial.y);
+		vec2 atlas_uv = vec2(fract(0.88 + atan(atlas_direction.z,
+			atlas_direction.x) / 6.28318530718),
+			acos(clamp(atlas_direction.y, -1.0, 1.0)) / 3.14159265359);
+		vec3 atlas_colour = texture(earth_cinematic_atlas, atlas_uv).rgb;
+		ALBEDO = atlas_colour * mix(0.72, 1.28, mapped_detail);
+	}
+	ROUGHNESS = mix(0.99, 0.91, mapped_detail);
 	SPECULAR = 0.10;
-	AO = 0.88;
+	AO = mix(0.82, 0.94, mapped_detail);
 }
 """
 
@@ -269,6 +430,17 @@ uniform float fade_band = 220.0;
 uniform float far_fade = 24140.0;
 uniform float far_fade_band = 420.0;
 uniform float snow_amount : hint_range(0.0, 1.0) = 0.0;
+uniform vec2 cinematic_curve_focus_xz = vec2(0.0);
+uniform float cinematic_curve_surface_y = 0.0;
+uniform float cinematic_curve_radius = 12000000.0;
+uniform float cinematic_curve_strength : hint_range(0.0, 1.0) = 0.0;
+uniform float cinematic_curve_cap_radius = 1000000000.0;
+uniform vec3 cinematic_render_surface = vec3(0.0);
+uniform float cinematic_render_radius = 12000000.0;
+uniform sampler2D terrain_microdetail : source_color, repeat_enable,
+	filter_linear_mipmap_anisotropic;
+uniform sampler2D earth_cinematic_atlas : source_color,
+	filter_linear_mipmap_anisotropic;
 varying vec3 world_pos;
 varying vec4 vertex_tint;
 
@@ -278,12 +450,43 @@ float hash21(vec2 p) {
 	return fract(p.x * p.y);
 }
 
+vec3 curved_planet_position(vec3 flat_position) {
+	float physical_radius = max(cinematic_curve_radius, 1.0);
+	float render_radius = max(cinematic_render_radius, 0.001);
+	vec2 offset = flat_position.xz - cinematic_curve_focus_xz;
+	float planar_distance = length(offset);
+	vec2 direction = planar_distance > 0.0001
+		? offset / planar_distance : vec2(1.0, 0.0);
+	float angle = min(planar_distance / physical_radius, 3.135);
+	vec3 centre = cinematic_render_surface - vec3(0.0, render_radius, 0.0);
+	vec3 radial = vec3(direction.x * sin(angle), cos(angle),
+		direction.y * sin(angle));
+	float render_height = (flat_position.y - cinematic_curve_surface_y)
+		* render_radius / physical_radius;
+	return mix(flat_position, cinematic_render_surface + vec3(
+		radial.x * (render_radius + render_height),
+		-2.0 * pow(sin(angle * 0.5), 2.0) * render_radius
+			+ radial.y * render_height,
+		radial.z * (render_radius + render_height)),
+		cinematic_curve_strength);
+}
+
 void vertex() {
-	world_pos = (MODEL_MATRIX * vec4(VERTEX, 1.0)).xyz;
+	vec3 flat_position = (MODEL_MATRIX * vec4(VERTEX, 1.0)).xyz;
+	world_pos = flat_position;
 	vertex_tint = COLOR;
+	POSITION = PROJECTION_MATRIX * VIEW_MATRIX * vec4(flat_position, 1.0);
+	if (cinematic_curve_strength > 0.0001) {
+		POSITION = PROJECTION_MATRIX * VIEW_MATRIX
+			* vec4(curved_planet_position(flat_position), 1.0);
+	}
 }
 
 void fragment() {
+	if (cinematic_curve_strength > 0.0001) {
+		if (distance(world_pos.xz, cinematic_curve_focus_xz)
+				> cinematic_curve_cap_radius) { discard; }
+	}
 	float distance_to_focus = distance(world_pos.xz, focus_xz);
 	float coverage = near_fade <= 0.0 ? 1.0 : smoothstep(
 		near_fade - fade_band, near_fade + fade_band, distance_to_focus);
@@ -302,7 +505,11 @@ void fragment() {
 	float broad = hash21(floor(world_pos.xz / 190.0));
 	float crown = hash21(floor(world_pos.xz / 64.0));
 	float canopy_light = mix(0.72, 1.10, broad) * mix(0.88, 1.08, crown);
-	vec3 ground = vertex_tint.rgb * 0.84;
+	float detail_world_scale = mix(4096.0, 16384.0,
+		cinematic_curve_strength);
+	float mapped_detail = texture(terrain_microdetail,
+		world_pos.xz / detail_world_scale).r;
+	vec3 ground = vertex_tint.rgb * mix(0.76, 0.92, mapped_detail);
 	vec3 forest = vertex_tint.rgb * canopy_light;
 	vec3 shaded = mix(ground, forest, canopy * 0.82);
 
@@ -311,9 +518,30 @@ void fragment() {
 	float snow = max(snow_amount, alt_snow) * mix(0.68, 0.90, snow_noise);
 	vec3 snow_color = vec3(0.68, 0.75, 0.81) * mix(0.90, 1.07, snow_noise);
 	ALBEDO = mix(shaded, snow_color, snow);
-	ROUGHNESS = mix(0.98, 0.91, canopy);
+	if (cinematic_curve_strength > 0.0001) {
+		float physical_radius = max(cinematic_curve_radius, 1.0);
+		vec2 offset = world_pos.xz - cinematic_curve_focus_xz;
+		float planar_distance = length(offset);
+		vec2 direction = planar_distance > 0.0001
+			? offset / planar_distance : vec2(1.0, 0.0);
+		float angle = min(planar_distance / physical_radius, 3.135);
+		vec3 radial = vec3(direction.x * sin(angle), cos(angle),
+			direction.y * sin(angle));
+		// Earth globe is rotated +90 degrees about X, so project the retained
+		// stratos cap through the exact inverse orientation into the same atlas.
+		vec3 atlas_direction = vec3(radial.x, radial.z, -radial.y);
+		vec2 atlas_uv = vec2(fract(0.88 + atan(atlas_direction.z,
+			atlas_direction.x) / 6.28318530718),
+			acos(clamp(atlas_direction.y, -1.0, 1.0)) / 3.14159265359);
+		vec3 atlas_colour = texture(earth_cinematic_atlas, atlas_uv).rgb;
+		// At life-size scale the 4K atlas spans several kilometres per texel.
+		// Broad mipmapped microdetail preserves continents/coastlines while giving
+		// the atmosphere-exit shot readable terrain instead of solid colour bands.
+		ALBEDO = atlas_colour * mix(0.72, 1.28, mapped_detail);
+	}
+	ROUGHNESS = mix(0.99, 0.91, canopy) - mapped_detail * 0.035;
 	SPECULAR = mix(0.10, 0.13, canopy);
-	AO = mix(0.88, 0.78, canopy);
+	AO = mix(0.88, 0.78, canopy) * mix(0.92, 1.03, mapped_detail);
 }
 """
 
@@ -377,6 +605,15 @@ uniform float near_fade = 108.0;
 uniform float fade_band = 16.0;
 uniform float far_fade = 600.0;
 uniform float far_fade_band = 96.0;
+uniform vec2 cinematic_curve_focus_xz = vec2(0.0);
+uniform float cinematic_curve_surface_y = 0.0;
+uniform float cinematic_curve_radius = 12000000.0;
+uniform float cinematic_curve_strength : hint_range(0.0, 1.0) = 0.0;
+uniform float cinematic_curve_cap_radius = 1000000000.0;
+uniform vec3 cinematic_render_surface = vec3(0.0);
+uniform float cinematic_render_radius = 12000000.0;
+uniform sampler2D water_microdetail : source_color, repeat_enable,
+	filter_linear_mipmap_anisotropic;
 varying vec3 world_pos;
 
 float hash21(vec2 p) {
@@ -385,14 +622,46 @@ float hash21(vec2 p) {
 	return fract(p.x * p.y);
 }
 
+vec3 curved_planet_position(vec3 flat_position) {
+	float physical_radius = max(cinematic_curve_radius, 1.0);
+	float render_radius = max(cinematic_render_radius, 0.001);
+	vec2 offset = flat_position.xz - cinematic_curve_focus_xz;
+	float planar_distance = length(offset);
+	vec2 direction = planar_distance > 0.0001
+		? offset / planar_distance : vec2(1.0, 0.0);
+	float angle = min(planar_distance / physical_radius, 3.135);
+	vec3 centre = cinematic_render_surface - vec3(0.0, render_radius, 0.0);
+	vec3 radial = vec3(direction.x * sin(angle), cos(angle),
+		direction.y * sin(angle));
+	float render_height = (flat_position.y - cinematic_curve_surface_y)
+		* render_radius / physical_radius;
+	return mix(flat_position, cinematic_render_surface + vec3(
+		radial.x * (render_radius + render_height),
+		-2.0 * pow(sin(angle * 0.5), 2.0) * render_radius
+			+ radial.y * render_height,
+		radial.z * (render_radius + render_height)),
+		cinematic_curve_strength);
+}
+
 void vertex() {
 	vec3 wp = (MODEL_MATRIX * vec4(VERTEX, 1.0)).xyz;
 	VERTEX.y += sin(wp.x * 0.055 + TIME * 0.62) * 0.055;
 	VERTEX.y += sin(wp.z * 0.071 - TIME * 0.47) * 0.035;
 	world_pos = (MODEL_MATRIX * vec4(VERTEX, 1.0)).xyz;
+	// Match the land projection only during the departure shot. The explicit
+	// ordinary position preserves the existing animated-water fast path.
+	POSITION = PROJECTION_MATRIX * VIEW_MATRIX * vec4(world_pos, 1.0);
+	if (cinematic_curve_strength > 0.0001) {
+		POSITION = PROJECTION_MATRIX * VIEW_MATRIX
+			* vec4(curved_planet_position(world_pos), 1.0);
+	}
 }
 
 void fragment() {
+	if (cinematic_curve_strength > 0.0001) {
+		if (distance(world_pos.xz, cinematic_curve_focus_xz)
+				> cinematic_curve_cap_radius) { discard; }
+	}
 	float distance_to_focus = distance(world_pos.xz, focus_xz);
 	float coverage = near_fade <= 0.0 ? 1.0 : smoothstep(
 		near_fade - fade_band, near_fade + fade_band, distance_to_focus);
@@ -404,8 +673,16 @@ void fragment() {
 		far_fade + far_fade_band, distance_to_focus);
 	if (cell_hash <= outgoing) { discard; }
 	float ripple = sin(world_pos.x * 0.08 + world_pos.z * 0.05 + TIME) * 0.5 + 0.5;
-	ALBEDO = mix(vec3(0.035, 0.24, 0.24), vec3(0.065, 0.42, 0.36), ripple * 0.18);
-	ROUGHNESS = 0.48;
+	// One broad, mip-filtered sample keeps the horizon alive without adding
+	// geometry or the near-water shader's second crossed detail fetch.
+	vec2 detail_uv = world_pos.xz * 0.006
+		+ vec2(TIME * 0.003, -TIME * 0.002);
+	float mapped_detail = texture(water_microdetail, detail_uv).r;
+	float foam_fleck = smoothstep(0.64, 0.94, mapped_detail);
+	vec3 water = mix(vec3(0.035, 0.24, 0.24),
+		vec3(0.065, 0.42, 0.36), ripple * 0.18);
+	ALBEDO = mix(water, vec3(0.20, 0.62, 0.53), foam_fleck * 0.07);
+	ROUGHNESS = mix(0.50, 0.43, mapped_detail);
 	SPECULAR = 0.62;
 }
 """
@@ -486,30 +763,44 @@ uniform vec3 deep_color : source_color = vec3(0.008, 0.105, 0.18);
 uniform vec3 foam_color : source_color = vec3(0.72, 0.96, 0.88);
 uniform sampler2D screen_texture : hint_screen_texture, repeat_disable, filter_linear_mipmap;
 uniform sampler2D depth_texture : hint_depth_texture, repeat_disable, filter_nearest;
+uniform sampler2D water_microdetail : source_color, repeat_enable,
+	filter_linear_mipmap_anisotropic;
+uniform vec2 cinematic_curve_focus_xz = vec2(0.0);
+uniform float cinematic_curve_surface_y = 0.0;
+uniform float cinematic_curve_radius = 12000000.0;
+uniform float cinematic_curve_strength : hint_range(0.0, 1.0) = 0.0;
+uniform float cinematic_curve_cap_radius = 1000000000.0;
+uniform vec3 cinematic_render_surface = vec3(0.0);
+uniform float cinematic_render_radius = 12000000.0;
 // (world x, world z, current radius, fading strength), supplied by WaterFX.
 uniform vec4 ripple_data[MAX_RIPPLES];
 uniform int ripple_count = 0;
 
 varying vec3 world_pos;
 varying vec3 world_normal;
+varying vec3 rendered_view_position;
 varying float wave_height;
 varying float ripple_crest;
 
-float hash21(vec2 p) {
-	p = fract(p * vec2(123.34, 456.21));
-	p += dot(p, p + 45.32);
-	return fract(p.x * p.y);
-}
-
-float value_noise(vec2 p) {
-	vec2 cell = floor(p);
-	vec2 f = fract(p);
-	f = f * f * (3.0 - 2.0 * f);
-	float a = hash21(cell);
-	float b = hash21(cell + vec2(1.0, 0.0));
-	float c = hash21(cell + vec2(0.0, 1.0));
-	float d = hash21(cell + vec2(1.0, 1.0));
-	return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+vec3 curved_planet_position(vec3 flat_position) {
+	float physical_radius = max(cinematic_curve_radius, 1.0);
+	float render_radius = max(cinematic_render_radius, 0.001);
+	vec2 offset = flat_position.xz - cinematic_curve_focus_xz;
+	float planar_distance = length(offset);
+	vec2 direction = planar_distance > 0.0001
+		? offset / planar_distance : vec2(1.0, 0.0);
+	float angle = min(planar_distance / physical_radius, 3.135);
+	vec3 centre = cinematic_render_surface - vec3(0.0, render_radius, 0.0);
+	vec3 radial = vec3(direction.x * sin(angle), cos(angle),
+		direction.y * sin(angle));
+	float render_height = (flat_position.y - cinematic_curve_surface_y)
+		* render_radius / physical_radius;
+	return mix(flat_position, cinematic_render_surface + vec3(
+		radial.x * (render_radius + render_height),
+		-2.0 * pow(sin(angle * 0.5), 2.0) * render_radius
+			+ radial.y * render_height,
+		radial.z * (render_radius + render_height)),
+		cinematic_curve_strength);
 }
 
 void vertex() {
@@ -557,40 +848,65 @@ void vertex() {
 	world_pos = wp + vec3(0.0, height, 0.0);
 	world_normal = normalize(vec3(-slope_x, 1.0, -slope_z));
 	NORMAL = world_normal;
+	// Keep source coordinates for waves/UVs, but shade at the position that is
+	// actually rasterized. Overriding only POSITION left fragment VERTEX/VIEW at
+	// the uncurved water plane and produced false depth/foam bands during flight.
+	vec3 rendered_world_position = world_pos;
+	if (cinematic_curve_strength > 0.0001) {
+		rendered_world_position = curved_planet_position(world_pos);
+		// POSITION alone does not update Godot's fragment VERTEX/VIEW. Keep
+		// built-in fog, light attenuation and shadow coordinates on the same cap.
+		VERTEX = (inverse(MODEL_MATRIX) * vec4(rendered_world_position, 1.0)).xyz;
+	}
+	rendered_view_position = (VIEW_MATRIX * vec4(rendered_world_position, 1.0)).xyz;
+	POSITION = PROJECTION_MATRIX * vec4(rendered_view_position, 1.0);
 }
 
 void fragment() {
-	// Two crossing, scrolling detail fields break up the broad waves without an
-	// imported normal texture. Transform the resulting world normal into view
-	// space so highlights remain stable as the camera turns.
-	vec2 detail_uv_a = world_pos.xz * 1.35 + vec2(TIME * 0.11, -TIME * 0.08);
-	vec2 detail_uv_b = world_pos.zx * 2.70 + vec2(-TIME * 0.15, TIME * 0.12);
-	float detail_a = value_noise(detail_uv_a);
-	float detail_b = value_noise(detail_uv_b);
-	float micro_x = sin(detail_uv_a.x * 2.7 + detail_b * 3.0) * 0.040;
-	float micro_z = cos(detail_uv_b.y * 2.3 + detail_a * 3.4) * 0.040;
-	vec3 detailed_world_normal = normalize(world_normal + vec3(micro_x, 0.0, micro_z));
+	if (cinematic_curve_strength > 0.0001) {
+		if (distance(world_pos.xz, cinematic_curve_focus_xz)
+				> cinematic_curve_cap_radius) { discard; }
+	}
+	// Two crossed samples reuse the shared mipmapped satellite detail as a
+	// subtle moving slope field. Mip filtering keeps it quiet at grazing angles.
+	vec2 detail_uv_a = world_pos.xz * 0.035
+		+ vec2(TIME * 0.012, -TIME * 0.009);
+	vec2 detail_uv_b = world_pos.zx * 0.070
+		+ vec2(-TIME * 0.018, TIME * 0.014);
+	float detail_a = texture(water_microdetail, detail_uv_a).r;
+	float detail_b = texture(water_microdetail, detail_uv_b).r;
+	float mapped_detail = detail_a * 0.62 + detail_b * 0.38;
+	vec2 micro_slope = vec2(0.80, 0.60) * (detail_a - 0.5)
+		+ vec2(-0.66, 0.75) * (detail_b - 0.5);
+	vec3 detailed_world_normal = normalize(world_normal
+		+ vec3(micro_slope.x, 0.0, micro_slope.y) * 0.055);
 	NORMAL = normalize((VIEW_MATRIX * vec4(detailed_world_normal, 0.0)).xyz);
 
 	float raw_depth = textureLod(depth_texture, SCREEN_UV, 0.0).r;
 	vec3 ndc = vec3(SCREEN_UV * 2.0 - 1.0, raw_depth);
 	vec4 scene_view = INV_PROJECTION_MATRIX * vec4(ndc, 1.0);
-	scene_view.xyz /= max(scene_view.w, 0.0001);
-	float water_depth = max((-scene_view.z) - (-VERTEX.z), 0.0);
+	// The voyage camera sees 100 km. A 1e-4 floor clipped reconstructed depth
+	// at 10 km and produced a straight false-shallow-water contour in the cap.
+	scene_view.xyz /= max(scene_view.w, 0.00000001);
+	float water_depth = max((-scene_view.z) - (-rendered_view_position.z), 0.0);
 	float absorption = 1.0 - exp(-water_depth * 0.42);
-	float fresnel = pow(1.0 - clamp(dot(NORMAL, VIEW), 0.0, 1.0), 4.0);
+	vec3 rendered_view_direction = normalize(-rendered_view_position);
+	float fresnel = pow(1.0 - clamp(dot(NORMAL, rendered_view_direction), 0.0, 1.0), 4.0);
 	vec2 refract_offset = detailed_world_normal.xz * 0.010
 		* clamp(water_depth * 0.75, 0.0, 1.0);
 	vec2 refract_uv = clamp(SCREEN_UV + refract_offset, vec2(0.002), vec2(0.998));
 	vec3 refracted = textureLod(screen_texture, refract_uv, 0.0).rgb;
 	vec3 water = mix(shallow_color, deep_color, clamp(absorption * 0.88, 0.0, 1.0));
-	float texture_variation = mix(0.91, 1.08, detail_a * 0.62 + detail_b * 0.38);
+	float texture_variation = mix(0.94, 1.05, mapped_detail);
 	water *= texture_variation;
 
 	float crest = smoothstep(0.52, 0.95, wave_height);
 	float shore = (1.0 - smoothstep(0.06, 0.72, water_depth))
-		* smoothstep(0.25, 0.72, detail_a + detail_b * 0.25);
-	float foam = clamp(crest * 0.26 + shore * 0.72 + ripple_crest * 0.48, 0.0, 1.0);
+		* smoothstep(0.42, 0.80, mapped_detail);
+	float foam_breakup = mix(0.76, 1.12,
+		smoothstep(0.38, 0.84, mapped_detail));
+	float foam = clamp((crest * 0.26 + shore * 0.72) * foam_breakup
+		+ ripple_crest * 0.48, 0.0, 1.0);
 	vec3 refracted_water = mix(refracted, water, 0.32 + absorption * 0.56);
 	ALBEDO = mix(refracted_water, foam_color, foam);
 	ALBEDO += shallow_color * fresnel * 0.34;
@@ -731,7 +1047,11 @@ static func _material(code: String, params := {}) -> ShaderMaterial:
 
 static func ground_material() -> ShaderMaterial:
 	if not _shared.has("ground"):
-		_shared.ground = _material(GROUND_SHADER, {"snow_amount": _snow_amount})
+		_shared.ground = _material(GROUND_SHADER, {
+			"snow_amount": _snow_amount,
+			"terrain_microdetail": TERRAIN_MICRODETAIL,
+			"terrain_floor_albedo": TERRAIN_FLOOR_ALBEDO,
+		})
 	return _shared.ground
 
 
@@ -749,7 +1069,8 @@ static func grass_material() -> ShaderMaterial:
 
 static func water_material() -> ShaderMaterial:
 	if not _shared.has("water"):
-		_shared.water = _material(WATER_SHADER)
+		_shared.water = _material(WATER_SHADER,
+			{"water_microdetail": TERRAIN_MICRODETAIL})
 	return _shared.water
 
 
@@ -813,7 +1134,9 @@ static func far_ground_material() -> ShaderMaterial:
 				"fade_band": 18.0,
 				"far_fade": _skyline_near_fade,
 				"far_fade_band": 96.0,
-				"snow_amount": _snow_amount})
+				"snow_amount": _snow_amount,
+				"terrain_microdetail": TERRAIN_MICRODETAIL,
+				"earth_cinematic_atlas": EARTH_CINEMATIC_ATLAS})
 	return _shared.far_ground
 
 
@@ -826,7 +1149,9 @@ static func stratos_ground_material() -> ShaderMaterial:
 				"fade_band": 220.0,
 				"far_fade": _stratos_far_fade,
 				"far_fade_band": 420.0,
-				"snow_amount": _snow_amount})
+				"snow_amount": _snow_amount,
+				"terrain_microdetail": TERRAIN_MICRODETAIL,
+				"earth_cinematic_atlas": EARTH_CINEMATIC_ATLAS})
 	return _shared.stratos_ground
 
 
@@ -840,7 +1165,9 @@ static func skyline_ground_material() -> ShaderMaterial:
 				"fade_band": 96.0,
 				"far_fade": _stratos_near_fade,
 				"far_fade_band": 220.0,
-				"snow_amount": _snow_amount})
+				"snow_amount": _snow_amount,
+				"terrain_microdetail": TERRAIN_MICRODETAIL,
+				"earth_cinematic_atlas": EARTH_CINEMATIC_ATLAS})
 	return _shared.skyline_ground
 
 
@@ -876,10 +1203,11 @@ static func skyline_jungle_material() -> ShaderMaterial:
 static func far_water_material() -> ShaderMaterial:
 	if not _shared.has("far_water"):
 		_shared.far_water = _material(FAR_WATER_SHADER,
-			{"near_fade": Gen.HORIZON_NEAR_FADE,
-				"fade_band": 16.0,
+			{"near_fade": WATER_HANDOFF_DISTANCE,
+				"fade_band": WATER_HANDOFF_BAND,
 				"far_fade": _skyline_near_fade,
-				"far_fade_band": 96.0})
+				"far_fade_band": 96.0,
+				"water_microdetail": TERRAIN_MICRODETAIL})
 	return _shared.far_water
 
 
@@ -889,7 +1217,8 @@ static func skyline_water_material() -> ShaderMaterial:
 			{"near_fade": _skyline_near_fade,
 				"fade_band": 96.0,
 				"far_fade": _stratos_near_fade,
-				"far_fade_band": 220.0})
+				"far_fade_band": 220.0,
+				"water_microdetail": TERRAIN_MICRODETAIL})
 	return _shared.skyline_water
 
 
@@ -975,6 +1304,112 @@ static func set_far_focus(position: Vector3) -> void:
 			far_water_material(), skyline_ground_material(), skyline_water_material(),
 			skyline_jungle_material(), stratos_ground_material()]:
 		material.set_shader_parameter("focus_xz", focus)
+
+
+## Render-only spherical projection used by the launch cinematic. Gameplay,
+## collision and deterministic terrain sampling stay on the stable tangent
+## chart; the shared terrain materials bend those same vertices around the
+## continuously opaque Earth while the cached chunks remain resident.
+static func set_cinematic_earth_curvature(focus_xz: Vector2,
+		surface_y: float, radius: float, strength: float,
+		cap_radius := 1_000_000_000.0,
+		render_surface := Vector3.ZERO, render_radius := -1.0) -> void:
+	var next_radius := maxf(radius, 1.0)
+	var next_strength := clampf(strength, 0.0, 1.0)
+	var next_cap_radius := maxf(float(cap_radius), 0.0)
+	var next_render_surface := Vector3(focus_xz.x, surface_y, focus_xz.y) \
+		if float(render_radius) <= 0.0 else Vector3(render_surface)
+	var next_render_radius := next_radius if float(render_radius) <= 0.0 \
+		else maxf(float(render_radius), 0.001)
+	# Resource imports and editor reloads can recreate one of these shared
+	# materials without changing the numeric cinematic pose. Reconcile live RIDs
+	# before the equality early-return, then force a one-time full uniform sync if
+	# any reference changed. Otherwise a warmed full flight can leave only that
+	# recreated tier flat while a direct-start preview appears correct.
+	var live_ground := ground_material()
+	var live_far_ground := far_ground_material()
+	var live_skyline_ground := skyline_ground_material()
+	var live_stratos_ground := stratos_ground_material()
+	var live_water := water_material()
+	var live_far_water := far_water_material()
+	var live_skyline_water := skyline_water_material()
+	var materials_changed := _cinematic_materials.size() != 7
+	if not materials_changed:
+		materials_changed = _cinematic_materials[0] != live_ground \
+			or _cinematic_materials[1] != live_far_ground \
+			or _cinematic_materials[2] != live_skyline_ground \
+			or _cinematic_materials[3] != live_stratos_ground \
+			or _cinematic_materials[4] != live_water \
+			or _cinematic_materials[5] != live_far_water \
+			or _cinematic_materials[6] != live_skyline_water
+	if materials_changed:
+		# Allocate this seven-reference list only when a resource actually changes,
+		# never on the ordinary per-frame cinematic update path.
+		_cinematic_materials.assign([live_ground, live_far_ground,
+			live_skyline_ground, live_stratos_ground, live_water,
+			live_far_water, live_skyline_water])
+	# The physical climb holds identical values for long stretches. Avoid a new
+	# set of 49 render-server uniform writes on every identical tick.
+	if not materials_changed \
+			and _cinematic_curve_focus.distance_squared_to(focus_xz) < 0.000001 \
+			and is_equal_approx(_cinematic_curve_surface_y, surface_y) \
+			and is_equal_approx(_cinematic_curve_radius, next_radius) \
+			and is_equal_approx(_cinematic_curve_strength, next_strength) \
+			and is_equal_approx(_cinematic_curve_cap_radius, next_cap_radius) \
+			and _cinematic_render_surface.distance_squared_to(
+				next_render_surface) < 0.000001 \
+			and is_equal_approx(_cinematic_render_radius, next_render_radius):
+		return
+	_cinematic_curve_focus = focus_xz
+	_cinematic_curve_surface_y = surface_y
+	_cinematic_curve_radius = next_radius
+	_cinematic_curve_strength = next_strength
+	_cinematic_curve_cap_radius = next_cap_radius
+	_cinematic_render_surface = next_render_surface
+	_cinematic_render_radius = next_render_radius
+	for material in _cinematic_materials:
+		material.set_shader_parameter("cinematic_curve_focus_xz", focus_xz)
+		material.set_shader_parameter("cinematic_curve_surface_y", surface_y)
+		material.set_shader_parameter("cinematic_curve_radius",
+			_cinematic_curve_radius)
+		material.set_shader_parameter("cinematic_curve_strength",
+			_cinematic_curve_strength)
+		material.set_shader_parameter("cinematic_curve_cap_radius",
+			_cinematic_curve_cap_radius)
+		material.set_shader_parameter("cinematic_render_surface",
+			_cinematic_render_surface)
+		material.set_shader_parameter("cinematic_render_radius",
+			_cinematic_render_radius)
+
+
+static func clear_cinematic_earth_curvature() -> void:
+	set_cinematic_earth_curvature(_cinematic_curve_focus,
+		_cinematic_curve_surface_y, _cinematic_curve_radius, 0.0,
+		1_000_000_000.0)
+
+
+## CPU twin for deterministic tests and camera/tangent diagnostics.
+static func cinematic_earth_surface_point(flat_world_position: Vector3) -> Vector3:
+	if _cinematic_curve_strength <= 0.0:
+		return flat_world_position
+	var offset := Vector2(flat_world_position.x,
+		flat_world_position.z) - _cinematic_curve_focus
+	var planar_distance := offset.length()
+	var direction := offset / planar_distance if planar_distance > 0.0001 \
+		else Vector2.RIGHT
+	var angle := minf(planar_distance / _cinematic_curve_radius, PI - 0.006)
+	var radial := Vector3(direction.x * sin(angle), cos(angle),
+		direction.y * sin(angle))
+	# Match the shader's scaled-space transform without subtracting two planet-
+	# sized Y coordinates. Float32 loses metre-scale terrain at Earth's radius.
+	var render_height := (flat_world_position.y - _cinematic_curve_surface_y) \
+		* _cinematic_render_radius / _cinematic_curve_radius
+	var curved := _cinematic_render_surface + Vector3(
+		radial.x * (_cinematic_render_radius + render_height),
+		-2.0 * pow(sin(angle * 0.5), 2.0) * _cinematic_render_radius \
+			+ radial.y * render_height,
+		radial.z * (_cinematic_render_radius + render_height))
+	return flat_world_position.lerp(curved, _cinematic_curve_strength)
 
 
 ## Season changes update the small set of shared materials in place. Existing
