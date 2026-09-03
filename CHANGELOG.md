@@ -1,11 +1,10 @@
 # TROOP changelog
 
-## 0.4.8 — SMOOTHER ONLINE JOINING
+## 0.4.9 — SMOOTHER ONLINE JOINING
 
-The 0.4.6 and 0.4.7 candidates were not published. The performance measurements
-below were collected with the 0.4.6 candidate. Version 0.4.8 retains that staged
-entry implementation and adds the peer-departure ordering fix and release-check
-diagnostic updates.
+The 0.4.6, 0.4.7, and 0.4.8 candidates were not published. The performance
+measurements below were collected with the 0.4.6 candidate. Version 0.4.9
+retains that staged entry implementation and the peer-departure ordering fix.
 
 ### Online loading and gameplay responsiveness
 
@@ -30,13 +29,18 @@ diagnostic updates.
 - The cached public-server repeat joined successfully in 4.4 seconds, but one
   382 ms frame missed the strict 250 ms responsiveness target. It did not
   reproduce the former multi-second repeat stall; smaller hitches remain possible.
+- Local join checks retain the strict 250 ms target. Release CI gives its
+  headless runner an explicit 400 ms ceiling and still reports every measured
+  gap exactly. That ceiling bounds CI scheduling variance; it is not a native
+  gameplay performance goal. The observed 382 ms native repeat is below this
+  bound but remains documented as a miss against the stricter target.
 
 ### Compatible automatic update
 
 - TROOP 0.4.5 downloads this signed content update automatically and activates
   it on restart; no engine upgrade or new installer is required for 0.4.5 users.
 - Multiplayer remains protocol **11**, but connection checks still require the
-  same game version: the public server and every classmate must run **0.4.8**.
+  same game version: the public server and every classmate must run **0.4.9**.
   Older installations still need the full installer to obtain updater bootstrap
   2 and protocol 11.
 

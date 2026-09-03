@@ -97,7 +97,7 @@ textures for readable globe and voyage views.
 
 ## What's new in 0.4 — ONE SMALL STEP
 
-Current source version: **0.4.8**, using **multiplayer protocol 11**.
+Current source version: **0.4.9**, using **multiplayer protocol 11**.
 Clients and server must use the same game version and multiplayer protocol.
 
 - **The generated wilderness is now a circumnavigable planet.** TROOP's
@@ -504,9 +504,9 @@ Bananas float along swing arcs; collect them for score (synced).
 
 For a quick download, setup, and connection checklist, see
 [Playing with classmates](docs/PLAY_WITH_CLASSMATES.md). The current release is
-**0.4.8 / protocol 11**. Version 0.4.5 can receive this content update
+**0.4.9 / protocol 11**. Version 0.4.5 can receive this content update
 automatically; earlier installations require the full installer. Restart after
-the update is ready and confirm **0.4.8** before joining the 0.4.8 server. All
+the update is ready and confirm **0.4.9** before joining the 0.4.9 server. All
 classmates must activate the same version, even though the protocol is unchanged.
 
 Worldwide multiplayer uses a headless ENet authority on UDP **30623**. Clients

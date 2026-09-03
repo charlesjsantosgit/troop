@@ -5,7 +5,7 @@ extends Node
 
 const JOIN_DEADLINE_SECONDS := 45.0
 const SETTLE_SECONDS := 8.0
-const MAX_JOIN_FRAME_MS := 250.0
+const DEFAULT_MAX_JOIN_FRAME_MS := 250.0
 
 var _sampling := false
 var _previous_usec := 0
@@ -62,6 +62,13 @@ func run(main: Node, args: PackedStringArray) -> void:
 	print("JOINENTRY_USERDIR " + OS.get_user_data_dir())
 	var address := str(args[0]) if not args.is_empty() else "127.0.0.1"
 	var port := int(args[1]) if args.size() > 1 else Net.PORT
+	var max_join_frame_ms := float(args[2]) if args.size() > 2 \
+		else DEFAULT_MAX_JOIN_FRAME_MS
+	if not is_finite(max_join_frame_ms) or max_join_frame_ms <= 0.0 \
+			or max_join_frame_ms > 1000.0:
+		push_error("JOINENTRYTEST requires a finite frame-gap limit in (0, 1000]")
+		get_tree().quit(1)
+		return
 	main._show_menu()
 	# Let the native window and connection UI present before starting the clock.
 	for frame in range(10):
@@ -94,8 +101,8 @@ func run(main: Node, args: PackedStringArray) -> void:
 	var settled_ready := _scene_ready(main, "settled") if entered else false
 	var all_max: float = _frame_ms.max() if not _frame_ms.is_empty() else 0.0
 	var passed: bool = entered and scene_ready and settled_ready and mouse_ready \
-		and join_max <= MAX_JOIN_FRAME_MS \
-		and all_max <= MAX_JOIN_FRAME_MS
+		and join_max <= max_join_frame_ms \
+		and all_max <= max_join_frame_ms
 	# Exercise the normal session teardown and flush deferred frees before the
 	# renderer exits. Quitting with the complete live world still attached can
 	# leave pending shader RIDs in the headless renderer's destruction queue.
@@ -110,9 +117,9 @@ func run(main: Node, args: PackedStringArray) -> void:
 		and Voice._world == null and not Voice._capture_active
 	print("JOIN_TEARDOWN ready=%s" % teardown_ready)
 	passed = passed and teardown_ready
-	print("JOINENTRYTEST %s entered=%s ready=%s mouse=%s entry_ms=%d join_max_ms=%.3f all_max_ms=%.3f frames=%d driver=%s" % [
+	print("JOINENTRYTEST %s entered=%s ready=%s mouse=%s entry_ms=%d join_max_ms=%.3f all_max_ms=%.3f limit_ms=%.3f frames=%d driver=%s" % [
 		"PASS" if passed else "FAIL", entered, scene_ready and settled_ready, mouse_ready, entry_ms, join_max, all_max,
-		_frame_ms.size(), RenderingServer.get_current_rendering_driver_name()])
+		max_join_frame_ms, _frame_ms.size(), RenderingServer.get_current_rendering_driver_name()])
 	get_tree().quit(0 if passed else 1)
 
 

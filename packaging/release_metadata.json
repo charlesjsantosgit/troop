@@ -2,7 +2,7 @@
   "godot_compatibility": "4.7",
   "minimum_bootstrap": 2,
   "network_protocol": 11,
-  "release_title": "TROOP 0.4.8 \u2014 SMOOTHER ONLINE JOINING",
-  "notes": "TROOP 0.4.8 fixes the major online-entry stalls with staged loading, shared graphics shaders and terrain collisions that no longer wait for GPU readbacks. Connections can be canceled and retried safely. Player-departure notifications and cleanup now handle roster updates and disconnects in either order. Existing 0.4.5 installations receive this compatible content update automatically and apply it on restart. A fresh graphics cache can still pause for several seconds while shaders compile, and smaller single-frame hitches remain possible afterward. Multiplayer remains protocol 11; the server and every player must activate version 0.4.8.",
+  "release_title": "TROOP 0.4.9 \u2014 SMOOTHER ONLINE JOINING",
+  "notes": "TROOP 0.4.9 fixes the major online-entry stalls with staged loading, shared graphics shaders and terrain collisions that no longer wait for GPU readbacks. Connections can be canceled and retried safely. Player-departure notifications and cleanup now handle roster updates and disconnects in either order. Existing 0.4.5 installations receive this compatible content update automatically and apply it on restart. A fresh graphics cache can still pause for several seconds while shaders compile, and smaller single-frame hitches remain possible afterward. Multiplayer remains protocol 11; the server and every player must activate version 0.4.9.",
   "requires_installer": false
 }
