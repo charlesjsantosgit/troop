@@ -17,8 +17,12 @@
   loading camera.
 - Tested repeat joins in the installed Mac release engine reached gameplay in
   about 3.4 seconds with a maximum measured frame gap of 215 ms. A completely
-  fresh graphics cache still produced a 2.4-second first-use sky shader pause;
+  fresh graphics cache produced a 2.4–4.5-second first-use sky shader pause in
+  local and public-server tests;
   this release does not eliminate every cold shader-compilation hitch.
+- The cached public-server repeat joined successfully in 4.4 seconds, but one
+  382 ms frame missed the strict 250 ms responsiveness target. It did not
+  reproduce the former multi-second repeat stall; smaller hitches remain possible.
 
 ### Compatible automatic update
 
