@@ -29,7 +29,8 @@ The macOS build includes Apple Silicon and Intel executables.
   same public world at `troop-public-canopy.fly.dev`; it is not a private class room.
 - The loading screen shows the current setup stage. **CANCEL CONNECTION** safely
   returns to the menu if you need to retry. A fresh graphics cache can still
-  cause a short first-use shader pause; subsequent joins reuse that cache.
+  cause a several-second first-use shader pause; subsequent joins reuse that cache,
+  although smaller single-frame hitches can still occur.
 - The dedicated server has a **24-player connection limit**. That is a configured
   cap, not a guarantee of performance with 24 players on every device or network.
 - Hold **T** to speak to nearby players; release it to stop. Voice is proximity
