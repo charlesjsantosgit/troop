@@ -27,10 +27,12 @@ class JoinEntryFailure(RuntimeError):
 def classify_client_errors(output: str, rendered: bool) -> tuple[list[str], list[str]]:
     """Keep real errors fatal; surface one narrowly identified dummy-driver warning.
 
-    Godot 4.7's dummy renderer reports two raw DummyShader RIDs after a complete
-    v0.4.5 join and normal teardown; the unchanged VehicleExhaust material alone
-    accounts for one. This is not allowed for a rendered client, during entry,
-    or with surviving ObjectDB/resources. The original line stays in the log.
+    Exact Godot 4.7's dummy renderer reports 1-3 raw DummyShader RIDs after
+    successful joins and teardown. Six create/free cycles of the unchanged
+    v0.4.5 VehicleExhaust also reproduce three, with no surviving materials;
+    the count varies with lifecycle/frame pacing. This is an observed range,
+    not an engine-wide bound. Never allow it for a rendered client, during
+    entry, or with surviving ObjectDB/resources. Keep the original line visible.
     """
     errors: list[str] = []
     warnings: list[str] = []
@@ -47,7 +49,7 @@ def classify_client_errors(output: str, rendered: bool) -> tuple[list[str], list
             errors.append(line)
         elif line.startswith("ERROR:"):
             known_shutdown_warning = re.fullmatch(
-                r"ERROR: [12] RID allocations of type "
+                r"ERROR: [123] RID allocations of type "
                 r"'N13RendererDummy15MaterialStorage11DummyShaderE' were leaked at exit\.", line
             )
             if not rendered and known_engine and completed and teardown and known_shutdown_warning:
@@ -321,8 +323,16 @@ class JoinEntryRun:
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             output = self.output(role)
-            if "JOINENTRYTEST FAIL " in output or "SCRIPT ERROR:" in output \
-                    or any(line.startswith("ERROR:") for line in output.splitlines()):
+            if role in self.client_roles:
+                # A buffered read can contain startup, PASS and shutdown at
+                # once. Apply the same strict client rules here and after exit
+                # so polling cadence cannot turn a known warning into failure.
+                errors, _warnings = classify_client_errors(output, self.rendered)
+            else:
+                errors = [line for line in output.splitlines()
+                          if "JOINENTRYTEST FAIL " in line or "SCRIPT ERROR:" in line
+                          or line.startswith("ERROR:")]
+            if errors:
                 raise JoinEntryFailure(f"{role} reported a fixture or script failure")
             if any(line.startswith(marker) for line in output.splitlines()):
                 return
