@@ -17,6 +17,7 @@ var head_detached := false
 var _display_name := "Monkey"
 var _spawn_position := Vector3.ZERO
 var _spawn_yaw := 0.0
+var _surface_basis := Basis.IDENTITY
 var _initial_velocity := Vector3.ZERO
 var _impact_impulse := Vector3.ZERO
 var _configured := false
@@ -25,10 +26,11 @@ var _bodies: Array[RigidBody3D] = []
 
 func configure(display_name: String, spawn_position: Vector3, spawn_yaw: float,
 		initial_velocity: Vector3, impact_impulse: Vector3,
-		detach_head: bool) -> void:
+		detach_head: bool, surface_basis: Basis = Basis.IDENTITY) -> void:
 	_display_name = display_name
 	_spawn_position = spawn_position
 	_spawn_yaw = spawn_yaw
+	_surface_basis = surface_basis.orthonormalized()
 	_initial_velocity = initial_velocity
 	_impact_impulse = impact_impulse
 	head_detached = detach_head
@@ -39,8 +41,8 @@ func _ready() -> void:
 	if not _configured:
 		return
 	add_to_group("monkey_ragdolls")
-	global_position = _spawn_position
-	rotation.y = _spawn_yaw
+	global_transform = Transform3D(_surface_basis * Basis(Vector3.UP, _spawn_yaw),
+		_spawn_position)
 	_build()
 	_release_bodies()
 
@@ -185,7 +187,7 @@ func _release_bodies() -> void:
 	if head_detached and head:
 		var direction := _impact_impulse.normalized() \
 			if _impact_impulse.length_squared() > 0.001 else -global_basis.z
-		head.apply_central_impulse(direction * 2.8 + Vector3.UP * 1.8)
+		head.apply_central_impulse(direction * 2.8 + global_basis.y * 1.8)
 		head.angular_velocity += Vector3(5.5, 2.2, -4.0)
 
 

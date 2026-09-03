@@ -12,8 +12,8 @@ TROOP has two update paths:
   image. A full installer is also the recovery path if a content update cannot
   load.
 
-The full PCK is currently about half a megabyte, so releases intentionally use
-one complete latest pack instead of a chain of delta patches. The builder also
+Releases use one complete latest PCK instead of a chain of delta patches; bundled
+planetary textures make the content pack tens of megabytes. The builder also
 proves that the Windows and macOS PCKs are byte-identical before publishing that
 cross-platform asset.
 
@@ -67,13 +67,18 @@ personal access token.
 The source project names the canonical update repository, and the workflow
 revalidates and injects GitHub's trusted `GITHUB_REPOSITORY` value immediately
 before export. Automatic checks stay disabled in the editor and in headless test
-runs. Exported games check shortly after startup and every six hours while they
+runs. Source runs also leave the installed game's staged packs and update state
+untouched. Exported games check shortly after startup and every six hours while they
 remain open.
 The workflow checks the Godot editor and template downloads against the
 SHA-256 digests in Godot's official GitHub release metadata before running
 either one.
 
 ## Publishing a release
+
+Version 0.4.5 uses bootstrap 2, protocol 11, and `requires_installer=true`.
+Keep `minimum_bootstrap` at least 2 for later compatible content releases so an
+older executable cannot skip the required project/bootstrap installer migration.
 
 1. Set `application/config/version` in `project.godot` to the new numeric
    version (`major.minor.patch`, with an optional fourth numeric component).

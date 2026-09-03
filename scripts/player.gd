@@ -148,6 +148,7 @@ var melee_mode := false
 var fly_mode := false
 var vehicle: Vehicle = null
 var expedition_locked := false
+var _expedition_saved_rig_yaw := 0.0
 var _vehicle_exit_cd := 0.0
 var _collision_shape: CollisionShape3D
 var melee_attack_remaining := 0.0
@@ -174,6 +175,13 @@ var _invulnerable_t := 0.0
 ## is per monkey so Earth and lunar players can coexist in one multiplayer
 ## process without changing ProjectSettings' global gravity.
 var environment_gravity_mps2 := FREEFALL_ACCELERATION
+var lunar_world: MoonWorld
+var rocket_cabin_view := false
+var _lunar_camera_ready := false
+var _lunar_camera_previous := Transform3D.IDENTITY
+var _lunar_camera_current := Transform3D.IDENTITY
+var _lunar_camera_previous_velocity := Vector3.ZERO
+var _lunar_camera_current_velocity := Vector3.ZERO
 var _shot_spread_sequence := 0
 var _next_melee_combo := 0
 var _melee_hit_done := false
@@ -263,7 +271,7 @@ func _ready() -> void:
 		wind.volume_db = -60.0
 		wind.bus = &"Ambience"
 		add_child(wind)
-		if wind.stream:
+		if wind.stream and Sfx.audio_enabled:
 			wind.play()
 
 
@@ -321,6 +329,10 @@ func _physics_process(dt: float) -> void:
 		inp.grab = false
 	if inp.jump_just:
 		buffer_t = JUMP_BUFFER
+	if is_instance_valid(lunar_world):
+		_step_lunar_motion(dt, inp)
+		_combat(inp)
+		return
 
 	var pre_floor := is_on_floor()
 	var pre_vy := velocity.y
@@ -432,7 +444,7 @@ func _gather() -> Dictionary:
 
 
 func _input(event: InputEvent) -> void:
-	if not is_local or not (event is InputEventMouseButton) or not event.pressed:
+	if expedition_locked or not is_local or not (event is InputEventMouseButton) or not event.pressed:
 		return
 	if event.is_action_pressed("reel_in"):
 		_wheel_reel_delta -= WHEEL_REEL_STEP * maxf(event.factor, 0.25)
@@ -444,6 +456,10 @@ func _wish_dir(inp: Dictionary) -> Vector3:
 	var d: Vector2 = inp.dir
 	if d.length() < 0.05:
 		return Vector3.ZERO
+	if is_instance_valid(lunar_world):
+		var heading := cam.yaw if cam and not test_mode else 0.0
+		return (global_basis * Basis(Vector3.UP, heading)
+			* Vector3(d.x, 0.0, d.y)).normalized()
 	if test_mode or cam == null:
 		return Vector3(d.x, 0, d.y).normalized()
 	var b := Basis(Vector3.UP, cam.yaw)
@@ -453,14 +469,14 @@ func _wish_dir(inp: Dictionary) -> Vector3:
 func _flat_facing() -> Vector3:
 	if not test_mode and cam:
 		var f := -cam.cam_basis().z
-		f.y = 0
+		f = f.slide(up_direction)
 		if f.length() > 0.01:
 			return f.normalized()
-	return Vector3(0, 0, -1)
+	return -global_basis.z
 
 
 func hand_pos() -> Vector3:
-	return global_position + Vector3.UP * HAND_H
+	return global_position + up_direction * HAND_H
 
 
 ## Crosshair ray for vine targeting: camera position + full 3D look direction.
@@ -472,7 +488,7 @@ func _aim() -> Array:
 		return [hand_pos(), cam.front_subject_direction()]
 	if not test_mode and cam:
 		return [cam.cam_pos(), -cam.cam_basis().z.normalized()]
-	return [hand_pos(), Vector3(0, 0, -1)]
+	return [hand_pos(), -global_basis.z]
 
 
 func shot_aim() -> Array:
@@ -528,12 +544,12 @@ func _combat(inp: Dictionary) -> void:
 	var aim := shot_aim()
 	var camera_origin: Vector3 = aim[0]
 	var camera_direction: Vector3 = aim[1].normalized()
-	var right := camera_direction.cross(Vector3.UP)
+	var right := camera_direction.cross(up_direction)
 	if right.length_squared() < 0.01:
 		right = Vector3.RIGHT
 	else:
 		right = right.normalized()
-	var origin := hand_pos() + camera_direction * 0.48 + right * 0.19 + Vector3.UP * 0.05
+	var origin := hand_pos() + camera_direction * 0.48 + right * 0.19 + up_direction * 0.05
 	# Converge the hand-level muzzle onto the center-camera ray. This keeps
 	# close and distant shots on the crosshair instead of travelling along a
 	# parallel line several metres below the camera.
@@ -588,7 +604,7 @@ func _start_melee_attack() -> bool:
 	_melee_combo_timeout = MELEE_COMBO_RESET_TIME
 	melee_attack_remaining = MELEE_ATTACK_DURATION
 	_melee_hit_done = false
-	Sfx.play_at("melee_swing", global_position + Vector3.UP * 0.85, -8.0)
+	Sfx.play_at("melee_swing", global_position + up_direction * 0.85, -8.0)
 	return true
 
 
@@ -602,9 +618,10 @@ func _perform_melee_hit() -> void:
 		return
 	var aim := shot_aim()
 	var direction: Vector3 = aim[1]
-	direction.y = clampf(direction.y, -0.35, 0.35)
+	direction = direction.slide(up_direction) + up_direction * clampf(
+		direction.dot(up_direction), -0.35, 0.35)
 	direction = direction.normalized()
-	var origin := global_position + Vector3.UP * 0.78
+	var origin := global_position + up_direction * 0.78
 	if Net.active and is_local:
 		Net.melee_attack(origin, direction, melee_attack_combo)
 	elif world.has_method("perform_melee"):
@@ -700,13 +717,30 @@ func equip_weapon(slot: int) -> void:
 	if sniper:
 		sniper.visible = not defeated and active_weapon == sniper
 	_sync_weapon_presentation(true)
-	Sfx.play_at("weapon_switch", global_position + Vector3.UP, -10.0)
+	Sfx.play_at("weapon_switch", global_position + up_direction, -10.0)
 
 
 func set_first_person_weapons(enabled: bool, view_parent: Node3D) -> void:
 	_first_person_weapons_requested = enabled
 	_weapon_view_parent = view_parent
 	_sync_weapon_presentation(true)
+
+
+## The manager owns the cabin camera and its look input. Only this client's
+## body/viewmodels are hidden here; replicated passengers keep their own rigs.
+func set_rocket_cabin_view(enabled: bool) -> void:
+	if rocket_cabin_view == enabled:
+		return
+	rocket_cabin_view = enabled
+	if enabled and cam:
+		cam.set_aiming(false)
+	if rig:
+		rig.visible = not enabled and not defeated
+	if cam and cam._view_arms:
+		cam._view_arms.visible = false
+	_sync_weapon_presentation(true)
+	if not enabled and cam:
+		cam.snap_to_target()
 
 
 func set_melee_mode(enabled: bool) -> void:
@@ -718,7 +752,7 @@ func set_melee_mode(enabled: bool) -> void:
 		_next_melee_combo = 0
 		_melee_combo_timeout = 0.0
 	_sync_weapon_presentation(true)
-	Sfx.play_at("weapon_switch", global_position + Vector3.UP, -11.0)
+	Sfx.play_at("weapon_switch", global_position + up_direction, -11.0)
 
 
 ## True whenever the monkey needs all four limbs on (or reaching for) the
@@ -727,7 +761,7 @@ func set_melee_mode(enabled: bool) -> void:
 func is_all_fours() -> bool:
 	if galloping:
 		return true
-	var h := Vector3(velocity.x, 0, velocity.z).length()
+	var h := velocity.slide(up_direction).length()
 	# Drop as soon as the sprint has visibly started. Keeping this threshold
 	# close to one acceleration frame removes the old biped-to-quadruped pop.
 	if state == S.GROUND and sprint_held and h > 0.6:
@@ -738,7 +772,7 @@ func is_all_fours() -> bool:
 
 func is_weapon_stowed() -> bool:
 	return melee_mode or is_healing() or is_all_fours() or state == S.SWIM \
-		or vehicle != null or expedition_locked
+		or vehicle != null or expedition_locked or rocket_cabin_view
 
 
 ## First-person sprinting keeps the viewmodel in frame even though the weapon is
@@ -747,7 +781,7 @@ func is_weapon_stowed() -> bool:
 func is_weapon_visually_stowed() -> bool:
 	if _first_person_weapons_requested:
 		return melee_mode or is_healing() or state == S.SWIM \
-			or vehicle != null or expedition_locked
+			or vehicle != null or expedition_locked or rocket_cabin_view
 	return is_weapon_stowed()
 
 
@@ -776,10 +810,10 @@ func _sync_weapon_presentation(force := false) -> void:
 
 	_weapon_visual_stowed = should_stow
 	_mounted_weapon = active_weapon
-	gun.visible = not defeated and active_weapon == gun
-	shotgun.visible = not defeated and active_weapon == shotgun
-	smg.visible = not defeated and active_weapon == smg
-	sniper.visible = not defeated and active_weapon == sniper
+	gun.visible = not defeated and not rocket_cabin_view and active_weapon == gun
+	shotgun.visible = not defeated and not rocket_cabin_view and active_weapon == shotgun
+	smg.visible = not defeated and not rocket_cabin_view and active_weapon == smg
+	sniper.visible = not defeated and not rocket_cabin_view and active_weapon == sniper
 
 
 func _weapon_back_transform(weapon: Node3D) -> Transform3D:
@@ -853,7 +887,7 @@ func start_bandage() -> bool:
 	melee_mode = false
 	melee_attack_remaining = 0.0
 	_sync_weapon_presentation(true)
-	Sfx.play_at("bandage_unroll", global_position + Vector3.UP * 0.85,
+	Sfx.play_at("bandage_unroll", global_position + up_direction * 0.85,
 		-5.0, 1.0, 28.0)
 	return true
 
@@ -873,10 +907,10 @@ func _update_bandage(dt: float) -> void:
 	if not _healing_applied and SatisfyingReload.crossed(previous, current, 0.84):
 		_healing_applied = true
 		heal(BANDAGE_HEAL)
-		Sfx.play_at("heal_finish", global_position + Vector3.UP * 0.85,
+		Sfx.play_at("heal_finish", global_position + up_direction * 0.85,
 			-3.0, 1.0, 30.0)
 		WeaponFX.spawn_glint(get_tree().current_scene,
-			global_position + Vector3.UP * 0.92, Color(0.34, 1.0, 0.42), 1.4)
+			global_position + up_direction * 0.92, Color(0.34, 1.0, 0.42), 1.4)
 	if healing_remaining <= 0.0:
 		_healing_event_mask = 0
 		_sync_weapon_presentation(true)
@@ -888,7 +922,7 @@ func _healing_event(previous: float, current: float, threshold: float,
 		or not SatisfyingReload.crossed(previous, current, threshold):
 		return
 	_healing_event_mask |= bit
-	Sfx.play_at(sound_name, global_position + Vector3.UP * 0.85,
+	Sfx.play_at(sound_name, global_position + up_direction * 0.85,
 		-6.0, pitch, 26.0)
 
 
@@ -909,7 +943,7 @@ func _cancel_bandage() -> void:
 		return
 	healing_remaining = 0.0
 	_healing_event_mask = 0
-	Sfx.play_at("bandage_cancel", global_position + Vector3.UP * 0.8,
+	Sfx.play_at("bandage_cancel", global_position + up_direction * 0.8,
 		-9.0, 0.86, 22.0)
 	_sync_weapon_presentation(true)
 
@@ -927,7 +961,7 @@ func take_damage(amount: float, source: Node3D, impulse: Vector3,
 			cam.on_headshot()
 	health_changed.emit(health, MAX_HEALTH)
 	_update_nameplate()
-	Sfx.play_at("bullet_hit", global_position + Vector3.UP * 0.8, -5.0)
+	Sfx.play_at("bullet_hit", global_position + up_direction * 0.8, -5.0)
 	if health <= 0.0:
 		defeated = true
 		defeated_by.emit(source)
@@ -962,12 +996,12 @@ func begin_defeat(hit_zone := "body", impact_impulse := Vector3.ZERO) -> void:
 		death_ragdoll = MonkeyRagdoll.new()
 		death_ragdoll.configure(display_name, global_position,
 			rig.yaw_angle() if rig else rotation.y, death_velocity,
-			impact_impulse, hit_zone == "head")
+			impact_impulse, hit_zone == "head", global_basis)
 		spawn_parent.add_child(death_ragdoll)
 		if cam:
 			cam.begin_death_view(death_ragdoll.follow_target())
 	if is_local:
-		Net.send_defeat(global_position, rig.yaw_angle() if rig else rotation.y,
+		Net.send_defeat(global_position, network_facing_yaw(),
 			death_velocity, impact_impulse, hit_zone == "head")
 	velocity = Vector3.ZERO
 	collision_layer = 0
@@ -996,8 +1030,10 @@ func revive_at(pos: Vector3) -> void:
 		death_ragdoll.queue_free()
 	death_ragdoll = null
 	global_position = pos
+	_sync_lunar_frame()
 	reset_physics_interpolation()
 	velocity = Vector3.ZERO
+	_reset_lunar_camera_sample()
 	state = S.AIR
 	jumps_used = 0
 	coyote_t = 0.0
@@ -1065,8 +1101,161 @@ func set_environment_gravity(acceleration_mps2: float) -> void:
 
 
 func reset_environment_gravity() -> void:
+	lunar_world = null
+	_lunar_camera_ready = false
+	up_direction = Vector3.UP
+	global_basis = Basis.IDENTITY
 	environment_gravity_mps2 = FREEFALL_ACCELERATION
 	safe_margin = DEFAULT_COLLISION_SAFE_MARGIN
+
+
+func set_lunar_world(moon: MoonWorld) -> void:
+	lunar_world = moon
+	if not is_instance_valid(moon):
+		reset_environment_gravity()
+		return
+	set_environment_gravity(MoonWorld.LUNAR_GRAVITY)
+	_sync_lunar_frame()
+	in_water = false
+	galloping = false
+	last_target = {}
+	state = S.AIR
+	_reset_lunar_camera_sample()
+
+
+## Parallel transport keeps heading continuous through both poles. Camera yaw
+## stays relative to this frame, while the capsule's Y axis follows radial up.
+func _sync_lunar_frame() -> void:
+	if not is_instance_valid(lunar_world):
+		return
+	var next_up := lunar_world.radial_up_at(global_position)
+	var turn := Basis(Quaternion(global_basis.y.normalized(), next_up))
+	global_basis = (turn * global_basis).orthonormalized()
+	up_direction = next_up
+
+
+func _record_lunar_camera_sample() -> void:
+	if not is_instance_valid(lunar_world):
+		_lunar_camera_ready = false
+		return
+	var frame := lunar_world.global_transform.affine_inverse() * global_transform
+	# Contact recovery may report a small radial velocity even when the feet
+	# stay on the floor. Terrain height is already represented by the pose.
+	var motion := velocity.slide(up_direction) if is_on_floor() else velocity
+	motion = lunar_world.global_basis.inverse() * motion
+	if not _lunar_camera_ready:
+		_lunar_camera_previous = frame
+		_lunar_camera_previous_velocity = motion
+	else:
+		_lunar_camera_previous = _lunar_camera_current
+		_lunar_camera_previous_velocity = _lunar_camera_current_velocity
+	_lunar_camera_current = frame
+	_lunar_camera_current_velocity = motion
+	_lunar_camera_ready = true
+
+
+func _reset_lunar_camera_sample() -> void:
+	_lunar_camera_ready = false
+	_record_lunar_camera_sample()
+
+
+## Position, transported up and velocity share one physics interpolation phase.
+## Interpolating near the Moon's local origin avoids repeatedly rounding a
+## 48 km world-space lerp. The optional fraction drives deterministic fixtures.
+func lunar_camera_sample(fraction: float = -1.0) -> Dictionary:
+	if not is_instance_valid(lunar_world):
+		return {}
+	if not _lunar_camera_ready:
+		_reset_lunar_camera_sample()
+	var alpha := clampf(Engine.get_physics_interpolation_fraction() if fraction < 0.0 else fraction, 0.0, 1.0)
+	var local_frame := _lunar_camera_previous.interpolate_with(_lunar_camera_current, alpha)
+	return {"local_frame": local_frame, "reference": lunar_world.global_transform,
+		"frame": lunar_world.global_transform * local_frame,
+		"velocity": lunar_world.global_basis * _lunar_camera_previous_velocity.lerp(
+			_lunar_camera_current_velocity, alpha)}
+
+
+func _step_lunar_motion(dt: float, inp: Dictionary) -> void:
+	_sync_lunar_frame()
+	if wind:
+		wind.volume_db = -60.0
+	var grounded := is_on_floor()
+	var radial_speed := velocity.dot(up_direction)
+	var tangent_velocity := velocity.slide(up_direction)
+	var wish := _wish_dir(inp)
+	sprint_held = inp.sprint
+	in_water = false
+	wallsliding = false
+	galloping = false
+	flipping = false
+	if fly_mode:
+		var lift := float(inp.jump_held) - float(inp.crouch_held)
+		var desired := wish * (FLY_SPRINT_SPEED if inp.sprint else FLY_SPEED)
+		desired += up_direction * lift * FLY_VERTICAL_SPEED
+		velocity = velocity.move_toward(desired, FLY_ACCEL * dt)
+		state = S.AIR
+	else:
+		var speed := SPRINT_SPEED if inp.sprint else WALK_SPEED
+		var acceleration := ACCEL if grounded else AIR_ACCEL
+		if grounded:
+			jumps_used = 0
+			coyote_t = COYOTE
+			state = S.GROUND
+			radial_speed = -0.8
+			if inp.crouch_held and tangent_velocity.length() > SLIDE_MIN_SPEED:
+				state = S.SLIDE
+				tangent_velocity = tangent_velocity.move_toward(Vector3.ZERO, 4.0 * dt)
+			else:
+				tangent_velocity = tangent_velocity.move_toward(wish * speed,
+					(acceleration if wish.length_squared() > 0.01 else FRICTION) * dt)
+		else:
+			state = S.AIR
+			coyote_t = maxf(coyote_t - dt, 0.0)
+			radial_speed -= MoonWorld.LUNAR_GRAVITY * dt
+			if wish.length_squared() > 0.01:
+				tangent_velocity = tangent_velocity.move_toward(wish * speed, acceleration * dt)
+		if buffer_t > 0.0 and (grounded or coyote_t > 0.0 or jumps_used < 2):
+			buffer_t = 0.0
+			coyote_t = 0.0
+			jumps_used += 1
+			radial_speed = _environment_jump_velocity(JUMP_VEL)
+			state = S.AIR
+			Sfx.play("jump", -12)
+		velocity = tangent_velocity.limit_length(ABS_MAX) + up_direction * radial_speed
+	move_and_slide()
+	_sync_lunar_frame()
+	if is_on_floor() and not fly_mode:
+		if not grounded:
+			landed.emit(maxf(-radial_speed, 0.0))
+		state = S.SLIDE if inp.crouch_held and tangent_velocity.length() > SLIDE_MIN_SPEED else S.GROUND
+	# Rescue only penetration into the sphere. A Y threshold would teleport a
+	# healthy explorer home as soon as they walked around to the far hemisphere.
+	if lunar_world.altitude_at(global_position) < -48.0:
+		if world and world.has_method("respawn"):
+			world.respawn(self)
+	_record_lunar_camera_sample()
+	if not test_mode and Input.is_action_just_pressed("ook"):
+		Sfx.play("ook", -6)
+		Net.send_ook(global_position)
+	_send_t += dt
+	if Net.active and _send_t >= 0.05:
+		_send_t = 0.0
+		Net.send_state(global_position, network_facing_yaw(), velocity, _anim(), false,
+			Vector3.ZERO, 0.0, PackedVector3Array(), weapon_slot - 1,
+			is_weapon_stowed(), melee_mode, int(active_weapon.ammo) if active_weapon else 0,
+			active_weapon != null and active_weapon.reload_remaining > 0.0,
+			bandage_progress(), fly_mode)
+
+
+func network_facing_yaw() -> float:
+	var heading := rig.yaw_angle() if rig else 0.0
+	if not is_instance_valid(lunar_world):
+		return heading
+	var canonical := lunar_world.global_basis * MoonWorld.surface_basis(
+		lunar_world.global_basis.inverse() * up_direction)
+	var facing := canonical.inverse() * (global_basis
+		* Basis(Vector3.UP, heading) * Vector3.FORWARD)
+	return atan2(-facing.x, -facing.z)
 
 
 ## Move this actor to the equivalent local chart image after crossing the
@@ -1099,6 +1288,12 @@ func set_expedition_locked(locked: bool) -> void:
 				exit_vehicle()
 			if state == S.SWING:
 				_release(false)
+			if rig:
+				# Manifest refreshes are idempotent; only the boarding edge owns
+				# the heading restored when this actor leaves the seat.
+				_expedition_saved_rig_yaw = rig.yaw_angle()
+		if rig:
+			rig.set_yaw(0.0)
 		velocity = Vector3.ZERO
 		if _collision_shape:
 			_collision_shape.set_deferred("disabled", true)
@@ -1116,6 +1311,8 @@ func set_expedition_locked(locked: bool) -> void:
 		if changed:
 			state = S.AIR
 			reset_physics_interpolation()
+	if changed and not locked and rig:
+		rig.set_yaw(_expedition_saved_rig_yaw)
 	expedition_locked = locked
 	if changed:
 		_sync_weapon_presentation(true)
@@ -1651,7 +1848,7 @@ func _anim() -> int:
 				return MonkeyRig.Anim.ROLL
 			if skid_t > 0.0:
 				return MonkeyRig.Anim.SKID
-			var h := Vector3(velocity.x, 0, velocity.z).length()
+			var h := velocity.slide(up_direction).length()
 			if h < 0.5:
 				return MonkeyRig.Anim.IDLE
 			if is_all_fours() and h > 6.0:
@@ -1720,7 +1917,7 @@ func _process(dt: float) -> void:
 		return
 	if defeated:
 		return
-	var hvel := Vector3(velocity.x, 0, velocity.z)
+	var hvel := velocity.slide(up_direction)
 	var weapon_aim := shot_aim()
 	var recoil: float = active_weapon.recoil if active_weapon else 0.0
 	_sync_weapon_presentation()
@@ -1783,7 +1980,13 @@ func _process(dt: float) -> void:
 		rig.rotation = rig.rotation.lerp(Vector3.ZERO, 1.0 - exp(-10.0 * dt))
 	if rig.position != Vector3.ZERO:
 		rig.position = rig.position.lerp(Vector3.ZERO, 1.0 - exp(-12.0 * dt))
-	if state == S.SWING:
+	if expedition_locked:
+		# The actor root already carries the seat's complete orientation. Keep
+		# the seated pose facing that frame even when an old aim/melee state
+		# would otherwise turn the body toward the disabled gameplay camera.
+		rig.set_yaw(0.0)
+		rig.set_rope(false, Vector3.ZERO, Vector3.ZERO)
+	elif state == S.SWING:
 		# A two-handed long rifle needs the chest and both shoulders behind the
 		# sightline. Track the aim while tail/feet carry the rope; other swing poses
 		# still weathercock naturally into their pendulum velocity.
@@ -1800,7 +2003,7 @@ func _process(dt: float) -> void:
 		# In third person the entire monkey follows the crosshair, not just the
 		# IK weapon arm. This gives stable forward/strafe poses and removes the
 		# old half-turn where the torso lagged behind until movement reversed.
-		var flat_aim := Vector3(weapon_aim[1].x, 0, weapon_aim[1].z)
+		var flat_aim: Vector3 = weapon_aim[1].slide(up_direction)
 		if (not weapon_stowed or melee_mode) and active_weapon \
 				and flat_aim.length_squared() > 0.001:
 			rig.face(flat_aim.normalized(), dt)
@@ -1991,5 +2194,10 @@ func admin_teleport(destination: Vector3) -> void:
 	if state == S.SWING:
 		_release(false)
 	global_position = destination
+	_sync_lunar_frame()
+	state = S.AIR
 	velocity = Vector3.ZERO
+	_reset_lunar_camera_sample()
 	reset_physics_interpolation()
+	if cam:
+		cam.snap_to_target()

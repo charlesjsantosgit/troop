@@ -237,7 +237,7 @@ func set_listener_swimming(active: bool, speed := 0.0) -> void:
 	if active:
 		_loop_target_db = lerpf(-30.0, -22.0, clampf(speed / 7.0, 0.0, 1.0))
 		_water_loop.pitch_scale = lerpf(0.92, 1.08, clampf(speed / 7.0, 0.0, 1.0))
-		if _water_loop.stream and not _water_loop.playing:
+		if _water_loop.stream and not _water_loop.playing and Sfx.audio_enabled:
 			_water_loop.play()
 	else:
 		_loop_target_db = -60.0

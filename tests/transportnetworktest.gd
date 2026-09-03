@@ -8,6 +8,10 @@ var total := 0
 const GenScript = preload("res://scripts/gen.gd")
 const RoadBridgeScript = preload("res://scripts/road_bridge.gd")
 const FreewayTunnelScript = preload("res://scripts/freeway_tunnel.gd")
+# A real seed-1337 lake-edge crossing, not a synthetic road/terrain override.
+# The globe grid below is hundreds of kilometres apart and cannot reliably
+# find a 180 m water crossing after removal of the old fine-noise cliffs.
+const WATER_BRIDGE_PROBE := Vector2(-125290.5, -3266438.0)
 var generator
 var highway_candidates := 0
 var maximum_highway_mountain := 0.0
@@ -93,14 +97,42 @@ func _layout_contains(feature: Dictionary) -> bool:
 	var pos: Vector3 = feature.pos
 	var cx := floori(pos.x / generator.CHUNK)
 	var cz := floori(pos.z / generator.CHUNK)
-	var layout: Dictionary = generator.transport_feature_chunk_layout(cx, cz)
 	var key := "freeway_tunnels" if str(feature.kind) == "tunnel" \
 		else "road_bridges"
-	for streamed_value in layout.get(key, []):
-		var streamed: Dictionary = streamed_value
-		if str(streamed.get("id", "")) == str(feature.id):
-			return true
-	return false
+	var matches := 0
+	for dz in range(-1, 2):
+		for dx in range(-1, 2):
+			var layout: Dictionary = generator.transport_feature_chunk_layout(
+				cx + dx, cz + dz)
+			for streamed_value in layout.get(key, []):
+				var streamed: Dictionary = streamed_value
+				if str(streamed.get("id", "")) == str(feature.id):
+					if dx != 0 or dz != 0:
+						return false
+					matches += 1
+	return matches == 1
+
+
+func _bridge_spans_real_water(feature: Dictionary) -> bool:
+	var position: Vector3 = feature.pos
+	var center := Vector2(position.x, position.z)
+	var tangent: Vector2 = feature.tangent
+	var half_length := float(feature.length) * 0.5
+	var bed: Dictionary = generator.planet_terrain_sample(center.x, center.y)
+	if float(bed.elevation) >= generator.WATER_Y \
+			or float(feature.deck_elevation) < generator.WATER_Y + 1.0:
+		return false
+	for sign_value in [-1.0, 1.0]:
+		var bank: Vector2 = center + tangent * half_length * sign_value
+		var macro: Dictionary = generator.planet_terrain_sample(bank.x, bank.y)
+		if float(macro.land) <= 0.58 or float(macro.ocean) >= 0.34 \
+				or float(macro.lake) >= 0.34 \
+				or float(macro.elevation) <= generator.WATER_Y + 0.28:
+			return false
+		# The actual graded road must join the physical deck at both banks.
+		if absf(generator.height(bank.x, bank.y) - position.y) > 0.10:
+			return false
+	return true
 
 
 func _run() -> void:
@@ -109,7 +141,9 @@ func _run() -> void:
 	root.add_child(generator)
 	generator.debug_world = false
 	generator.setup(1337)
-	var bridge: Dictionary = {}
+	var bridge: Dictionary = _candidate_feature(WATER_BRIDGE_PROBE)
+	if str(bridge.get("kind", "")) != "bridge":
+		bridge = {}
 	var tunnel: Dictionary = {}
 	var seen: Dictionary = {}
 	# Pangaea occupies the central chart. Sparse globe-scale probes select stable
@@ -145,6 +179,11 @@ func _run() -> void:
 			minimum_highway_grade, maximum_highway_ridge, dry_mountain_slots,
 			grade_safe_mountain_slots, portal_land_slots, tunnel_shape_slots])
 	if not bridge.is_empty():
+		_check(_bridge_spans_real_water(bridge),
+			"the fixed crossing has submerged ground, dry banks and connected road approaches")
+		generator.setup(1337)
+		_check(str(_candidate_feature(WATER_BRIDGE_PROBE)) == str(bridge),
+			"bridge identity, position and dimensions repeat after a fresh seeded setup")
 		_check(_layout_contains(bridge),
 			"bridge materializes exactly once in its owning streamed chunk")
 		var bridge_node = RoadBridgeScript.new()
@@ -154,6 +193,21 @@ func _run() -> void:
 		_check(bridge_node.get_node_or_null("BatchedBridgeDeck") != null \
 				and bridge_node.build_collisions().size() == 1,
 			"bridge supplies a batched deck and driveable physical collision")
+		await physics_frame
+		await physics_frame
+		var deck_collision: StaticBody3D = bridge_node.get_node("RoadBridgeCollision")
+		var deck_supported := true
+		for along in [-0.40, 0.0, 0.40]:
+			var deck_point: Vector3 = bridge_node.to_global(
+				Vector3(0.0, 0.0, float(bridge.length) * along))
+			var query := PhysicsRayQueryParameters3D.create(
+				deck_point + Vector3.UP * 2.0, deck_point - Vector3.UP * 2.0, 1)
+			var hit := bridge_node.get_world_3d().direct_space_state.intersect_ray(query)
+			deck_supported = deck_supported and not hit.is_empty() \
+				and hit.get("collider") == deck_collision \
+				and absf((hit.get("position", Vector3.ZERO) as Vector3).y - deck_point.y) < 0.02
+		_check(deck_supported,
+			"the physical deck supports the roadway at both ends and above the water")
 		bridge_node.queue_free()
 	if not tunnel.is_empty():
 		_check(_layout_contains(tunnel),

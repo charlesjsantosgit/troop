@@ -568,10 +568,11 @@ func _add_cute_smile(parent: Node3D, material: Material) -> void:
 
 
 func face(dir: Vector3, dt: float) -> void:
-	if dir.length() < 0.05:
+	var local_direction := global_basis.inverse() * dir
+	if Vector2(local_direction.x, local_direction.z).length() < 0.05:
 		_turn_lean = lerpf(_turn_lean, 0.0, 1.0 - exp(-8.0 * dt))
 		return
-	var target := atan2(dir.x, dir.z) + PI
+	var target := atan2(local_direction.x, local_direction.z) + PI
 	var turn_rate := angle_difference(yaw_node.rotation.y, target) / maxf(dt, 0.001)
 	_turn_lean = lerpf(_turn_lean, clampf(-turn_rate * 0.025, -0.18, 0.18),
 		1.0 - exp(-10.0 * dt))
@@ -844,7 +845,9 @@ func update_motion(dt: float, anim: int, vel: Vector3, on_floor: bool, anchor: V
 		1.0 - exp(-8.0 * dt))
 	if absf(_sniper_rope_blend - sniper_rope_target) < 0.0005:
 		_sniper_rope_blend = sniper_rope_target
-	var h := Vector3(vel.x, 0, vel.z).length()
+	var surface_up := global_basis.y.normalized()
+	var vertical_speed := vel.dot(surface_up)
+	var h := vel.slide(surface_up).length()
 	var run_speed := clampf((h - 0.5) / 10.5, 0.0, 1.0)
 	if anim == Anim.SPRINT:
 		_gait_cycle = fposmod(_gait_cycle + _gallop_frequency(h) * dt, 1.0)
@@ -891,7 +894,7 @@ func update_motion(dt: float, anim: int, vel: Vector3, on_floor: bool, anchor: V
 	elif anim == Anim.AIR:
 		# Preserve release rotation in free flight, then slowly weathercock into
 		# the ballistic arc as air resistance settles the body.
-		var flight_pitch := clampf(-vel.y / 48.0, -0.22, 0.28)
+		var flight_pitch := clampf(-vertical_speed / 48.0, -0.22, 0.28)
 		_advance_air_tilt(dt, flight_pitch, 0.0, 2.8, 1.9)
 	elif anim != Anim.DIVE and anim != Anim.ROLL:
 		_advance_air_tilt(dt, 0.0, 0.0, 18.0, 7.0)
@@ -1387,7 +1390,7 @@ func update_motion(dt: float, anim: int, vel: Vector3, on_floor: bool, anchor: V
 	# can share the grip.
 	if anim == Anim.SWING and _rope_active:
 		var rope_up := _rope_pivot - _rope_hand
-		rope_up = rope_up.normalized() if rope_up.length() > 0.05 else Vector3.UP
+		rope_up = rope_up.normalized() if rope_up.length() > 0.05 else surface_up
 		var yb := yaw_node.global_transform.basis
 		if not _gun_aim_active and not _sniper_rope_pose:
 			_ik_limb(sh_r, el_r, ARM_A, ARM_B,
@@ -1497,9 +1500,8 @@ func _pose_sniper_rope_support(rope_up: Vector3, body_basis: Basis,
 		var current := joint.global_transform
 		var desired_basis := _tail_forward_basis(toward_target, axis).orthonormalized()
 		var joint_weight := support * (0.84 if i == 0 else 0.92)
-		joint.global_transform = Transform3D(
-			current.basis.orthonormalized().slerp(desired_basis, joint_weight),
-			current.origin)
+		_set_joint_world_basis(joint,
+			current.basis.orthonormalized().slerp(desired_basis, joint_weight))
 	# Finish with a short weighted CCD pass. This retains the broad authored coil
 	# but guarantees that the fluffy tip actually intersects the vine instead of
 	# merely pointing toward it.
@@ -1544,9 +1546,8 @@ func _tail_ik_contact(target: Vector3, weight: float) -> void:
 			var solved := (Basis(arc) * current.basis.orthonormalized()).orthonormalized()
 			var joint_weight := clampf(weight * (0.46 if index == 0 else 0.68),
 				0.0, 0.82)
-			joint.global_transform = Transform3D(
-				current.basis.orthonormalized().slerp(solved, joint_weight),
-				current.origin)
+			_set_joint_world_basis(joint,
+				current.basis.orthonormalized().slerp(solved, joint_weight))
 
 
 ## Tail cores and joint offsets both point down local +Z.
@@ -1600,8 +1601,9 @@ func _ik_limb(shoulder: Node3D, elbow: Node3D, a: float, b: float, target: Vecto
 	var upper_dir := vn.rotated(axis, alpha)
 	var e_pos := s_pos + upper_dir * a
 	var fore_dir := (target - e_pos).normalized()
-	shoulder.global_transform = Transform3D(_limb_basis(upper_dir, axis), s_pos)
-	elbow.global_transform = Transform3D(_limb_basis(fore_dir, axis), e_pos)
+	_set_joint_world_basis(shoulder, _limb_basis(upper_dir, axis))
+	elbow.position = Vector3(0.0, -a, 0.0)
+	_set_joint_world_basis(elbow, _limb_basis(fore_dir, axis))
 
 
 func _ik_limb_weighted(shoulder: Node3D, elbow: Node3D, a: float, b: float,
@@ -1610,14 +1612,27 @@ func _ik_limb_weighted(shoulder: Node3D, elbow: Node3D, a: float, b: float,
 	if blend >= 0.999:
 		_ik_limb(shoulder, elbow, a, b, target, pole)
 		return
-	var shoulder_before := shoulder.global_transform
-	var elbow_before := elbow.global_transform
+	var shoulder_before := shoulder.global_basis
+	var elbow_before := elbow.global_basis
 	_ik_limb(shoulder, elbow, a, b, target, pole)
-	var shoulder_solved := shoulder.global_transform
-	var elbow_solved := elbow.global_transform
-	shoulder.global_transform = shoulder_before.interpolate_with(
-		shoulder_solved, blend)
-	elbow.global_transform = elbow_before.interpolate_with(elbow_solved, blend)
+	var shoulder_solved := shoulder.global_basis
+	var elbow_solved := elbow.global_basis
+	_set_joint_world_basis(shoulder, shoulder_before.orthonormalized().slerp(
+		shoulder_solved.orthonormalized(), blend))
+	_set_joint_world_basis(elbow, elbow_before.orthonormalized().slerp(
+		elbow_solved.orthonormalized(), blend))
+
+
+## Joint origins are anatomical offsets, not world-space IK outputs. Rewriting
+## a complete global transform repeatedly converts them through the 48 km lunar
+## origin; float rounding then accumulates until arms and weapons detach. Solve
+## only the local rotation and retain each node's existing local origin/scale.
+static func _set_joint_world_basis(joint: Node3D, world_basis: Basis) -> void:
+	var local_basis := world_basis.orthonormalized()
+	var parent := joint.get_parent_node_3d()
+	if parent and not joint.top_level:
+		local_basis = parent.global_basis.inverse() * local_basis
+	joint.basis = local_basis.orthonormalized().scaled(joint.scale)
 
 
 func _limb_basis(dir: Vector3, axis: Vector3) -> Basis:
@@ -1653,17 +1668,18 @@ func _reset_gait_plants() -> void:
 ## Raycast each prospective contact onto the actual terrain/branch under that
 ## limb. This keeps four-paw locomotion attached on slopes instead of solving
 ## every knuckle to the root's single Y coordinate.
-func _ground_contact(candidate: Vector3, fallback_y: float,
+func _ground_contact(candidate: Vector3, fallback_height: float,
 		contact_offset: float) -> Dictionary:
+	var up := global_basis.y.normalized()
+	var plane_point := candidate + up * (fallback_height - candidate.dot(up))
 	if not is_inside_tree() or not get_world_3d():
 		return {
-			"position": Vector3(candidate.x, fallback_y + contact_offset,
-				candidate.z),
-			"normal": Vector3.UP,
+			"position": plane_point + up * contact_offset,
+			"normal": up,
 		}
-	var from := Vector3(candidate.x, maxf(candidate.y, fallback_y) + 0.85,
-		candidate.z)
-	var to := Vector3(candidate.x, fallback_y - 1.25, candidate.z)
+	var from := plane_point + up \
+		* (maxf(candidate.dot(up) - fallback_height, 0.0) + 0.85)
+	var to := plane_point - up * 1.25
 	var query := PhysicsRayQueryParameters3D.create(from, to)
 	query.collision_mask = 1
 	var actor := get_parent()
@@ -1676,9 +1692,8 @@ func _ground_contact(candidate: Vector3, fallback_y: float,
 			"normal": hit.normal,
 		}
 	return {
-		"position": Vector3(candidate.x, fallback_y + contact_offset,
-			candidate.z),
-		"normal": Vector3.UP,
+		"position": plane_point + up * contact_offset,
+		"normal": up,
 	}
 
 
@@ -1695,7 +1710,8 @@ func _gallop_ik(vel: Vector3, on_floor: bool, h: float) -> void:
 	var yb := yaw_node.global_transform.basis
 	var fwd := -yb.z
 	var right := yb.x
-	var ground_y := global_position.y
+	var up := global_basis.y.normalized()
+	var ground_height := global_position.dot(up)
 	var shoulders := [sh_l, sh_r, hip_l, hip_r]
 	var elbows := [el_l, el_r, kn_l, kn_r]
 	var upper_lens := PackedFloat32Array([ARM_A, ARM_A, LEG_A, LEG_A])
@@ -1713,20 +1729,20 @@ func _gallop_ik(vel: Vector3, on_floor: bool, h: float) -> void:
 	for i in range(4):
 		var plant: Dictionary = _plants[i]
 		var anchor: Node3D = shoulders[i]
-		var base := Vector3(anchor.global_position.x, ground_y,
-			anchor.global_position.z) + right * lateral[i]
+		var base := anchor.global_position - up \
+			* (anchor.global_position.dot(up) - ground_height) + right * lateral[i]
 		base += fwd * (0.025 if i < 2 else -0.018)
 		var target: Vector3
-		var contact_normal := Vector3.UP
+		var contact_normal := up
 		if not on_floor:
 			# stretched bound: fore limbs reach for the landing, hind trail
 			plant.on = false
 			if i < 2:
 				target = anchor.global_position + fwd * 0.38 \
-					+ Vector3.DOWN * 0.24 + right * lateral[i] * 0.3
+					- up * 0.24 + right * lateral[i] * 0.3
 			else:
 				target = anchor.global_position - fwd * 0.25 \
-					+ Vector3.DOWN * 0.31 + right * lateral[i] * 0.3
+					- up * 0.31 + right * lateral[i] * 0.3
 		else:
 			var g := _gait_limb(_gait_cycle, offsets[i], duty)
 			var offset_height := 0.055 if i < 2 else 0.042
@@ -1741,7 +1757,7 @@ func _gallop_ik(vel: Vector3, on_floor: bool, h: float) -> void:
 				var rear_reach := 0.105 if i < 2 else 0.125
 				var candidate := base + fwd \
 					* lerpf(fore_reach, -rear_reach, stance_progress)
-				var contact := _ground_contact(candidate, ground_y, offset_height)
+				var contact := _ground_contact(candidate, ground_height, offset_height)
 				target = contact.position
 				contact_normal = contact.normal
 				plant.pos = target
@@ -1752,7 +1768,7 @@ func _gallop_ik(vel: Vector3, on_floor: bool, h: float) -> void:
 				var fore_reach := 0.115 if i < 2 else 0.095
 				var candidate := base + fwd \
 					* lerpf(-rear_reach, fore_reach, swing_progress)
-				var contact := _ground_contact(candidate, ground_y, offset_height)
+				var contact := _ground_contact(candidate, ground_height, offset_height)
 				target = contact.position \
 					+ contact.normal * sin(g.y * PI) * lifts[i]
 				contact_normal = contact.normal
@@ -1775,9 +1791,7 @@ func _align_foot_to_surface(foot: MeshInstance3D, normal: Vector3,
 	var z_axis := -toe_direction
 	var x_axis := up.cross(z_axis).normalized()
 	z_axis = x_axis.cross(up).normalized()
-	var scale := foot.global_transform.basis.get_scale()
-	foot.global_transform = Transform3D(
-		Basis(x_axis, up, z_axis).scaled(scale), foot.global_position)
+	_set_joint_world_basis(foot, Basis(x_axis, up, z_axis))
 
 
 ## Piecewise paw path for a front-crawl stroke. The underwater pull uses a
@@ -1844,8 +1858,8 @@ func _pose_weapon_arm(direction: Vector3, recoil: float) -> void:
 	var aim := direction.normalized()
 	if aim.length_squared() < 0.001:
 		return
-	var shoulder_position := sh_r.global_position
 	var body_basis := yaw_node.global_transform.basis
+	var up := body_basis.y.normalized()
 	# A rope sniper is supported by both hands, so bring the firing elbow inward
 	# and center the receiver where the opposite 0.50 m arm can genuinely reach.
 	# Ordinary one-handed weapons keep their wider, clearer elbow silhouette.
@@ -1853,7 +1867,7 @@ func _pose_weapon_arm(direction: Vector3, recoil: float) -> void:
 		else Vector3.RIGHT
 	var elbow_hint := (
 		body_basis * elbow_side * 0.72
-		+ Vector3.DOWN * 0.48
+		- up * 0.48
 		+ aim * 0.18
 	)
 	var bend_direction := elbow_hint - aim * elbow_hint.dot(aim)
@@ -1865,11 +1879,9 @@ func _pose_weapon_arm(direction: Vector3, recoil: float) -> void:
 		aim * cos(bend_angle) + bend_direction * sin(bend_angle)
 	).normalized()
 	var bend_axis := aim.cross(bend_direction).normalized()
-	var elbow_position := shoulder_position + upper_direction * ARM_A
-	sh_r.global_transform = Transform3D(
-		_limb_basis(upper_direction, bend_axis), shoulder_position)
-	el_r.global_position = elbow_position
-	var preferred_up := Vector3.UP
+	_set_joint_world_basis(sh_r, _limb_basis(upper_direction, bend_axis))
+	el_r.position = Vector3(0.0, -ARM_A, 0.0)
+	var preferred_up := up
 	if absf(aim.dot(preferred_up)) > 0.94:
 		preferred_up = body_basis * Vector3.FORWARD
 	_orient_weapon_forearm(el_r, aim, preferred_up)
@@ -1878,21 +1890,22 @@ func _pose_weapon_arm(direction: Vector3, recoil: float) -> void:
 func _pose_healing_arms(progress: float) -> void:
 	var p := clampf(progress, 0.0, 1.0)
 	var body_basis := yaw_node.global_transform.basis
+	var up := body_basis.y.normalized()
 	var forward := body_basis * Vector3.FORWARD
 	var right := body_basis * Vector3.RIGHT
 	# Work just off the right side of the chest. From the default shoulder camera
 	# this keeps the wrap, orbiting roll, and tug visible instead of hiding both
 	# paws directly behind the torso silhouette.
 	var center := torso_p.global_position + forward * 0.16 + right * 0.30 \
-		+ Vector3.UP * 0.14
+		+ up * 0.14
 	var left_target := center - right * 0.08
-	var right_target := center + right * 0.12 + Vector3.DOWN * 0.02
+	var right_target := center + right * 0.12 - up * 0.02
 	var wrap := SatisfyingReload.phase(p, 0.20, 0.72)
 	var tug := SatisfyingReload.pulse(p, 0.70, 0.82, 0.92)
 	if wrap > 0.0:
 		var angle := wrap * TAU * 2.0
 		right_target = left_target + right * cos(angle) * 0.10 \
-			+ Vector3.UP * sin(angle) * 0.07 + forward * 0.025
+			+ up * sin(angle) * 0.07 + forward * 0.025
 	left_target -= right * 0.06 * tug
 	right_target += right * 0.17 * tug
 	_ik_limb(sh_l, el_l, ARM_A, ARM_B, left_target,
@@ -1992,14 +2005,15 @@ func _update_bandage_props() -> void:
 
 func _pose_melee_arms(attack_active: bool, progress: float, combo: int) -> void:
 	var body_basis := yaw_node.global_transform.basis
+	var up := body_basis.y.normalized()
 	var forward := body_basis * Vector3.FORWARD
 	var right := body_basis * Vector3.RIGHT
 	var left_guard := (
-		sh_l.global_position + forward * 0.30 + Vector3.UP * 0.055
+		sh_l.global_position + forward * 0.30 + up * 0.055
 		+ right * 0.055
 	)
 	var right_guard := (
-		sh_r.global_position + forward * 0.30 + Vector3.UP * 0.035
+		sh_r.global_position + forward * 0.30 + up * 0.035
 		- right * 0.045
 	)
 	var left_target := left_guard
@@ -2014,12 +2028,12 @@ func _pose_melee_arms(attack_active: bool, progress: float, combo: int) -> void:
 				right_target += -forward * 0.10 * windup + right * 0.08 * windup
 				right_target = right_target.lerp(
 					sh_r.global_position + forward * (ARM_A + ARM_B - 0.025)
-					+ Vector3.UP * 0.015, strike)
+					+ up * 0.015, strike)
 			1:
 				# Left hook travels from outside the shoulder across the chest.
 				var hook_target := (
 					sh_l.global_position + forward * 0.40
-					+ right * 0.19 + Vector3.UP * 0.025
+					+ right * 0.19 + up * 0.025
 				)
 				left_target += -right * 0.13 * (
 					1.0 - smoothstep(0.0, 0.24, progress))
@@ -2031,11 +2045,11 @@ func _pose_melee_arms(attack_active: bool, progress: float, combo: int) -> void:
 				var slam := _melee_pulse(progress, 0.28, 0.56, 0.92)
 				var high_center := (
 					(sh_l.global_position + sh_r.global_position) * 0.5
-					+ Vector3.UP * 0.31 + forward * 0.12
+					+ up * 0.31 + forward * 0.12
 				)
 				var low_center := (
 					(sh_l.global_position + sh_r.global_position) * 0.5
-					+ forward * 0.43 - Vector3.UP * 0.13
+					+ forward * 0.43 - up * 0.13
 				)
 				var center := high_center.lerp(low_center, slam)
 				left_target = left_guard.lerp(
@@ -2044,9 +2058,9 @@ func _pose_melee_arms(attack_active: bool, progress: float, combo: int) -> void:
 					center + right * 0.055, maxf(lift, slam))
 
 	_ik_limb(sh_l, el_l, ARM_A, ARM_B, left_target,
-		-right * 0.85 + Vector3.DOWN * 0.35 + forward * 0.2)
+		-right * 0.85 - up * 0.35 + forward * 0.2)
 	_ik_limb(sh_r, el_r, ARM_A, ARM_B, right_target,
-		right * 0.85 + Vector3.DOWN * 0.35 + forward * 0.2)
+		right * 0.85 - up * 0.35 + forward * 0.2)
 
 
 static func _melee_pulse(progress: float, start: float, peak: float,
@@ -2070,8 +2084,7 @@ func _orient_weapon_forearm(elbow: Node3D, forward: Vector3,
 	var local_z := -weapon_up
 	var local_x := local_y.cross(local_z).normalized()
 	local_z = local_x.cross(local_y).normalized()
-	elbow.global_transform = Transform3D(
-		Basis(local_x, local_y, local_z), elbow.global_position)
+	_set_joint_world_basis(elbow, Basis(local_x, local_y, local_z))
 
 
 # ---- angel wings (admin fly mode) ------------------------------------------
@@ -2447,8 +2460,9 @@ func _update_angel_wings(dt: float, flight_velocity := Vector3.ZERO) -> void:
 	# flight is a gentle 0.72 Hz beat; climbing adds authority while descending
 	# relaxes toward a shallow glide.  Elbow and wrist phases trail the shoulder
 	# by roughly 60 and 120 ms, so the primaries flex instead of moving as a fan.
-	var climb := smoothstep(1.5, 12.0, flight_velocity.y)
-	var glide := smoothstep(2.0, 14.0, -flight_velocity.y)
+	var climb_speed := flight_velocity.dot(global_basis.y.normalized())
+	var climb := smoothstep(1.5, 12.0, climb_speed)
+	var glide := smoothstep(2.0, 14.0, -climb_speed)
 	var flap_hz := lerpf(0.72, 1.02, climb)
 	flap_hz = lerpf(flap_hz, 0.55, glide)
 	var flap_amplitude := lerpf(0.070, 0.096, climb)

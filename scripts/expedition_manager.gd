@@ -11,11 +11,6 @@ const ROCKET_INTERACTION_RANGE := 9.0
 const SHOP_INTERACTION_RANGE := 8.5
 const ROCKET_REBOARD_COOLDOWN_SECONDS := 0.45
 const ROCKET_DISEMBARK_REQUEST_TIMEOUT_SECONDS := 2.0
-const ROCKET_EXIT_SIDE_CLEARANCE := 3.35
-const RECOVERY_EXIT_OFFSETS := [
-	Vector3(4.2, 0.8, 0.0), Vector3(-4.2, 0.8, 0.0),
-	Vector3(0.0, 0.8, 4.2), Vector3(0.0, 0.8, -4.2),
-]
 const INVENTORY_KEY_NAME := "I"
 const LAUNCH_KEY_NAME := "L"
 const PENDING_CHEESE_ITEM := &"_pending_moon_cheese"
@@ -28,6 +23,7 @@ var local_inventory := LunarInventory.new()
 var inventory_ui: BackpackInventoryUI
 var local_suit: SpaceSuitSystem
 var voyage_camera: Camera3D
+var _voyage_environment: Environment
 
 var _ui_layer: CanvasLayer
 var _mission_panel: PanelContainer
@@ -38,7 +34,14 @@ var _toast: Label
 var _toast_remaining := 0.0
 var _shop_overlay: Control
 var _shop_balance: Label
+var colony_ui: MoonColonyUI
+var _colony_waypoint := {"action": "farm", "target": 0, "title": "CHEESE FARM"}
 var _last_net_phase := Net.RocketMissionPhase.EARTH_READY
+var _last_net_serial := -1
+var _recovery_elapsed := 0.0
+var _recovery_anchor_elapsed := 0.0
+var _recovery_anchor_age := 0.0
+var _recovery_clock_rate := 1.0
 var _inventories: Dictionary = {}
 var _suits: Dictionary = {}
 var _manifest_sync_remaining := 0.0
@@ -47,6 +50,12 @@ var _normal_backpack_visual: Node3D
 var _local_realm := -1
 var _local_reboard_cooldown_remaining := 0.0
 var _local_disembark_request_remaining := 0.0
+var _local_disembark_requested := false
+var _crew_interpolation_modes: Dictionary = {}
+var _cabin_view := true
+var _cabin_yaw := 0.0
+var _cabin_pitch := 0.0
+var _local_aboard := false
 
 
 func configure(owner_main: Node, owner_world: World) -> void:
@@ -63,6 +72,15 @@ func configure(owner_main: Node, owner_world: World) -> void:
 
 
 func _exit_tree() -> void:
+	for peer_id in _crew_interpolation_modes.keys():
+		_set_crew_render_driven(int(peer_id), false)
+	Net.bind_moon_colony_player(null)
+	if Net.moon_colony_changed.is_connected(_on_colony_changed):
+		Net.moon_colony_changed.disconnect(_on_colony_changed)
+	if Net.moon_colony_result.is_connected(_on_colony_result):
+		Net.moon_colony_result.disconnect(_on_colony_result)
+	if rocket and is_instance_valid(rocket) and rocket.voyage_visuals:
+		rocket.voyage_visuals.set_cinematic_terrain_enabled(false)
 	if rocket and is_instance_valid(rocket):
 		for member in rocket.crew:
 			_set_remote_crew_control(int(member.peer_id), false)
@@ -90,14 +108,14 @@ func _build_worlds() -> void:
 
 	rocket = LunarRocket.new()
 	world.add_child(rocket)
+	rocket.set_render_driven(true)
 	var earth_transform := Transform3D(Basis(Vector3.UP, PI),
 		_earth_launch_position())
 	var moon_local := moon_world.landing_transform()
 	var moon_transform := Transform3D(moon_world.global_basis * moon_local.basis,
 		moon_world.to_global(moon_local.origin))
-	var ocean_transform := Transform3D(Basis(Vector3.UP, PI * 0.35),
-		_ocean_splashdown_position())
-	rocket.configure_route(earth_transform, moon_transform, ocean_transform)
+	# The same physical pad owns departure, return contact and disembarking.
+	rocket.configure_route(earth_transform, moon_transform, earth_transform)
 	rocket.freeze = true
 	rocket.crew_pose_requested.connect(_on_crew_pose_requested)
 	rocket.crew_suited.connect(_on_crew_suited)
@@ -110,12 +128,24 @@ func _build_worlds() -> void:
 	voyage_camera.name = "VoyageCamera"
 	voyage_camera.fov = 72.0
 	voyage_camera.near = 0.08
-	voyage_camera.far = 100000.0
+	# Planet scale roots are camera-relative; their physical centres may sit far
+	# beyond this plane while local tangent caps own the visible pixels. Keeping a
+	# bounded far plane also avoids Forward+ light-cluster precision loss.
+	voyage_camera.far = 100_000.0
+	# The camera, hull, planets and seated crew use one render-clock sample.
+	# Applying physics interpolation again would put them on different clocks.
+	voyage_camera.physics_interpolation_mode = \
+		Node.PHYSICS_INTERPOLATION_MODE_OFF
 	voyage_camera.current = false
 	world.add_child(voyage_camera)
+	var source_environment := world._environment if world._environment \
+		else moon_world.lunar_environment
+	_voyage_environment = source_environment.duplicate()
 
 
 func _connect_network() -> void:
+	Net.moon_colony_changed.connect(_on_colony_changed)
+	Net.moon_colony_result.connect(_on_colony_result)
 	Net.expedition_state_changed.connect(_apply_authoritative_state)
 	Net.player_realm_changed.connect(_on_player_realm_changed)
 	Net.moon_cheese_purchase_result.connect(
@@ -152,8 +182,8 @@ func _build_ui() -> void:
 	_oxygen_panel.set_anchors_preset(Control.PRESET_BOTTOM_LEFT)
 	_oxygen_panel.offset_left = 18.0
 	_oxygen_panel.offset_right = 270.0
-	_oxygen_panel.offset_top = -104.0
-	_oxygen_panel.offset_bottom = -22.0
+	_oxygen_panel.offset_top = -204.0
+	_oxygen_panel.offset_bottom = -116.0
 	_oxygen_panel.add_theme_stylebox_override("panel",
 		_panel_style(Color(0.025, 0.07, 0.10, 0.94),
 			Color(0.26, 0.87, 1.0, 0.90), 13))
@@ -189,59 +219,14 @@ func _build_ui() -> void:
 
 
 func _build_cheese_shop_ui() -> void:
-	_shop_overlay = Control.new()
-	_shop_overlay.set_anchors_preset(Control.PRESET_FULL_RECT)
-	_shop_overlay.mouse_filter = Control.MOUSE_FILTER_STOP
-	_shop_overlay.visible = false
-	_ui_layer.add_child(_shop_overlay)
-	_shop_overlay.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
-	var scrim := ColorRect.new()
-	scrim.color = Color(0.015, 0.025, 0.06, 0.68)
-	scrim.set_anchors_preset(Control.PRESET_FULL_RECT)
-	_shop_overlay.add_child(scrim)
-	var center := CenterContainer.new()
-	center.set_anchors_preset(Control.PRESET_FULL_RECT)
-	_shop_overlay.add_child(center)
-	var panel := PanelContainer.new()
-	panel.custom_minimum_size = Vector2(520.0, 320.0)
-	panel.add_theme_stylebox_override("panel",
-		_panel_style(Color(0.08, 0.075, 0.12, 0.98),
-			Color(1.0, 0.82, 0.27), 20))
-	center.add_child(panel)
-	var column := VBoxContainer.new()
-	column.add_theme_constant_override("separation", 13)
-	panel.add_child(column)
-	var title := Label.new()
-	title.text = "🧀  CRATER & CURD  ·  MOON CHEESE"
-	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	title.add_theme_font_size_override("font_size", 24)
-	title.add_theme_color_override("font_color", Color(1.0, 0.86, 0.34))
-	column.add_child(title)
-	var patter := Label.new()
-	patter.text = "‘Vacuum-aged, Earth-monkey approved!’\nMoon cheese stacks in your space backpack."
-	patter.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	patter.add_theme_font_size_override("font_size", 15)
-	patter.add_theme_color_override("font_color", Color(0.82, 0.86, 0.94))
-	column.add_child(patter)
-	_shop_balance = Label.new()
-	_shop_balance.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	_shop_balance.add_theme_font_size_override("font_size", 20)
-	column.add_child(_shop_balance)
-	for quantity in [1, 4]:
-		var button := Button.new()
-		button.text = "BUY %d MOON CHEESE  ·  🍌 %d" % [quantity,
-			quantity * MoonCheeseShop.CHEESE_PRICE_BANANAS]
-		button.custom_minimum_size.y = 52.0
-		button.add_theme_font_size_override("font_size", 16)
-		var requested: int = int(quantity)
-		button.pressed.connect(func() -> void:
-			_request_cheese_purchase(requested))
-		column.add_child(button)
-	var leave := Button.new()
-	leave.text = "THANK THE CHEESEKEEPER  ·  ESC"
-	leave.custom_minimum_size.y = 42.0
-	leave.pressed.connect(_close_shop)
-	column.add_child(leave)
+	colony_ui = MoonColonyUI.new()
+	_ui_layer.add_child(colony_ui)
+	_shop_overlay = colony_ui
+	_shop_balance = colony_ui.balance_label
+	colony_ui.closed.connect(_close_shop)
+	colony_ui.purchase_requested.connect(_request_cheese_purchase)
+	colony_ui.action_requested.connect(_request_colony_action)
+	colony_ui.waypoint_requested.connect(_set_colony_waypoint)
 
 
 static func _panel_style(fill: Color, border: Color,
@@ -276,16 +261,105 @@ func _process(delta: float) -> void:
 		# Every peer animates the shared rocket, but only manifested passengers
 		# enter the cinematic. Spectators on Earth or the Moon keep control of
 		# their own camera while a different crew is in transit.
-		if _local_player_is_voyaging(state):
-			_update_voyage_camera(delta, -1.0, state)
+		var local_voyaging := _local_player_is_voyaging(state)
+		if rocket and rocket.voyage_visuals:
+			rocket.voyage_visuals.set_local_viewer_enabled(local_voyaging)
+			rocket.voyage_visuals.set_cinematic_terrain_enabled(local_voyaging)
+		rocket.advance_render_clock(delta)
+		var sample := rocket.render_sample()
+		rocket.present_render_sample(sample)
+		if local_voyaging:
+			_update_transit_world_visibility()
+			_update_voyage_camera(delta, -1.0, state, false, sample)
 		elif voyage_camera.current:
 			_restore_player_camera(true)
 		_update_mission_label(state)
 	elif phase == Net.RocketMissionPhase.SPLASHDOWN_RECOVERY:
+		if rocket and rocket.voyage_visuals:
+			rocket.voyage_visuals.set_cinematic_terrain_enabled(false)
+		_advance_recovery_presentation(delta)
+		if is_local_player_aboard():
+			_update_aboard_camera()
 		_update_recovery_label(state)
 	else:
+		if rocket and rocket.voyage_visuals:
+			rocket.voyage_visuals.set_cinematic_terrain_enabled(false)
+		if is_local_player_aboard():
+			_update_aboard_camera()
 		_update_proximity_prompt()
 	_update_oxygen_ui()
+	if moon_world.cheese_shop:
+		moon_world.cheese_shop.update_customer(world.local_player
+			if Net.player_realm() == Net.PlayerRealm.MOON else null)
+		if _shop_overlay.visible and colony_ui.at_market and (Net.player_realm() != Net.PlayerRealm.MOON
+				or not moon_world.cheese_shop.is_customer_in_range(world.local_player, SHOP_INTERACTION_RANGE + 1.5)):
+			_close_shop()
+	if moon_world.colony_world:
+		moon_world.colony_world.set_customer(world.local_player
+			if Net.player_realm() == Net.PlayerRealm.MOON else null)
+	if _shop_overlay.visible and Net.player_realm() != Net.PlayerRealm.MOON:
+		_close_shop()
+
+
+func _input(event: InputEvent) -> void:
+	if event is InputEventMouseMotion and _local_aboard and _cabin_view \
+			and Input.mouse_mode == Input.MOUSE_MODE_CAPTURED and not _other_modal_open():
+		_cabin_yaw = wrapf(_cabin_yaw - event.relative.x * CameraRig.SENS, -PI, PI)
+		_cabin_pitch = clampf(_cabin_pitch - event.relative.y * CameraRig.SENS, -1.45, 1.45)
+		get_viewport().set_input_as_handled()
+
+
+func set_cabin_view(enabled: bool) -> void:
+	_cabin_view = enabled
+	if world and world.local_player:
+		world.local_player.set_rocket_cabin_view(_local_aboard and enabled)
+	if _local_aboard:
+		_update_aboard_camera()
+		show_notice("CABIN VIEW · mouse to look · C exterior" if enabled \
+			else "EXTERIOR VIEW · C cabin", 2.6)
+
+
+func cabin_view_active() -> bool:
+	return _local_aboard and _cabin_view
+
+
+func _update_aboard_camera() -> void:
+	if not rocket or not voyage_camera or not _local_aboard:
+		return
+	if _cabin_view:
+		_update_cabin_camera()
+	elif _local_player_is_voyaging():
+		_update_voyage_camera(0.0)
+	else:
+		if voyage_camera.get_parent() != world:
+			voyage_camera.reparent(world, true)
+		var frame := rocket.global_basis.orthonormalized()
+		voyage_camera.global_position = rocket.global_position \
+			+ frame * Vector3(24.0, 12.0, 44.0)
+		voyage_camera.look_at(rocket.global_position + frame.y * 1.5, frame.y)
+		voyage_camera.fov = 65.0
+		voyage_camera.environment = moon_world.lunar_environment \
+			if Net.player_realm() == Net.PlayerRealm.MOON else null
+		voyage_camera.current = true
+
+
+func _update_cabin_camera() -> void:
+	# Keep the eye in cabin-local coordinates. Hull, windows, other seated crew
+	# and camera inherit the same displayed rocket transform without chasing it.
+	if voyage_camera.get_parent() != rocket:
+		voyage_camera.reparent(rocket, false)
+	var slot := maxi(rocket.seat_for_peer(Net.local_id()), 0)
+	var eye := rocket.cabin_eye_local_transform(slot)
+	eye.basis = eye.basis * Basis(Vector3.UP, _cabin_yaw) * Basis(Vector3.RIGHT, _cabin_pitch)
+	voyage_camera.transform = eye
+	voyage_camera.fov = 82.0
+	voyage_camera.near = 0.025
+	if rocket.is_in_transit():
+		_update_voyage_environment(rocket.voyage_elapsed, rocket.outbound)
+	else:
+		voyage_camera.environment = moon_world.lunar_environment \
+			if Net.player_realm() == Net.PlayerRealm.MOON else null
+	voyage_camera.current = true
 
 
 func _unhandled_input(event: InputEvent) -> void:
@@ -293,9 +367,19 @@ func _unhandled_input(event: InputEvent) -> void:
 			or not event.pressed or event.echo:
 		return
 	if _shop_overlay.visible:
-		if event.keycode == KEY_ESCAPE or event.physical_keycode == KEY_ESCAPE:
+		if event.keycode == KEY_ESCAPE or event.physical_keycode in [KEY_ESCAPE, KEY_J]:
 			_close_shop()
-			get_viewport().set_input_as_handled()
+		get_viewport().set_input_as_handled()
+		return
+	if _other_modal_open():
+		return
+	if event.physical_keycode == KEY_C and is_local_player_aboard():
+		set_cabin_view(not _cabin_view)
+		get_viewport().set_input_as_handled()
+		return
+	if event.physical_keycode == KEY_J and Net.player_realm() == Net.PlayerRealm.MOON:
+		_open_colony_journal()
+		get_viewport().set_input_as_handled()
 		return
 	if event.physical_keycode == KEY_I:
 		toggle_inventory()
@@ -311,11 +395,39 @@ func _unhandled_input(event: InputEvent) -> void:
 		# the new manifest synchronously from inside this call. _sync_manifest then
 		# gets one chance to place the monkey clear of the hull and suppress this
 		# same E press before Player's polled interaction path can board it again.
-		_local_disembark_request_remaining = \
-			ROCKET_DISEMBARK_REQUEST_TIMEOUT_SECONDS
-		if not Net.request_rocket_board(false):
-			_local_disembark_request_remaining = 0.0
+		request_disembark()
 		get_viewport().set_input_as_handled()
+
+
+func request_disembark() -> bool:
+	if not is_local_player_aboard() or rocket.state not in [
+			LunarRocket.State.EARTH_BOARDING, LunarRocket.State.LANDED_MOON]:
+		return false
+	_local_disembark_requested = true
+	_local_disembark_request_remaining = ROCKET_DISEMBARK_REQUEST_TIMEOUT_SECONDS
+	var accepted := Net.request_rocket_board(false)
+	if not accepted:
+		_local_disembark_requested = false
+		_local_disembark_request_remaining = 0.0
+	return accepted
+
+
+func _other_modal_open() -> bool:
+	if not is_instance_valid(main):
+		return false
+	if is_instance_valid(main.get("pause_menu")) or is_instance_valid(main.get("menu")):
+		return true
+	var hud: Variant = main.get("hud")
+	if is_instance_valid(hud) and hud.world_map_is_open():
+		return true
+	var chat: Variant = main.get("chat_box")
+	if is_instance_valid(chat) and chat.is_open():
+		return true
+	for key in ["admin_panel", "trade_ui"]:
+		var overlay: Variant = main.get(key)
+		if is_instance_valid(overlay) and overlay.visible:
+			return true
+	return false
 
 
 func is_ui_open() -> bool:
@@ -347,9 +459,9 @@ func try_interact(player: MonkeyPlayer) -> bool:
 	var phase := int(Net.expedition_state_snapshot().get("phase",
 		Net.RocketMissionPhase.EARTH_READY))
 	if phase == Net.RocketMissionPhase.SPLASHDOWN_RECOVERY \
-			and player.global_position.distance_to(rocket.global_position) \
+			and player.global_position.distance_to(rocket.boarding_global_position()) \
 				<= ROCKET_INTERACTION_RANGE:
-		show_notice("Splashdown recovery in progress · boarding is temporarily locked.")
+		show_notice("Landing engines shutting down · hatch opens in a moment.")
 		return true
 	# Consume the original disembark tap and a very short follow-through window.
 	# Without this guard Input.is_action_just_pressed("grab") can still be true
@@ -359,11 +471,19 @@ func try_interact(player: MonkeyPlayer) -> bool:
 		return true
 	if Net.player_realm() == Net.PlayerRealm.MOON \
 			and moon_world.cheese_shop \
-			and player.global_position.distance_to(
-				moon_world.cheese_shop.global_position) <= SHOP_INTERACTION_RANGE:
+			and moon_world.cheese_shop.is_customer_in_range(player, SHOP_INTERACTION_RANGE):
 		_open_shop()
 		return true
-	if player.global_position.distance_to(rocket.global_position) \
+	if Net.player_realm() == Net.PlayerRealm.MOON and moon_world.colony_world:
+		var interaction := moon_world.colony_world.nearest_interaction(player.global_position)
+		if not interaction.is_empty():
+			var action := str(interaction.get("action", ""))
+			if action.is_empty():
+				show_notice(str(interaction.get("prompt", "Visit Muenster to expand the farm.")))
+			else:
+				_request_colony_action(action, int(interaction.get("target", 0)))
+			return true
+	if player.global_position.distance_to(rocket.boarding_global_position()) \
 			> ROCKET_INTERACTION_RANGE:
 		return false
 	if local_suit and Net.player_realm() == Net.PlayerRealm.MOON \
@@ -426,11 +546,12 @@ func _apply_authoritative_state(state: Dictionary) -> void:
 	if not rocket or state.is_empty():
 		return
 	var phase := int(state.get("phase", Net.RocketMissionPhase.EARTH_READY))
-	var recovered_peer_ids: Array[int] = []
-	if phase == Net.RocketMissionPhase.EARTH_READY \
-			and _last_net_phase == Net.RocketMissionPhase.SPLASHDOWN_RECOVERY:
-		for member in rocket.crew:
-			recovered_peer_ids.append(int(member.peer_id))
+	var serial := int(state.get("serial", 0))
+	var new_presentation := phase != _last_net_phase or serial != _last_net_serial
+	# Gate private scenery before a packet can seek or begin a voyage. Bystanders
+	# still see the shared hull, crew, landing legs and surface effects immediately.
+	if rocket.voyage_visuals:
+		rocket.voyage_visuals.set_local_viewer_enabled(_local_player_is_voyaging(state))
 	# Ready-state first, then manifest: disembark_crew is deliberately blocked in
 	# transit and must see the authoritative arrival before the crew list clears.
 	if phase == Net.RocketMissionPhase.MOON_READY:
@@ -438,30 +559,68 @@ func _apply_authoritative_state(state: Dictionary) -> void:
 		rocket.apply_authoritative_clock(LunarRocket.State.LANDED_MOON,
 			true, LunarRocket.OUTBOUND_DURATION_SECONDS)
 	elif phase == Net.RocketMissionPhase.SPLASHDOWN_RECOVERY:
-		# Recovery is authority-owned, so this direct phase mapping also places a
-		# late joiner's freshly built rocket at the ocean instead of the launch pad.
-		rocket.global_transform = rocket.ocean_splashdown_transform
-		rocket.apply_authoritative_clock(LunarRocket.State.SPLASHDOWN,
-			false, LunarRocket.RETURN_DURATION_SECONDS)
+		# The inherited phase ID now means the brief engine shutdown on the pad.
+		# A late joiner reconstructs exactly the same grounded hull and cabin.
+		if new_presentation or rocket.state != LunarRocket.State.SPLASHDOWN:
+			rocket.apply_authoritative_clock(LunarRocket.State.SPLASHDOWN,
+				false, LunarRocket.RETURN_DURATION_SECONDS)
 		rocket.freeze = true
+		_synchronize_recovery_presentation(float(state.get("elapsed", 0.0)),
+			new_presentation)
 	elif phase == Net.RocketMissionPhase.EARTH_READY:
 		_reset_rocket_to_launchpad()
 	_sync_manifest(state)
-	if not recovered_peer_ids.is_empty():
-		_place_recovered_crew_at_launchpad(recovered_peer_ids)
 	if phase == Net.RocketMissionPhase.OUTBOUND:
+		_local_disembark_requested = false
 		if not rocket.is_in_transit():
 			rocket.launch_to_moon()
-		rocket.apply_authoritative_clock(LunarRocket.state_for_elapsed(true,
-			float(state.get("elapsed", 0.0))), true,
-			float(state.get("elapsed", 0.0)))
+		_apply_flight_clock(state, true, serial != _last_net_serial)
 	elif phase == Net.RocketMissionPhase.RETURN:
+		_local_disembark_requested = false
 		if not rocket.is_in_transit():
 			rocket.begin_return_to_earth()
-		rocket.apply_authoritative_clock(LunarRocket.state_for_elapsed(false,
-			float(state.get("elapsed", 0.0))), false,
-			float(state.get("elapsed", 0.0)))
+		_apply_flight_clock(state, false, serial != _last_net_serial)
 	_last_net_phase = phase
+	_last_net_serial = serial
+	# Reconcile the manifest before moving occupants. Arrival removes Moon crew;
+	# return shutdown retains them, so each snapshot anchors only current seats.
+	rocket._emit_crew_poses()
+
+
+func _apply_flight_clock(snapshot: Dictionary, outbound: bool, new_mission: bool) -> void:
+	var elapsed := float(snapshot.get("elapsed", 0.0))
+	var flight_state := LunarRocket.state_for_elapsed(outbound, elapsed)
+	if new_mission:
+		rocket.apply_authoritative_clock(flight_state, outbound, elapsed)
+	else:
+		rocket.synchronize_authoritative_clock(flight_state, outbound, elapsed)
+
+
+func _synchronize_recovery_presentation(elapsed: float, first_sample: bool) -> void:
+	if not is_finite(elapsed):
+		return
+	_recovery_anchor_elapsed = clampf(elapsed, 0.0, Net.ROCKET_RECOVERY_SECONDS)
+	_recovery_anchor_age = 0.0
+	if first_sample:
+		_recovery_elapsed = _recovery_anchor_elapsed
+		_recovery_clock_rate = 1.0
+		rocket.present_landing_recovery(_recovery_elapsed)
+
+
+func _advance_recovery_presentation(delta: float) -> void:
+	if not rocket or not is_finite(delta) or delta <= 0.0:
+		return
+	_recovery_anchor_age += delta
+	var step := minf(delta, LunarRocket.MAX_RENDER_CLOCK_STEP)
+	var expected := _recovery_anchor_elapsed + _recovery_anchor_age
+	var target_rate := 1.0 + clampf((expected - (_recovery_elapsed + step))
+		* LunarRocket.CLOCK_CORRECTION_GAIN, -LunarRocket.MAX_CLOCK_RATE_CORRECTION,
+		LunarRocket.MAX_CLOCK_RATE_CORRECTION)
+	_recovery_clock_rate = lerpf(_recovery_clock_rate, target_rate,
+		1.0 - exp(-step * 6.0))
+	_recovery_elapsed = minf(_recovery_elapsed + step * _recovery_clock_rate,
+		Net.ROCKET_RECOVERY_SECONDS)
+	rocket.present_landing_recovery(_recovery_elapsed)
 
 
 func _sync_manifest(state: Dictionary) -> void:
@@ -481,10 +640,13 @@ func _sync_manifest(state: Dictionary) -> void:
 			else:
 				removed = rocket.disembark_crew(peer_id)
 			if removed:
+				_set_crew_render_driven(peer_id, false)
 				if peer_id == Net.local_id() \
-						and _local_disembark_request_remaining > 0.0:
-					_finish_local_disembark()
+						and (_local_disembark_requested or _local_disembark_request_remaining > 0.0):
+					_finish_local_disembark(int(member.seat))
 				_set_remote_crew_control(peer_id, false)
+	# Reserve authority-order slots even while a late puppet is still spawning.
+	rocket.reconcile_manifest_seats(desired)
 	for peer_value in desired:
 		var peer_id := int(peer_value)
 		if rocket.seat_for_peer(peer_id) >= 0:
@@ -531,50 +693,41 @@ func _sync_local_lock(aboard: bool) -> void:
 	var player := world.local_player
 	if not player:
 		return
+	var was_aboard := _local_aboard
 	player.set_expedition_locked(aboard)
+	if is_instance_valid(local_suit):
+		local_suit.set_vacuum_exposure(Net.player_realm() == Net.PlayerRealm.MOON and not aboard)
+	if player.cam:
+		player.cam.set_process(not aboard)
+		player.cam.set_process_input(not aboard)
+	if aboard and not _local_aboard:
+		_cabin_view = true
+		_cabin_yaw = 0.0
+		_cabin_pitch = 0.0
+	_local_aboard = aboard
+	player.set_rocket_cabin_view(aboard and _cabin_view)
+	if aboard:
+		_update_aboard_camera()
+	elif was_aboard:
+		_restore_player_camera(true)
 
 
-func _finish_local_disembark() -> void:
+func _finish_local_disembark(seat_index := 0) -> void:
+	_local_disembark_requested = false
 	_local_disembark_request_remaining = 0.0
 	_local_reboard_cooldown_remaining = ROCKET_REBOARD_COOLDOWN_SECONDS
 	var player := world.local_player if world else null
 	if not player or not rocket:
 		return
-	# Exit through the craft's local right side, beyond the 1.55 m capsule and
-	# 2.03 m landing feet. Preserve the landed craft's orientation on Earth,
-	# Moon, and splashdown, while always giving the monkey a little floor margin.
-	var exit_position := rocket.to_global(Vector3(
-		ROCKET_EXIT_SIDE_CLEARANCE, 0.6, 0.0))
+	# The hatch exits beyond the deployed feet at the ground, never at cabin
+	# height and never at a generic world spawn or aircraft carrier.
+	var exit_position := rocket.disembark_global_position(seat_index)
 	if Net.player_realm() == Net.PlayerRealm.MOON and moon_world:
-		var moon_local := moon_world.to_local(exit_position)
-		moon_local.y = moon_world.height_at(moon_local.x, moon_local.z) + 1.2
-		exit_position = moon_world.to_global(moon_local)
+		exit_position = moon_world.surface_position_at(exit_position, 0.25)
 	elif Net.player_realm() == Net.PlayerRealm.EARTH:
-		exit_position.y = maxf(exit_position.y,
-			Gen.height(exit_position.x, exit_position.z) + 1.2)
+		exit_position.y = Gen.height(exit_position.x, exit_position.z) + 0.25
 	player.admin_teleport(exit_position)
 	show_notice("Disembarked · E can board again once clear of the hatch.", 2.4)
-
-
-func _place_recovered_crew_at_launchpad(peer_ids: Array[int]) -> void:
-	for index in range(peer_ids.size()):
-		var actor := _actor_for_peer(peer_ids[index])
-		if not actor:
-			continue
-		var offset: Vector3 = RECOVERY_EXIT_OFFSETS[
-			index % RECOVERY_EXIT_OFFSETS.size()]
-		var destination := rocket.to_global(offset)
-		destination.y = maxf(destination.y,
-			Gen.height(destination.x, destination.z) + 1.2)
-		if actor.has_method("admin_teleport"):
-			actor.call("admin_teleport", destination)
-		else:
-			actor.global_position = destination
-			if actor is CharacterBody3D:
-				(actor as CharacterBody3D).velocity = Vector3.ZERO
-			actor.reset_physics_interpolation()
-	if peer_ids.has(Net.local_id()):
-		show_notice("CREW RECOVERED · returned safely to the launch complex", 4.0)
 
 
 func _set_remote_crew_control(peer_id: int, driven: bool) -> void:
@@ -589,16 +742,31 @@ func _on_crew_pose_requested(peer_id: int, seat_transform: Transform3D) -> void:
 	var actor := _actor_for_peer(peer_id)
 	if not actor:
 		return
-	var correction_distance := actor.global_position.distance_to(
-		seat_transform.origin)
+	_set_crew_render_driven(peer_id, true)
 	_set_remote_crew_control(peer_id, true)
 	actor.global_transform = seat_transform
 	if actor is CharacterBody3D:
 		(actor as CharacterBody3D).velocity = Vector3.ZERO
-	# Reset only for a true teleport/late join. Clearing interpolation every
-	# physics frame made otherwise deterministic seated monkeys visibly jitter.
-	if correction_distance > 3.0:
-		actor.reset_physics_interpolation()
+
+
+func _set_crew_render_driven(peer_id: int, driven: bool) -> void:
+	var saved: Dictionary = _crew_interpolation_modes.get(peer_id, {})
+	var saved_actor: Node3D = saved.actor.get_ref() if not saved.is_empty() else null
+	var actor := _actor_for_peer(peer_id) if driven else null
+	if saved_actor and (not driven or saved_actor != actor):
+		saved_actor.physics_interpolation_mode = int(saved.mode)
+		saved_actor.reset_physics_interpolation()
+	if not driven or saved_actor != actor:
+		_crew_interpolation_modes.erase(peer_id)
+	if not driven or not actor or _crew_interpolation_modes.has(peer_id):
+		return
+	_crew_interpolation_modes[peer_id] = {
+		"actor": weakref(actor), "mode": actor.physics_interpolation_mode,
+	}
+	# Seat transforms are already sampled at the display rate. Inheriting the
+	# world's fixed-step interpolation makes passengers vibrate inside the hull.
+	actor.physics_interpolation_mode = Node.PHYSICS_INTERPOLATION_MODE_OFF
+	actor.reset_physics_interpolation()
 
 
 func _on_crew_suited(peer_id: int, suit: SpaceSuitSystem,
@@ -630,7 +798,9 @@ func _ensure_suit_for_peer(peer_id: int) -> SpaceSuitSystem:
 		return null
 	# The local owner advances authoritative oxygen. Other clients create only a
 	# visible suit replica and must not consume a second, divergent tank.
-	suit.set_vacuum_exposure(peer_id == Net.local_id())
+	var in_cabin := (Net.expedition_state_snapshot().get("crew", []) as Array).has(peer_id)
+	suit.set_vacuum_exposure(peer_id == Net.local_id() \
+		and Net.player_realm(peer_id) == Net.PlayerRealm.MOON and not in_cabin)
 	_suits[peer_id] = suit
 	_inventories[peer_id] = inventory
 	if peer_id == Net.local_id():
@@ -732,6 +902,7 @@ func respawn_local_player_after_defeat(actor: MonkeyPlayer) -> bool:
 			or not moon_world or not is_instance_valid(moon_world):
 		return false
 	actor.revive_at(moon_world.to_global(moon_world.actor_landing_position()))
+	actor.set_lunar_world(moon_world)
 	if local_suit:
 		local_suit.refill_oxygen()
 		local_suit.set_vacuum_exposure(true)
@@ -742,9 +913,8 @@ func respawn_local_player_after_defeat(actor: MonkeyPlayer) -> bool:
 func lunar_void_rescue_height(actor: MonkeyPlayer) -> float:
 	if actor == world.local_player and Net.player_realm() == Net.PlayerRealm.MOON \
 			and moon_world and is_instance_valid(moon_world):
-		# Lowest crater bowls remain well above this line. Crossing it means the
-		# monkey has left the bounded landing-zone collider, not merely jumped.
-		return moon_world.global_position.y - 48.0
+		# Lunar movement checks radial penetration instead of world Y.
+		return -INF
 	return -25.0
 
 
@@ -753,6 +923,7 @@ func rescue_local_player_from_lunar_void(actor: MonkeyPlayer) -> bool:
 			or not moon_world or not is_instance_valid(moon_world):
 		return false
 	actor.admin_teleport(moon_world.to_global(moon_world.actor_landing_position()))
+	actor.set_lunar_world(moon_world)
 	show_notice("LUNAR SAFETY RESCUE · returned to the landing pad", 3.2)
 	return true
 
@@ -782,29 +953,56 @@ func _apply_local_realm(realm: int) -> void:
 		return
 	var player := world.local_player
 	var previous_realm := _local_realm
+	if realm != Net.PlayerRealm.MOON:
+		Net.bind_moon_colony_player(null)
+		if _shop_overlay.visible:
+			_close_shop()
 	match realm:
 		Net.PlayerRealm.TRANSIT:
-			world.set_earth_streaming_enabled(false)
-			moon_world.visible = false
+			# Preserve the real departure surface until the Earth has visibly fallen
+			# away, and reveal the real lunar terrain before touchdown/from ignition.
+			# The proxy space shell handles the dissolves between these surfaces.
+			_update_transit_world_visibility()
+			player.reset_environment_gravity()
+			player.cam._cam.environment = null
 			if local_suit:
 				# The pressurized cabin pauses tank consumption in both directions.
 				local_suit.set_vacuum_exposure(false)
 			voyage_camera.current = true
 			player.set_expedition_locked(true)
 		Net.PlayerRealm.MOON:
+			world.clear_expedition_stream_focus()
 			world.set_earth_streaming_enabled(false)
+			world.set_earth_transit_surface_visible(false)
 			moon_world.visible = true
 			_ensure_local_suit()
-			player.set_environment_gravity(MoonWorld.LUNAR_GRAVITY)
-			var landing := moon_world.to_global(moon_world.actor_landing_position())
-			player.admin_teleport(landing)
+			moon_world.set_cinematic_render_radius(MoonWorld.PLAYABLE_RADIUS_METERS)
+			var moon_snapshot := Net.expedition_state_snapshot()
+			var moon_crew: Array = moon_snapshot.get("crew", [])
+			var parked_aboard := int(moon_snapshot.get("phase", -1)) \
+				== Net.RocketMissionPhase.MOON_READY and moon_crew.has(Net.local_id())
+			if not parked_aboard:
+				var landing := moon_world.to_global(moon_world.actor_landing_position())
+				player.admin_teleport(landing)
+			player.set_lunar_world(moon_world)
+			Net.bind_moon_colony_player(player)
+			_on_colony_changed(Net.ensure_moon_colony())
+			player.cam._cam.environment = moon_world.lunar_environment
+			player.cam._cam.far = 14000.0
 			# Release after the final transform write. Manifest and realm packets can
 			# arrive in either order, so this idempotently makes the on-foot capsule
 			# authoritative at the exact touchdown location.
-			player.set_expedition_locked(false)
-			_restore_player_camera(true)
-			show_notice("LUNAR TOUCHDOWN · 1.62 m/s² · vacuum suit active · I inventory")
+			if parked_aboard:
+				var occupied_seat := rocket.seat_for_peer(Net.local_id())
+				if occupied_seat >= 0:
+					_on_crew_pose_requested(Net.local_id(), rocket.seat_global_transform(occupied_seat))
+				_sync_local_lock(true)
+			else:
+				player.set_expedition_locked(false)
+				_restore_player_camera(true)
+				show_notice("WELCOME TO THE LUNAR CO-OP · E harvest / trade · J colony journal")
 		_:
+			world.clear_expedition_stream_focus()
 			moon_world.visible = false
 			if local_suit:
 				local_suit.set_vacuum_exposure(false)
@@ -813,32 +1011,42 @@ func _apply_local_realm(realm: int) -> void:
 				# shell off in breathable air so late joiners render the same outfit.
 				local_suit.unequip()
 			player.reset_environment_gravity()
+			player.cam._cam.environment = null
 			player.set_expedition_locked(false)
 			world.set_earth_streaming_enabled(true)
+			world.set_earth_transit_surface_visible(true)
 			var snapshot := Net.expedition_state_snapshot()
 			var manifest: Array = snapshot.get("crew", [])
 			var mission_phase := int(snapshot.get("phase",
 				Net.RocketMissionPhase.EARTH_READY))
-			var completing_return := previous_realm == Net.PlayerRealm.TRANSIT \
+			var completing_return := manifest.has(Net.local_id()) \
 				and mission_phase in [Net.RocketMissionPhase.RETURN,
-					Net.RocketMissionPhase.SPLASHDOWN_RECOVERY] \
-				and manifest.has(Net.local_id())
+					Net.RocketMissionPhase.SPLASHDOWN_RECOVERY,
+					Net.RocketMissionPhase.EARTH_READY]
 			if completing_return:
-				player.admin_teleport(rocket.ocean_splashdown_transform.origin
-					+ Vector3(4.0, 1.0, 0.0))
+				# Preserve the occupied cabin through contact. The authoritative
+				# terminal pose below puts it on the same pad seen on approach.
+				player.set_expedition_locked(true)
 			elif previous_realm == Net.PlayerRealm.TRANSIT \
 					or player.global_position.y >= Net.MOON_REALM_MIN_Y:
 				# Admin extraction is not an arrival. Never preserve a cinematic cabin
 				# coordinate in the playable Earth realm, even early in ascent when it
 				# remains below the broad Moon/Earth network separator.
 				player.admin_teleport(world.spawn_point())
-			_restore_player_camera()
+			if completing_return:
+				_update_aboard_camera()
+			else:
+				_restore_player_camera()
 	_local_realm = realm
 	local_realm_changed.emit(realm)
 
 
 func _restore_player_camera(capture_gameplay_input := false) -> void:
 	if world.local_player and world.local_player.cam:
+		world.local_player.set_rocket_cabin_view(false)
+		world.local_player.cam.set_process(true)
+		world.local_player.cam.set_process_input(true)
+		world.local_player.cam.snap_to_target()
 		world.local_player.cam.make_current()
 	if capture_gameplay_input and _can_capture_gameplay_input():
 		Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
@@ -858,8 +1066,10 @@ func _can_capture_gameplay_input() -> bool:
 
 func _on_voyage_progress(progress: float, _elapsed: float,
 		_remaining: float) -> void:
-	if voyage_camera.current:
-		_update_voyage_camera(0.0, progress)
+	# The render-frame process owns the single camera/visibility update. Applying
+	# the same work from this physics signal caused up to four Moon/terrain uniform
+	# passes per displayed frame. Keep the signal for API compatibility.
+	var _authority_progress := progress
 
 
 func _on_camera_cue(cue: StringName, _duration: float) -> void:
@@ -875,86 +1085,310 @@ func _on_local_rocket_moon_landing() -> void:
 
 
 func _on_local_rocket_splashdown() -> void:
-	show_notice("Ocean splashdown · crew recovered safely", 4.0)
+	show_notice("TOUCHDOWN · landing legs settled · engines shutting down", 3.0)
 
 
 func _update_voyage_camera(_delta: float, progress_override := -1.0,
-		state: Dictionary = {}) -> void:
-	if not rocket or not voyage_camera or not _local_player_is_voyaging(state):
+		state: Dictionary = {}, force_preview := false,
+		shared_sample: Dictionary = {}) -> void:
+	if not rocket or not voyage_camera \
+			or (not force_preview and not _local_player_is_voyaging(state)):
 		return
-	var progress := progress_override
-	if progress < 0.0:
-		var duration := LunarRocket.OUTBOUND_DURATION_SECONDS if rocket.outbound \
-			else LunarRocket.RETURN_DURATION_SECONDS
-		progress = clampf(rocket.voyage_elapsed / duration, 0.0, 1.0)
-	var rocket_transform := rocket.get_global_transform_interpolated()
-	var basis := rocket_transform.basis
-	var rocket_position := rocket_transform.origin
-	var ascent_fraction := LunarRocket.OUTBOUND_PHASE_TIMES[0] \
-		/ LunarRocket.OUTBOUND_DURATION_SECONDS
-	if rocket.outbound and progress <= ascent_fraction:
-		# A high trailing view looks through the flame toward the real runway. The
-		# focus begins below the rocket, so the world visibly shrinks throughout
-		# the complete straight-up launch instead of instantly becoming a proxy.
-		var launch_t := progress / ascent_fraction
-		var launch_forward := rocket.earth_launch_transform.basis.z.normalized()
-		var launch_right := rocket.earth_launch_transform.basis.x.normalized()
-		# Begin inside the pad's authored 14 m foliage-free circle. In the first
-		# quarter-second the rocket is already hundreds of metres above the canopy,
-		# so ease out to the wider cinematic framing only after trees can no longer
-		# put the chase camera inside a crown.
-		var canopy_clear_t := smoothstep(0.0, 0.025, launch_t)
-		var forward_distance := lerpf(10.0,
-			lerpf(19.0, 34.0, launch_t), canopy_clear_t)
-		var right_distance := lerpf(3.0,
-			lerpf(7.0, 2.0, launch_t), canopy_clear_t)
-		var camera_height := lerpf(9.5,
-			lerpf(12.0, 22.0, launch_t), canopy_clear_t)
-		voyage_camera.global_position = rocket_position \
-			+ launch_forward * forward_distance \
-			+ launch_right * right_distance \
-			+ Vector3.UP * camera_height
-		var launchpad := rocket.earth_launch_transform.origin
-		var downward_focus := launchpad.lerp(rocket_position,
-			smoothstep(0.68, 1.0, launch_t) * 0.42)
-		voyage_camera.look_at(downward_focus, Vector3.UP)
-		voyage_camera.fov = lerpf(61.0, 72.0, launch_t)
-		voyage_camera.current = true
+	var elapsed := rocket.voyage_elapsed
+	if progress_override >= 0.0:
+		elapsed = clampf(progress_override, 0.0, 1.0) * (
+			LunarRocket.OUTBOUND_DURATION_SECONDS if rocket.outbound
+			else LunarRocket.RETURN_DURATION_SECONDS)
+	var sample := shared_sample if not shared_sample.is_empty() \
+		else rocket.render_sample(elapsed)
+	if force_preview:
+		# Diagnostics seek the same presentation pipeline used by the live loop.
+		rocket.voyage_visuals.set_local_viewer_enabled(true)
+		rocket.voyage_visuals.set_cinematic_terrain_enabled(true)
+		rocket.present_render_sample(sample)
+		_update_transit_world_visibility()
+	if _cabin_view and _local_aboard and not force_preview:
+		_update_cabin_camera()
 		return
-	var distance := lerpf(20.0, 38.0, sin(progress * PI))
-	var height := lerpf(8.0, 17.0, sin(progress * PI))
-	var orbit := sin(progress * TAU) * 0.28
-	var side := basis.x * distance * orbit
-	var behind := basis.z * distance
-	var chase_position := rocket_position + behind + side + basis.y * height
-	var focus_target := voyage_camera_focus_target()
-	var chase_fov := lerpf(66.0, 80.0, sin(progress * PI))
-	# Preserve the exact final launch framing at the ten-second boundary, then
-	# ease into the orbital chase over the first three atmosphere-exit seconds.
-	# Without this bridge the focus jumped from the shrinking runway to the
-	# rocket by more than ten kilometres in one rendered frame.
-	if rocket.outbound and rocket.state == LunarRocket.State.ATMOSPHERE_EXIT:
-		var transition := smoothstep(0.0, 3.0,
-			rocket.voyage_elapsed - float(LunarRocket.OUTBOUND_PHASE_TIMES[0]))
-		var launch_forward := rocket.earth_launch_transform.basis.z.normalized()
-		var launch_right := rocket.earth_launch_transform.basis.x.normalized()
-		var launch_position := rocket_position + launch_forward * 34.0 \
-			+ launch_right * 2.0 + Vector3.UP * 22.0
-		var launch_focus := rocket.earth_launch_transform.origin.lerp(
-			rocket_position, 0.42)
-		chase_position = launch_position.lerp(chase_position, transition)
-		focus_target = launch_focus.lerp(focus_target, transition)
-		chase_fov = lerpf(72.0, chase_fov, transition)
-	voyage_camera.global_position = chase_position
-	# During reentry the camera stays readable but picks up a deterministic,
-	# sub-metre heatshield vibration instead of random frame-dependent shake.
-	if rocket.state == LunarRocket.State.REENTRY:
-		voyage_camera.global_position += basis.x \
-			* sin(rocket.voyage_elapsed * 22.0) * 0.34 \
-			+ Vector3.UP * cos(rocket.voyage_elapsed * 17.0) * 0.16
-	voyage_camera.look_at(focus_target, Vector3.UP)
-	voyage_camera.fov = chase_fov
+	if voyage_camera.get_parent() != world:
+		voyage_camera.reparent(world, true)
+	var pose := sample_voyage_camera_pose(float(sample.elapsed),
+		sample.transform, bool(sample.outbound))
+	voyage_camera.global_position = pose.position
+	voyage_camera.look_at(pose.focus, pose.up)
+	voyage_camera.fov = float(pose.fov)
+	_update_voyage_environment(float(sample.elapsed), bool(sample.outbound))
 	voyage_camera.current = true
+
+
+func _update_voyage_environment(elapsed: float, travel_outbound: bool) -> void:
+	var vacuum_weight := _voyage_ease(10.0, 18.0, elapsed) if travel_outbound \
+		else 1.0 - _voyage_ease(24.0, 40.0, elapsed)
+	if vacuum_weight <= 0.0:
+		voyage_camera.environment = null
+		return
+	var lunar := moon_world.lunar_environment
+	if vacuum_weight >= 1.0:
+		# Use the exact gameplay environment before the lit landing surface appears.
+		# The previous Earth sky ambient/reflections washed out the lunar regolith
+		# and changed its brightness again when the player camera took over.
+		voyage_camera.environment = lunar
+		return
+	var earth := world._environment
+	if not earth:
+		# Standalone expedition scenes may deliberately omit the Earth sky.
+		voyage_camera.environment = lunar
+		return
+	_voyage_environment.ambient_light_color = lunar.ambient_light_color
+	_voyage_environment.ambient_light_energy = lerpf(earth.ambient_light_energy,
+		lunar.ambient_light_energy, vacuum_weight)
+	_voyage_environment.ambient_light_sky_contribution = lerpf(
+		earth.ambient_light_sky_contribution, 0.0, vacuum_weight)
+	_voyage_environment.tonemap_exposure = lerpf(earth.tonemap_exposure,
+		lunar.tonemap_exposure, vacuum_weight)
+	_voyage_environment.fog_density = earth.fog_density * (1.0 - vacuum_weight)
+	_voyage_environment.fog_aerial_perspective = earth.fog_aerial_perspective \
+		* (1.0 - vacuum_weight)
+	_voyage_environment.volumetric_fog_enabled = false
+	_voyage_environment.ssao_radius = lerpf(earth.ssao_radius, lunar.ssao_radius, vacuum_weight)
+	_voyage_environment.ssao_intensity = lerpf(earth.ssao_intensity,
+		lunar.ssao_intensity, vacuum_weight)
+	_voyage_environment.glow_intensity = earth.glow_intensity * (1.0 - vacuum_weight)
+	_voyage_environment.glow_strength = earth.glow_strength * (1.0 - vacuum_weight)
+	_voyage_environment.glow_bloom = earth.glow_bloom * (1.0 - vacuum_weight)
+	voyage_camera.environment = _voyage_environment
+
+
+func sample_voyage_camera_pose(elapsed: float, rocket_transform: Transform3D,
+		travel_outbound: bool) -> Dictionary:
+	var pose := _authored_voyage_camera_pose(elapsed, rocket_transform, travel_outbound)
+	# Give the thirty-metre hull and deployed feet room in close shots. The
+	# smooth distance envelope leaves wide planet views unchanged and avoids a
+	# framing cut as the ship crosses between a close shot and a wide shot.
+	var offset: Vector3 = pose.position - rocket_transform.origin
+	var expansion := 1.0 + 1.8 * (1.0 - smoothstep(20.0, 90.0, offset.length()))
+	pose.position = rocket_transform.origin + offset * expansion
+	return pose
+
+
+func _authored_voyage_camera_pose(elapsed: float, rocket_transform: Transform3D,
+		travel_outbound: bool) -> Dictionary:
+	# Route axes keep the shot steady while the rocket pitches, flips or banks.
+	# Every camera join uses matching endpoints and zero-acceleration easing;
+	# no shake, extra interpolation, or frame-rate-dependent chase lag is added.
+	var origin := rocket_transform.origin
+	var earth_up := rocket.earth_launch_transform.basis.y.normalized()
+	var earth_back := rocket.earth_launch_transform.basis.z.normalized()
+	var earth_right := rocket.earth_launch_transform.basis.x.normalized()
+	var moon_up := rocket.moon_landing_transform.basis.y.normalized()
+	var moon_back := rocket.moon_landing_transform.basis.z.normalized()
+	var moon_right := rocket.moon_landing_transform.basis.x.normalized()
+	if travel_outbound:
+		if elapsed <= SpaceVoyageVisuals.EARTH_GLOBE_FULL_SECONDS:
+			return _earth_departure_camera_pose(rocket_transform, elapsed)
+		var map_pose := {
+			"position": origin + earth_back * 90.0 + earth_right * 4.0 + earth_up * 25.0,
+			"focus": origin - earth_up * 8.0, "up": earth_up, "fov": 70.0,
+		}
+		if elapsed < 21.0:
+			var departure := _earth_departure_camera_pose(rocket_transform,
+				SpaceVoyageVisuals.EARTH_GLOBE_FULL_SECONDS)
+			return _blend_voyage_camera_poses(departure, map_pose,
+				_voyage_ease(18.0, 21.0, elapsed))
+		if elapsed < 40.0:
+			return map_pose
+		if elapsed < SpaceVoyageVisuals.LUNAR_REAL_SURFACE_SECONDS:
+			var prelanding_t := _voyage_ease(44.0, 50.0, elapsed)
+			var moon_pose := {
+				"position": origin + moon_back * lerpf(98.0, 85.0, prelanding_t)
+					+ moon_right * lerpf(13.0, 8.0, prelanding_t)
+					+ moon_up * lerpf(42.0, 32.0, prelanding_t),
+				"focus": origin - moon_up * lerpf(15.0, 49.2, prelanding_t),
+				"up": moon_up, "fov": lerpf(64.0, 68.0, prelanding_t),
+			}
+			return _blend_voyage_camera_poses(map_pose, moon_pose,
+				_voyage_ease(40.0, 44.0, elapsed))
+		var descent_t := _voyage_ease(50.0, 60.0, elapsed)
+		return {
+			"position": origin + moon_back * lerpf(85.0, 32.0, descent_t)
+				+ moon_right * lerpf(8.0, 5.0, descent_t)
+				+ moon_up * lerpf(32.0, 18.0, descent_t),
+			"focus": origin - moon_up * lerpf(49.2, 2.2, descent_t),
+			"up": moon_up, "fov": lerpf(68.0, 58.0, descent_t),
+		}
+
+	var ascent_t := _voyage_ease(0.0, 8.0, elapsed)
+	var map_t := _voyage_ease(8.0, 16.0, elapsed)
+	var departure_pose := {
+		"position": origin + moon_back * lerpf(lerpf(16.0, 38.0, ascent_t), 130.0, map_t)
+			+ moon_right * lerpf(lerpf(5.0, 2.0, ascent_t), 8.0, map_t)
+			+ moon_up * lerpf(lerpf(8.0, -8.0, ascent_t), 60.0, map_t),
+		"focus": origin + moon_up * lerpf(0.8, -40.0, map_t),
+		"up": moon_up, "fov": lerpf(lerpf(59.0, 70.0, ascent_t), 68.0, map_t),
+	}
+	if elapsed <= 18.0:
+		return departure_pose
+	var touchdown_t := _voyage_ease(40.0, 45.0, elapsed)
+	var earth_pose := {
+		"position": origin + earth_back * lerpf(60.0, 40.0, touchdown_t)
+			+ earth_right * lerpf(12.0, 8.0, touchdown_t)
+			+ earth_up * lerpf(24.0, 18.0, touchdown_t),
+		"focus": origin + earth_up * 0.8, "up": earth_up,
+		"fov": lerpf(68.0, 60.0, touchdown_t),
+	}
+	return _blend_voyage_camera_poses(departure_pose, earth_pose,
+		_voyage_ease(18.0, 24.0, elapsed))
+
+
+static func _voyage_ease(start: float, finish: float, value: float) -> float:
+	var t := clampf((value - start) / maxf(finish - start, 0.001), 0.0, 1.0)
+	return t * t * t * (t * (t * 6.0 - 15.0) + 10.0)
+
+
+static func _blend_voyage_camera_poses(first: Dictionary, second: Dictionary,
+		weight: float) -> Dictionary:
+	var first_position: Vector3 = first.position
+	var first_focus: Vector3 = first.focus
+	var first_up: Vector3 = first.up
+	return {
+		"position": first_position.lerp(second.position, weight),
+		"focus": first_focus.lerp(second.focus, weight),
+		"up": first_up.slerp(second.up, weight).normalized(),
+		"fov": lerpf(float(first.fov), float(second.fov), weight),
+	}
+
+
+func _earth_departure_camera_pose(rocket_transform: Transform3D,
+		elapsed: float) -> Dictionary:
+	var launch_duration := float(LunarRocket.OUTBOUND_PHASE_TIMES[0])
+	var launch_t := clampf(elapsed / maxf(launch_duration, 0.001), 0.0, 1.0)
+	var launch_forward := rocket.earth_launch_transform.basis.z.normalized()
+	var launch_right := rocket.earth_launch_transform.basis.x.normalized()
+	var launch_up := rocket.earth_launch_transform.basis.y.normalized()
+	var canopy_clear_t := smoothstep(0.0, 0.075, launch_t)
+	var close_forward := lerpf(14.0,
+		lerpf(24.0, 34.0, launch_t), canopy_clear_t)
+	# Start high enough to read the pad, then fall slightly below the climbing
+	# craft. The terrain now recedes behind the exhaust and naturally exposes the
+	# curved horizon instead of filling fourteen seconds with a top-down colour.
+	var close_height := lerpf(8.0,
+		lerpf(4.0, -10.0, launch_t), canopy_clear_t)
+	# Pull the camera back before scaled-space compression begins. This keeps the
+	# ground and limb receding continuously while the same opaque sphere is
+	# revealed; tying both curves to 12 s made the Earth briefly swell toward the
+	# lens even though the rocket was accelerating away from it.
+	var departure_pullback := smoothstep(7.5, 13.5, elapsed)
+	var globe_reveal := smoothstep(10.0,
+		SpaceVoyageVisuals.EARTH_GLOBE_FULL_SECONDS, elapsed)
+	var globe_departure := smoothstep(
+		SpaceVoyageVisuals.EARTH_GLOBE_FULL_SECONDS,
+		float(LunarRocket.OUTBOUND_PHASE_TIMES[1]), elapsed)
+	var forward_distance := lerpf(close_forward, 400.0, departure_pullback)
+	forward_distance = lerpf(forward_distance, 280.0, globe_reveal)
+	forward_distance = lerpf(forward_distance, 250.0, globe_departure)
+	# Stay close to the rocket's altitude during the pullback. Rising far above it
+	# made the camera look down onto an apparently growing planet—the opposite of
+	# the requested departure. The increasing horizontal separation now supplies
+	# the scale change while the horizon remains below the craft.
+	var camera_height := lerpf(close_height, 0.0, departure_pullback)
+	camera_height = lerpf(camera_height, 90.0, globe_reveal)
+	camera_height = lerpf(camera_height, 90.0, globe_departure)
+	# The generator keeps a 64 m safety zone around the pad, so the opening can
+	# use a readable three-quarter view of the entire stationary hull instead of
+	# the old top-down shot that visually compressed it into the launch deck.
+	var right_distance := lerpf(4.0,
+		lerpf(6.0, 2.0, launch_t), canopy_clear_t)
+	right_distance = lerpf(right_distance, 2.0, globe_reveal)
+	var rocket_position := rocket_transform.origin
+	var camera_position := rocket_position + launch_forward * forward_distance \
+		+ launch_right * right_distance + launch_up * camera_height
+	var close_focus := rocket_position + rocket_transform.basis.y.normalized() * 0.8
+	var earth_focus := rocket_position - launch_up * 100.0
+	if rocket.voyage_visuals and rocket.voyage_visuals.earth_visual:
+		# Work from the nearby surface anchor and double-precision scalar height.
+		# Subtracting two float32 vectors around a 12-million-metre globe centre
+		# loses the sub-metre movement needed for a steady horizon at liftoff.
+		var anchor_offset := rocket.voyage_visuals.earth_surface_anchor - rocket_position
+		var anchor_height := anchor_offset.dot(launch_up)
+		var lateral := anchor_offset - launch_up * anchor_height
+		var radius := rocket.voyage_visuals.earth_render_radius
+		var center_height := anchor_height - radius
+		var center_distance := sqrt(lateral.length_squared() + center_height * center_height)
+		if center_distance > 0.001:
+			var surface_fraction := (center_distance - radius) / center_distance
+			var surface_offset := lateral * surface_fraction \
+				+ launch_up * (center_height * surface_fraction)
+			earth_focus = rocket_position + surface_offset.limit_length(140.0)
+
+	var globe_focus_weight := lerpf(0.48, 0.38, globe_departure) * globe_reveal
+	globe_focus_weight = lerpf(globe_focus_weight, 0.68,
+		smoothstep(13.0, 16.0, elapsed))
+	var focus := close_focus.lerp(earth_focus, globe_focus_weight)
+	return {"position": camera_position, "focus": focus, "up": launch_up,
+		"fov": lerpf(59.0, 68.0, maxf(launch_t, departure_pullback))}
+
+
+func _update_transit_world_visibility() -> void:
+	if not world or not moon_world or not rocket:
+		return
+	# The fixed flight only needs the already-loaded launch surface and its globe.
+	# A seated actor has zero horizontal velocity: streaming interpreted its rapid
+	# vertical ascent as stationary preflight and built costly altitude tiers,
+	# causing 60–160 ms main-thread stalls throughout the opening climb.
+	var stream_earth_surface := false
+	if rocket.outbound:
+		world.clear_expedition_stream_focus()
+	else:
+		var pad_ground := rocket.earth_launch_transform.origin \
+			- rocket.earth_launch_transform.basis.y * LunarRocket.ORIGIN_ABOVE_LANDING_SURFACE
+		world.set_expedition_stream_focus(pad_ground + Vector3.UP)
+	# Pausing generation is an optimization; it must never double as a visible
+	# cut. Retained chunks stay curved and tangent until realm handoff.
+	var show_earth_surface := (rocket.outbound \
+		and rocket.voyage_elapsed <= SpaceVoyageVisuals.EARTH_GLOBE_FULL_SECONDS) \
+		or (not rocket.outbound and rocket.voyage_elapsed \
+			>= SpaceVoyageVisuals.RETURN_TERRAIN_REVEAL_START_SECONDS)
+	var show_moon_surface := (rocket.outbound \
+		and rocket.voyage_elapsed >= 36.0) \
+		or (not rocket.outbound and rocket.voyage_elapsed <= 18.0)
+	if world.earth_streaming_enabled() != stream_earth_surface:
+		world.set_earth_streaming_enabled(stream_earth_surface)
+	var earth_light_weight := -1.0 if rocket.outbound else \
+		_voyage_ease(24.0, 40.0, rocket.voyage_elapsed)
+	world.set_earth_transit_surface_visible(show_earth_surface, earth_light_weight)
+	moon_world.visible = show_moon_surface
+	if show_moon_surface and rocket.voyage_visuals:
+		if rocket.outbound:
+			# Preload the real cap fully compressed just inside the opaque map Moon.
+			# From 42--50 s, reverse that compression on the exact same clock that
+			# moves the proxy's tangent and logarithmic radius into the physical frame.
+			# Resetting to the physical cap at 36 s made the entire gray environment
+			# appear in one frame while the separate map globe remained on screen.
+			var arrival_blend := SpaceVoyageVisuals.lunar_arrival_scale_blend(
+				rocket.voyage_elapsed)
+			var moon_up := rocket.moon_landing_transform.basis.y.normalized()
+			var cap_clearance := \
+				SpaceVoyageVisuals.MOON_PROXY_RELIEF_CLEARANCE \
+				* arrival_blend
+			var arrival_surface := rocket.voyage_visuals.moon_surface_anchor \
+				+ moon_up * cap_clearance
+			# Raising a tangent without enlarging its radius shifts the cap centre and
+			# exposes a second lunar crescent. Change both by the same clearance so
+			# proxy and cap stay rigorously concentric throughout the 42--50 s bridge.
+			var arrival_radius := rocket.voyage_visuals.moon_render_radius \
+				+ cap_clearance
+			moon_world.set_cinematic_render_transform(
+				moon_world.to_local(arrival_surface), arrival_radius,
+				1.0 - arrival_blend)
+		else:
+			# Return keeps the real Moon fixed in space. It recedes because the
+			# ship travels away; no camera-following globe can reappear later.
+			var cap_clearance := SpaceVoyageVisuals.MOON_PROXY_RELIEF_CLEARANCE
+			var departure_surface := rocket.voyage_visuals.moon_surface_anchor \
+				+ rocket.moon_landing_transform.basis.y * cap_clearance
+			moon_world.set_cinematic_render_transform(
+				moon_world.to_local(departure_surface),
+				rocket.voyage_visuals.moon_render_radius + cap_clearance, 0.0)
 
 
 func _local_player_is_voyaging(state: Dictionary = {}) -> bool:
@@ -968,39 +1402,13 @@ func _local_player_is_voyaging(state: Dictionary = {}) -> bool:
 		and crew.has(Net.local_id())
 
 
-## Actual cinematic focus, derived from the authority clock so clients joining
-## midway see the same shot without depending on one-shot cue delivery. Earth
-## remains framed while it shrinks, then a twelve-second eased pan crosses the
-## star field to the approaching Moon; the return performs the inverse reveal.
+## Read the same optical target used by the displayed cinematic camera.
+## Presentation must already have applied the shared sample's planet anchors.
 func voyage_camera_focus_target() -> Vector3:
-	var rocket_focus := rocket.global_position + Vector3.UP * 0.8
-	if not rocket.voyage_visuals or not rocket.voyage_visuals.earth_visual \
-			or not rocket.voyage_visuals.moon_visual:
-		return rocket_focus
-	var earth_focus := rocket.voyage_visuals.earth_visual.global_position
-	var moon_focus := rocket.voyage_visuals.moon_visual.global_position
-	var elapsed := rocket.voyage_elapsed
-	match rocket.state:
-		LunarRocket.State.LAUNCH_ASCENT:
-			var ascent := clampf(rocket.voyage_elapsed \
-				/ float(LunarRocket.OUTBOUND_PHASE_TIMES[0]), 0.0, 1.0)
-			return rocket.earth_launch_transform.origin.lerp(rocket_focus,
-				smoothstep(0.72, 1.0, ascent) * 0.45)
-		LunarRocket.State.ATMOSPHERE_EXIT:
-			var reveal := smoothstep(0.0, 8.0,
-				elapsed - float(LunarRocket.OUTBOUND_PHASE_TIMES[0]))
-			return rocket_focus.lerp(earth_focus, reveal)
-		LunarRocket.State.SPACE_CRUISE:
-			return earth_focus
-		LunarRocket.State.LUNAR_APPROACH:
-			var pan := smoothstep(0.0, 12.0,
-				elapsed - float(LunarRocket.OUTBOUND_PHASE_TIMES[2]))
-			return earth_focus.lerp(moon_focus, pan)
-		LunarRocket.State.RETURN_CRUISE:
-			var return_pan := smoothstep(0.0, 12.0,
-				elapsed - float(LunarRocket.RETURN_PHASE_TIMES[0]))
-			return moon_focus.lerp(earth_focus, return_pan)
-	return rocket_focus
+	var sample := rocket.render_sample()
+	var pose := sample_voyage_camera_pose(float(sample.elapsed),
+		sample.transform, bool(sample.outbound))
+	return pose.focus
 
 
 func _update_mission_label(state: Dictionary) -> void:
@@ -1010,7 +1418,7 @@ func _update_mission_label(state: Dictionary) -> void:
 		LunarRocket.OUTBOUND_DURATION_SECONDS if outbound \
 		else LunarRocket.RETURN_DURATION_SECONDS))
 	var remaining := maxi(ceili(duration - elapsed), 0)
-	_mission_label.text = "%s  ·  %s  ·  T−%02d:%02d\nCREW %d / %d" % [
+	_mission_label.text = "%s  ·  %s  ·  T−%02d:%02d\nCREW %d / %d  ·  C CABIN / EXTERIOR" % [
 		"MOONBOUND" if outbound else "EARTHBOUND",
 		LunarRocket.STATE_NAMES[rocket.state], remaining / 60, remaining % 60,
 		(state.get("crew", []) as Array).size(), LunarRocket.MAX_CREW]
@@ -1020,7 +1428,7 @@ func _update_mission_label(state: Dictionary) -> void:
 func _update_recovery_label(state: Dictionary) -> void:
 	var elapsed := float(state.get("elapsed", 0.0))
 	var remaining := maxi(ceili(Net.ROCKET_RECOVERY_SECONDS - elapsed), 0)
-	_mission_label.text = "OCEAN SPLASHDOWN · RECOVERY %02d:%02d\nBOARDING LOCKED UNTIL PAD RESET" % [
+	_mission_label.text = "LANDED AT LAUNCH PAD · ENGINE SHUTDOWN %02d:%02d\nSTAY SEATED · C CABIN / EXTERIOR" % [
 		remaining / 60, remaining % 60]
 	_mission_panel.visible = true
 
@@ -1031,16 +1439,29 @@ func _update_proximity_prompt() -> void:
 		return
 	var player := world.local_player
 	if Net.player_realm() == Net.PlayerRealm.MOON and moon_world.cheese_shop \
-			and player.global_position.distance_to(
-				moon_world.cheese_shop.global_position) <= SHOP_INTERACTION_RANGE:
+			and moon_world.cheese_shop.is_customer_in_range(player, SHOP_INTERACTION_RANGE):
 		_mission_label.text = "🧀 CRATER & CURD · E TO TRADE MOON CHEESE"
 		_mission_panel.visible = true
-	elif player.global_position.distance_to(rocket.global_position) \
+	elif is_local_player_aboard() or player.global_position.distance_to(rocket.boarding_global_position()) \
 			<= ROCKET_INTERACTION_RANGE:
 		var action := "E TO DISEMBARK" if is_local_player_aboard() \
 			else "E TO BOARD"
-		_mission_label.text = "LUNAR ROCKET · %s · L TO LAUNCH\n4 PRESSURIZED CREW SEATS" % action
+		_mission_label.text = "LUNAR ROCKET · %s · L TO LAUNCH\n4 PRESSURIZED CREW SEATS · C CABIN / EXTERIOR" % action
+		if Net.player_realm() == Net.PlayerRealm.MOON and not is_local_player_aboard():
+			_mission_label.text = "LUNAR ROCKET · E BOARD / REFILL\n%s  CHEESE FARM  ·  J JOURNAL" % _lunar_bearing(moon_world.colony_world.interaction_position("farm", 0))
 		_mission_panel.visible = true
+	elif Net.player_realm() == Net.PlayerRealm.MOON:
+		var colony := moon_world.colony_world
+		var interaction := colony.nearest_interaction(player.global_position) if colony else {}
+		if not interaction.is_empty():
+			_mission_label.text = "%s\nJ COLONY JOURNAL" % str(interaction.get("prompt", "E TO INTERACT"))
+		else:
+			var destination := colony.interaction_position(str(_colony_waypoint.action), int(_colony_waypoint.target)) if colony else rocket.moon_landing_transform.origin
+			_mission_label.text = "%s  %s  ·  J JOURNAL\n%s  LANDER / OXYGEN" % [
+				_lunar_bearing(destination), str(_colony_waypoint.title),
+				_lunar_bearing(rocket.moon_landing_transform.origin)]
+		_mission_panel.visible = true
+
 
 
 func _update_oxygen_ui() -> void:
@@ -1050,7 +1471,7 @@ func _update_oxygen_ui() -> void:
 		return
 	var seconds := maxi(ceili(local_suit.oxygen_seconds), 0)
 	var percent := roundi(local_suit.oxygen_fraction() * 100.0)
-	_oxygen_label.text = "O₂  %d%%  ·  %02d:%02d\nE AT ROCKET TO REFILL  ·  I BACKPACK" % [
+	_oxygen_label.text = "O₂  %d%%  ·  %02d:%02d\nE AT LIFE SUPPORT TO REFILL  ·  I BACKPACK" % [
 		percent, seconds / 60, seconds % 60]
 	_oxygen_label.add_theme_color_override("font_color",
 		Color(1.0, 0.35, 0.25) if percent <= 8 else (
@@ -1059,21 +1480,79 @@ func _update_oxygen_ui() -> void:
 
 
 func _open_shop() -> void:
-	_shop_overlay.visible = true
+	inventory_ui.close_inventory()
+	moon_world.cheese_shop.begin_trade(world.local_player)
+	colony_ui.present(true)
+	_refresh_shop_balance()
+	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
+
+
+func _open_colony_journal() -> void:
+	inventory_ui.close_inventory()
+	colony_ui.present(false)
 	_refresh_shop_balance()
 	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
 
 
 func _close_shop() -> void:
+	moon_world.cheese_shop.end_trade()
 	_shop_overlay.visible = false
 	if DisplayServer.get_name() != "headless":
 		Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
 
 
 func _refresh_shop_balance() -> void:
-	_shop_balance.text = "YOUR BANANAS  🍌 %d   ·   BACKPACK SPACE %d / %d" % [
-		int(Net.scores.get(Net.local_id(), 0)),
-		_used_inventory_slots(), local_inventory.slot_count()]
+	var snapshot := Net.moon_colony_snapshot()
+	# Banana pickups and ordinary purchases also change the shared currency.
+	snapshot["balance"] = int(Net.scores.get(Net.local_id(), 0))
+	colony_ui.refresh(snapshot)
+
+
+func _on_colony_changed(snapshot: Dictionary) -> void:
+	if moon_world and moon_world.colony_world:
+		moon_world.colony_world.apply_snapshot(snapshot)
+	if colony_ui:
+		colony_ui.refresh(snapshot)
+
+
+func _request_colony_action(action: String, target := 0) -> void:
+	if Net.player_realm() != Net.PlayerRealm.MOON or is_local_player_aboard() \
+			or rocket.is_in_transit():
+		show_notice("Step onto the Moon to use colony equipment.")
+		return
+	Net.request_moon_colony(action, target)
+
+
+func _on_colony_result(action: String, accepted: bool, reason: String) -> void:
+	if accepted and action == "refill" and local_suit:
+		local_suit.refill_oxygen()
+	if action in ["sell_fresh", "sell_aged", "upgrade", "contract"]:
+		moon_world.cheese_shop.react_to_trade(accepted, 1, reason)
+	if not reason.is_empty():
+		show_notice(reason)
+	if accepted and action == "harvest":
+		_colony_waypoint = {"action": "market", "target": 0, "title": "CRATER & CURD"}
+	elif accepted and action in ["sell_fresh", "sell_aged", "contract"]:
+		_colony_waypoint = {"action": "farm", "target": 0, "title": "CHEESE FARM"}
+	_refresh_shop_balance()
+
+
+func _set_colony_waypoint(action: String, target: int, title: String) -> void:
+	_colony_waypoint = {"action": action, "target": target, "title": title}
+	_close_shop()
+	show_notice("Bearing set: %s. Follow the arrow at the top of the screen." % title)
+
+
+func _lunar_bearing(target: Vector3) -> String:
+	var player := world.local_player
+	var up := moon_world.radial_up_at(player.global_position)
+	var target_up := moon_world.radial_up_at(target)
+	var distance_m := acos(clampf(up.dot(target_up), -1.0, 1.0)) * MoonWorld.PLAYABLE_RADIUS_METERS
+	var toward := (target_up - up * up.dot(target_up)).normalized()
+	var relative := player.cam.global_basis.inverse() * toward
+	var bearing := atan2(relative.x, -relative.z)
+	var arrows := ["↑", "↗", "→", "↘", "↓", "↙", "←", "↖"]
+	return "%s %d m" % [arrows[posmod(roundi(bearing / (PI / 4.0)), 8)], roundi(distance_m)]
 
 
 func _used_inventory_slots() -> int:
@@ -1085,6 +1564,12 @@ func _used_inventory_slots() -> int:
 
 
 func _request_cheese_purchase(quantity: int) -> void:
+	if quantity < 1 or quantity > Net.MAX_MOON_CHEESE_QUANTITY:
+		show_notice("Choose a quantity from the shop menu.")
+		return
+	if Net.player_realm() != Net.PlayerRealm.MOON or not moon_world.cheese_shop.is_customer_in_range(world.local_player, SHOP_INTERACTION_RANGE):
+		show_notice("Walk up to Muenster's counter to trade.")
+		return
 	if _pending_cheese_quantity > 0:
 		show_notice("The cheesekeeper is already wrapping that order.")
 		return
@@ -1119,6 +1604,7 @@ func _on_moon_cheese_purchase_result(quantity: int, accepted: bool,
 	local_inventory.remove_item(PENDING_CHEESE_ITEM,
 		_pending_cheese_quantity)
 	_pending_cheese_quantity = 0
+	moon_world.cheese_shop.react_to_trade(accepted, quantity, reason)
 	if not accepted:
 		show_notice(reason if not reason.is_empty() else "Trade declined.")
 		_refresh_shop_balance()
@@ -1136,18 +1622,17 @@ func _on_moon_cheese_purchase_result(quantity: int, accepted: bool,
 func _reset_rocket_to_launchpad() -> void:
 	if not rocket:
 		return
-	# An aborted outbound trip may arrive here directly from a manifest change,
-	# without apply_authoritative_clock's normal landed-state cleanup. Restore the
-	# physical hull before freezing it on the pad so it never becomes walk-through.
-	rocket._set_scripted_flight(false)
-	rocket.global_transform = rocket.earth_launch_transform
-	rocket.state = LunarRocket.State.EARTH_BOARDING
-	rocket.outbound = true
-	rocket.voyage_elapsed = 0.0
+	world.clear_expedition_stream_focus()
+	# Use the same complete reset for cancellation and normal recovery: collision,
+	# interpolation, deployed gear and every shared effect must agree with the pad.
+	rocket.apply_authoritative_clock(LunarRocket.State.EARTH_BOARDING, true, 0.0)
 	rocket.freeze = true
 	rocket.linear_velocity = Vector3.ZERO
 	rocket.angular_velocity = Vector3.ZERO
-	rocket.voyage_visuals.end_voyage()
+	_recovery_elapsed = 0.0
+	_recovery_anchor_elapsed = 0.0
+	_recovery_anchor_age = 0.0
+	_recovery_clock_rate = 1.0
 
 
 func _earth_launch_position() -> Vector3:
@@ -1157,22 +1642,47 @@ func _earth_launch_position() -> Vector3:
 			return generated + Vector3.UP \
 				* LunarRocket.ORIGIN_ABOVE_LANDING_SURFACE
 	var xz := Vector2(92.0, 76.0)
-	return Vector3(xz.x, Gen.height(xz.x, xz.y) + 4.4, xz.y)
+	return Vector3(xz.x, Gen.height(xz.x, xz.y) \
+		+ LunarRocket.ORIGIN_ABOVE_LANDING_SURFACE, xz.y)
 
 
 func _ocean_splashdown_position() -> Vector3:
-	# Bounded deterministic ring search: the home continent is intentionally
-	# broad, so begin outside it and pick the first deep-ocean cell in seed-rotated
-	# angular order. This runs once per session, never in a frame loop.
+	# The debug arena has no generated water and cannot start a lunar mission.
+	# Keep its inactive authored route independent from the normal-world search.
+	if Gen.debug_world:
+		return Vector3(12000.0, Gen.WATER_Y + 4.6, -9000.0)
+	# Pangaea's real ocean may be millions of metres away, outside multiplayer
+	# bounds. Lakes are valid water landings: query actual final terrain height,
+	# including roads, and require a clear 60 m radius before accepting a point.
+	# The old ocean-mask search always fell back to an unchecked dry-land point
+	# for several ordinary seeds, hidden only by the passenger's private ocean.
+	var has_water_footprint := func(point: Vector2) -> bool:
+		if not point.is_finite() or absf(point.x) + 60.0 >= Net.MAX_WORLD_COORDINATE \
+				or absf(point.y) + 60.0 >= Net.MAX_WORLD_COORDINATE:
+			return false
+		if Gen.height(point.x, point.y) > Gen.WATER_Y - 8.0:
+			return false
+		for z in range(-4, 5):
+			for x in range(-4, 5):
+				var offset := Vector2(x, z) * 15.0
+				if offset.length_squared() > 60.0 * 60.0:
+					continue
+				var height := Gen.height(point.x + offset.x, point.y + offset.y)
+				if not is_finite(height) or height > Gen.WATER_Y - 8.0:
+					return false
+		return true
+	# Bounded, seed-ordered search in the existing 6–25 km route envelope. This
+	# runs once per session; it neither streams distant terrain nor alters it.
 	var angle_offset := float(posmod(Gen.world_seed, 360)) * PI / 180.0
 	for ring in range(8, 34):
 		var radius := float(ring) * 768.0
 		for spoke in range(20):
 			var angle := angle_offset + TAU * float(spoke) / 20.0
 			var point := Vector2(cos(angle), sin(angle)) * radius
-			var sample: Dictionary = Gen.planet_terrain_sample(point.x, point.y)
-			if float(sample.get("ocean", 0.0)) > 0.72 \
-					and Gen.height(point.x, point.y) < Gen.WATER_Y - 8.0:
+			if has_water_footprint.call(point):
 				return Vector3(point.x, Gen.WATER_Y + 4.6, point.y)
-	var fallback := Vector2(12000.0, -9000.0)
+	# PlanetTerrain guarantees a broad, ~38 m deep home basin for every normal
+	# seed. Still validate its final graded terrain with the identical footprint.
+	var fallback := Gen.planet_home_lake_center()
+	assert(has_water_footprint.call(fallback), "Generated home lake has no safe splashdown footprint")
 	return Vector3(fallback.x, Gen.WATER_Y + 4.6, fallback.y)

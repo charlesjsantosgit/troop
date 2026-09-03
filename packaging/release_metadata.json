@@ -1,8 +1,8 @@
 {
   "godot_compatibility": "4.7",
-  "minimum_bootstrap": 1,
-  "network_protocol": 9,
-  "release_title": "TROOP 0.4.3 — SATELLITE MAP",
-  "notes": "TROOP 0.4.3 replaces the pixelated close world map with smooth 320 px satellite tiles, a photoreal natural-detail layer, and higher-quality mipmapped 4K Earth and Moon imagery. Shared-edge terrain reconstruction removes square block seams while staged texture uploads and a 1,500-sample-per-tile ceiling make zoom refinement much faster and keep it frame-bounded. This is a protocol-9-compatible signed content update: TROOP 0.4.2 downloads it automatically in the background and activates it on a safe restart, with no installer required.",
-  "requires_installer": false
+  "minimum_bootstrap": 2,
+  "network_protocol": 11,
+  "release_title": "TROOP 0.4.5 \u2014 REUSABLE LUNAR SHIP",
+  "notes": "TROOP 0.4.5 adds a reusable four-seat lunar ship, powered return landings, lunar colonies and merchants, smoother planetary presentation and steadier first-person cameras. Multiplayer uses protocol 11 and the matching public server. Install this full update once to receive the new protocol settings and safer updater bootstrap; future compatible content updates remain automatic.",
+  "requires_installer": true
 }

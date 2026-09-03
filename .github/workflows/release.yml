@@ -17,6 +17,7 @@ permissions:
 jobs:
   release:
     runs-on: macos-14
+    timeout-minutes: 45
     environment: release
     env:
       GODOT_VERSION: "4.7"
@@ -101,6 +102,8 @@ jobs:
           "$GODOT_BIN" --headless --path . --script res://tests/updatetest.gd
           "$GODOT_BIN" --headless --path . --script res://tests/voicetest.gd
           "$GODOT_BIN" --headless --path . --script res://tests/netsecuritytest.gd
+          "$GODOT_BIN" --headless --path . --quit-after 1200 -- renderbackendtest
+          python3 tests/run_dedicated_relay.py --godot "$GODOT_BIN" --project .
           "$GODOT_BIN" --headless --path . res://scenes/main.tscn \
             --quit-after 30000 -- wingtest
           "$GODOT_BIN" --headless --path . res://scenes/main.tscn \
@@ -130,6 +133,16 @@ jobs:
             res://tests/transportnetworktest.gd
           "$GODOT_BIN" --headless --path . --script \
             res://tests/streaminglodtest.gd
+
+      - name: Run lunar colony, reusable rocket, and combat regressions
+        shell: bash
+        run: |
+          set -euo pipefail
+          for MODE in combattest aitest movetest entrytest onlineperformancetest mooncolonytest moonmerchanttest moonplaytest mooncolonyplaytest lunarcombatpresentationtest lunarfirstpersontest moonspheretest rocketsmoothtest rocketlandingtest; do
+            "$GODOT_BIN" --headless --path . --fixed-fps 60 \
+              --quit-after 30000 -- "$MODE"
+          done
+          "$GODOT_BIN" --headless --path . --script res://tests/planetcurvaturetest.gd
 
       - name: Run vehicle physics and world regressions
         shell: bash

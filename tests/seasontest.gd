@@ -590,7 +590,10 @@ func _count_shadow_directionals(node: Node) -> int:
 	var count := 0
 	for child in node.get_children():
 		if child is DirectionalLight3D \
-				and (child as DirectionalLight3D).shadow_enabled:
+				and (child as DirectionalLight3D).shadow_enabled \
+				and (child as DirectionalLight3D).is_visible_in_tree():
+			# The inactive Moon realm owns a shadow light too, but hidden
+			# lights do not submit a shadow pass in Earth's current viewport.
 			count += 1
 		count += _count_shadow_directionals(child)
 	return count

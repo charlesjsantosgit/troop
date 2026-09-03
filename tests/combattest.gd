@@ -858,7 +858,7 @@ func run(main) -> void:
 		not player.sniper.first_person_view and
 		player.sniper.get_parent() == player.rig.el_r and
 		player.rig.sh_r.position.x > 0.0 and
-		player.cam._camera_mount.get_parent() == player.cam._arm and
+		player.cam._camera_mount.get_parent() == player.cam._pitch_node and
 		player.cam._cam.get_parent() == player.cam._camera_mount and
 		player.cam._arm.position.x > 0.7 and
 		CameraRig.THIRD_PERSON_ARM >= 5.75 and
@@ -1082,8 +1082,13 @@ func run(main) -> void:
 	# deterministic combat fixture. AI reload policy intentionally requires that
 	# contact so a support-paw animation can never begin in mid-air.
 	ai._shot_t = 99.0
-	for i in range(40):
+	# At Earth freefall acceleration the 2.2 m spawn drop already takes more
+	# than 40 ticks. Stop on actual ground contact with a bounded deadline so
+	# these policy checks never run against an accidentally airborne fixture.
+	for i in range(90):
 		await get_tree().physics_frame
+		if ai.is_on_floor() and ai.state == ai.S.GROUND:
+			break
 	var ai_landed_for_reload := ai.is_on_floor() and ai.state == ai.S.GROUND
 	ai.set_physics_process(false)
 	ai.set_process(false)

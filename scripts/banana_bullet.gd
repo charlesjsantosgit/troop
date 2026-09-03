@@ -32,6 +32,7 @@ var _travelled := 0.0
 var _trail_mesh: ImmediateMesh
 var _trail_instance: MeshInstance3D
 var _visual: MeshInstance3D
+var _lunar_projectile := false
 
 
 func configure(owner_actor: Node3D, owner_world: Node3D, origin: Vector3,
@@ -44,6 +45,11 @@ func configure(owner_actor: Node3D, owner_world: Node3D, origin: Vector3,
 	impact_damage = projectile_damage
 	uses_revolver_headshots = headshot_rule
 	weapon_kind = projectile_weapon_kind
+	# Pin the firing realm so crossing the globe cannot turn lunar shots into
+	# Earth-down ballistics. The same source peer is available on replicas.
+	_lunar_projectile = (shooter is MonkeyPlayer and is_instance_valid(shooter.lunar_world)) \
+		or ((shooter is MonkeyPlayer or shooter is Puppet) \
+			and Net.player_realm(shooter.peer_id) == Net.PlayerRealm.MOON)
 	if weapon_kind == Net.WEAPON_SNIPER:
 		life = SNIPER_MAX_LIFE
 	_apply_weapon_visual()
@@ -283,6 +289,10 @@ static func ballistic_position(origin: Vector3, initial_velocity: Vector3,
 
 
 func projectile_gravity() -> Vector3:
+	if _lunar_projectile:
+		var center := MoonWorld.PLAYABLE_CENTER \
+			+ Vector3(0.0, Net.MOON_WORLD_ORIGIN_Y, 0.0)
+		return (center - global_position).normalized() * MoonWorld.LUNAR_GRAVITY
 	return Vector3.DOWN * SniperRifle.BALLISTIC_GRAVITY \
 		if weapon_kind == Net.WEAPON_SNIPER else GRAVITY
 

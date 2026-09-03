@@ -1,38 +1,156 @@
 class_name MoonWorld
 extends Node3D
-## Deterministic playable lunar landing zone. One indexed terrain mesh and one
-## height-map collider provide cratered ground; a gravity override and explicit
-## character hook both use the physical 1.62 m/s² lunar acceleration.
+## Closed, deterministic lunar world. A welded cubed sphere supplies the exact
+## same terrain to rendering, collision and spawn queries. The compact gameplay
+## radius allows a complete trip around the Moon without floating-point drift;
+## astronomical dimensions remain available to the orbital voyage.
 
 signal actor_entered_vacuum(actor: Node3D)
 signal actor_left_vacuum(actor: Node3D)
 signal admin_arrived(actor: Node3D)
 
 const LUNAR_GRAVITY := 1.62
+const CHARACTER_SAFE_MARGIN := 0.02
+const MOON_DIAMETER_KM := 3_474.8
+const MOON_RADIUS_KM := MOON_DIAMETER_KM * 0.5
+const MOON_RADIUS_METERS := MOON_RADIUS_KM * 1000.0
+const PLAYABLE_RADIUS_METERS := 450.0
+const PLAYABLE_CENTER := Vector3(-54.0, -PLAYABLE_RADIUS_METERS, 42.0)
+const SPHERE_FACE_SEGMENTS := 64
+const SPHERE_CRATER_COUNT := 84
 const TERRAIN_RESOLUTION := 65
 const TERRAIN_SPACING := 12.0
 const TERRAIN_HALF_EXTENT := (TERRAIN_RESOLUTION - 1) * TERRAIN_SPACING * 0.5
+const HORIZON_HALF_EXTENT := 140_000.0
+const HORIZON_EDGE_SEGMENTS := 192
+const HORIZON_GRID_RESOLUTION := 97
+const CAP_INNER_RINGS := 32
+const CAP_MIDDLE_RINGS := 24
+const CAP_OUTER_RINGS := 40
+const CAP_RADIAL_RINGS := CAP_INNER_RINGS + CAP_MIDDLE_RINGS + CAP_OUTER_RINGS
 const VACUUM_HEIGHT := 5000.0
 const LANDING_XZ := Vector2(-54.0, 42.0)
 const SHOP_XZ := Vector2(58.0, -32.0)
-const ROCKET_ORIGIN_ABOVE_PAD := 4.40
+const ROCKET_ORIGIN_ABOVE_PAD := 13.0
+const LANDING_PLATFORM_RADIUS := 7.5
+const LANDING_PLATFORM_THICKNESS := 0.45
 const LUNAR_STAR_COUNT := 360
 const LUNAR_ROCK_COUNT := 96
 
-static var _surface_material: StandardMaterial3D
+static var _surface_shader: Shader
+var _horizon_material: ShaderMaterial
 static var _vacuum_material: StandardMaterial3D
 static var _lunar_star_material: StandardMaterial3D
 static var _lunar_star_mesh: BoxMesh
 static var _lunar_rock_material: StandardMaterial3D
 static var _lunar_rock_mesh: SphereMesh
 static var _earth_halo_material: StandardMaterial3D
+const LUNAR_MICRODETAIL: Texture2D = preload(
+	"res://assets/textures/satellite_microdetail_overlay.png")
+
+const LUNAR_CAP_SHADER := """
+shader_type spatial;
+render_mode fog_disabled;
+
+uniform sampler2D lunar_atlas : source_color, repeat_enable,
+    filter_linear_mipmap_anisotropic;
+uniform sampler2D lunar_microdetail : source_color, repeat_enable,
+    filter_linear_mipmap_anisotropic;
+uniform float scaled_space_active : hint_range(0.0, 1.0) = 0.0;
+uniform float scaled_cap_retraction : hint_range(0.0, 1.0) = 0.0;
+uniform vec3 playable_center = vec3(0.0);
+uniform float playable_radius = 1.0;
+uniform vec3 scaled_surface_local = vec3(0.0);
+uniform float scaled_moon_radius = 1.0;
+varying vec3 ground_position;
+varying vec3 ground_world_position;
+varying vec3 surface_normal;
+varying vec3 radial_normal;
+varying vec4 mineral_tint;
+
+void vertex() {
+    vec3 radial = normalize(VERTEX - playable_center);
+    ground_position = VERTEX - playable_center;
+    surface_normal = NORMAL;
+    radial_normal = radial;
+    mineral_tint = COLOR;
+    float relief = length(VERTEX - playable_center) - playable_radius;
+    vec3 scaled_centre = scaled_surface_local
+        - vec3(0.0, scaled_moon_radius, 0.0);
+    float inward_bias = smoothstep(0.80, 1.0, scaled_cap_retraction)
+        * max(0.015, scaled_moon_radius * 0.001);
+    vec3 scaled_vertex = scaled_centre + radial
+        * (scaled_moon_radius + relief * scaled_moon_radius / playable_radius
+            - inward_bias);
+    VERTEX = mix(VERTEX, scaled_vertex, scaled_space_active);
+    ground_world_position = (MODEL_MATRIX * vec4(VERTEX, 1.0)).xyz;
+}
+
+void fragment() {
+    vec3 radial = normalize(radial_normal);
+    vec3 atlas_direction = vec3(radial.x, radial.z, -radial.y);
+    vec2 atlas_uv = vec2(fract(atan(atlas_direction.x,
+        atlas_direction.z) / 6.28318530718),
+        acos(clamp(atlas_direction.y, -1.0, 1.0)) / 3.14159265359);
+    vec3 macro_colour = texture(lunar_atlas, atlas_uv).rgb;
+    // Decide whether grain contributes before doing any texture work. Explicit
+    // gradients remain valid at the dynamic branch boundary and retain the
+    // same anisotropic mip selection as the original unconditional samples.
+    vec3 ground_dx = dFdx(ground_position) / 3.0;
+    vec3 ground_dy = dFdy(ground_position) / 3.0;
+    float grain_footprint = max(length(ground_dx), length(ground_dy));
+    float derivative_visibility = 1.0 - smoothstep(0.003, 0.012, grain_footprint);
+    float distance_visibility = 1.0 - smoothstep(4.0, 16.0,
+        distance(CAMERA_POSITION_WORLD, ground_world_position));
+    float grain_visibility = derivative_visibility * distance_visibility;
+    float grain = 0.65;
+    if (grain_visibility > 0.0) {
+        // Triplanar regolith has no UV seam at poles or cube-face edges.
+        vec3 weights = radial * radial;
+        weights *= weights;
+        weights /= max(weights.x + weights.y + weights.z, 0.0001);
+        float sampled_grain = textureGrad(lunar_microdetail,
+                ground_position.yz / 3.0, ground_dx.yz, ground_dy.yz).r * weights.x
+            + textureGrad(lunar_microdetail,
+                ground_position.xz / 3.0, ground_dx.xz, ground_dy.xz).r * weights.y
+            + textureGrad(lunar_microdetail,
+                ground_position.xy / 3.0, ground_dx.xy, ground_dy.xy).r * weights.z;
+        grain = mix(0.65, sampled_grain, grain_visibility);
+    }
+    vec3 regolith = mix(vec3(0.38, 0.365, 0.345), macro_colour, 0.06);
+    vec3 local_colour = regolith * mix(0.92, 1.06, grain) * mineral_tint.rgb;
+    float orbital_weight = smoothstep(0.10, 0.75, scaled_cap_retraction);
+    // Gameplay receives real directional/contact shadows. Only the compressed
+    // orbital presentation emits its atlas colour to match the distant proxy.
+    ALBEDO = local_colour * (1.0 - orbital_weight);
+    EMISSION = macro_colour * orbital_weight;
+    ROUGHNESS = mix(0.92, 0.99, grain);
+    SPECULAR = 0.08;
+    AO = mix(0.91, 1.0, grain);
+    AO_LIGHT_AFFECT = 0.12;
+}
+"""
 
 var moon_seed := 404_1969
 var terrain_mesh: MeshInstance3D
 var terrain_body: StaticBody3D
+var landing_platform: MeshInstance3D
+var landing_platform_body: StaticBody3D
+var lunar_visual_horizon: MeshInstance3D
+var lunar_far_surface_fill: MeshInstance3D
 var gravity_area: Area3D
+var lunar_environment: Environment
 var cheese_shop: MoonCheeseShop
+var colony_world: MoonColonyWorld
 var _built := false
+var _crater_seed := -1
+var _crater_directions := PackedVector3Array()
+var _crater_radii := PackedFloat32Array()
+var _crater_depths := PackedFloat32Array()
+var _crater_cutoffs := PackedFloat32Array()
+var _sphere_vertices := PackedVector3Array()
+var _sphere_indices := PackedInt32Array()
+var _grid_vertex_indices: Dictionary = {}
 
 
 func _ready() -> void:
@@ -46,55 +164,267 @@ func setup(seed_value: int) -> void:
 		return
 	_built = true
 	_build_terrain()
+	_build_landing_platform()
 	_build_rock_field()
 	_build_gravity_volume()
 	_build_lighting()
 	_build_lunar_sky()
 	cheese_shop = MoonCheeseShop.new()
-	cheese_shop.position = Vector3(SHOP_XZ.x,
-		height_at(SHOP_XZ.x, SHOP_XZ.y), SHOP_XZ.y)
+	cheese_shop.transform = shop_local_transform()
 	add_child(cheese_shop)
 	_disable_fog_on_descendants(cheese_shop)
+	colony_world = MoonColonyWorld.new()
+	colony_world.configure(self)
+	add_child(colony_world)
+	_disable_fog_on_descendants(colony_world)
 
 
-func gravity_at(_world_position: Vector3) -> Vector3:
-	return Vector3.DOWN * LUNAR_GRAVITY
+func center_world_position() -> Vector3:
+	return to_global(PLAYABLE_CENTER)
+
+
+func radial_up_at(world_position: Vector3) -> Vector3:
+	var radial := world_position - center_world_position()
+	return radial.normalized() if radial.length_squared() > 0.000001 \
+		else global_basis.y.normalized()
+
+
+func gravity_at(world_position: Vector3) -> Vector3:
+	return -radial_up_at(world_position) * LUNAR_GRAVITY
 
 
 func apply_lunar_gravity(character: CharacterBody3D, delta: float) -> void:
 	if is_instance_valid(character) and delta > 0.0:
+		# The Moon realm is far above Earth; a 1 mm margin is smaller than the
+		# float32 position step there and can turn a southern-floor contact into
+		# an inward ceiling normal. Keep generic actor hooks equally robust.
+		character.safe_margin = maxf(character.safe_margin, CHARACTER_SAFE_MARGIN)
+		character.up_direction = radial_up_at(character.global_position)
 		character.velocity += gravity_at(character.global_position) * delta
 
 
+## Local point on the actual collision triangles, with radial clearance. A
+## direction works on all six faces and at both poles without a longitude seam.
+func surface_position(direction: Vector3, altitude: float = 0.0) -> Vector3:
+	var radial := direction.normalized() if direction.length_squared() > 0.000001 \
+		else Vector3.UP
+	var grid := _direction_grid(radial)
+	var face := int(grid.x)
+	var grid_x := clampf(grid.y, 0.0, float(SPHERE_FACE_SEGMENTS))
+	var grid_y := clampf(grid.z, 0.0, float(SPHERE_FACE_SEGMENTS))
+	var ix := mini(int(grid_x), SPHERE_FACE_SEGMENTS - 1)
+	var iy := mini(int(grid_y), SPHERE_FACE_SEGMENTS - 1)
+	var fx := grid_x - float(ix)
+	var fy := grid_y - float(iy)
+	var a: Vector3
+	var b: Vector3
+	var c: Vector3
+	if fx + fy <= 1.0:
+		a = _grid_surface_vertex(face, ix, iy)
+		b = _grid_surface_vertex(face, ix + 1, iy)
+		c = _grid_surface_vertex(face, ix, iy + 1)
+	else:
+		a = _grid_surface_vertex(face, ix + 1, iy + 1)
+		b = _grid_surface_vertex(face, ix, iy + 1)
+		c = _grid_surface_vertex(face, ix + 1, iy)
+	var normal := (b - a).cross(c - a).normalized()
+	var denominator := radial.dot(normal)
+	var radius := PLAYABLE_RADIUS_METERS
+	if absf(denominator) > 0.000001:
+		radius = (a - PLAYABLE_CENTER).dot(normal) / denominator
+	return PLAYABLE_CENTER + radial * (radius + altitude)
+
+
+func surface_position_at(world_position: Vector3, altitude: float = 0.0) -> Vector3:
+	return to_global(surface_position(to_local(world_position) - PLAYABLE_CENTER,
+		altitude))
+
+
+func altitude_at(world_position: Vector3) -> float:
+	var local := to_local(world_position)
+	return local.distance_to(PLAYABLE_CENTER) \
+		- surface_position(local - PLAYABLE_CENTER).distance_to(PLAYABLE_CENTER)
+
+
+static func surface_basis(direction: Vector3, forward: Vector3 = Vector3.FORWARD) -> Basis:
+	var up := direction.normalized() if direction.length_squared() > 0.000001 \
+		else Vector3.UP
+	var tangent := forward - up * forward.dot(up)
+	if tangent.length_squared() < 0.000001:
+		tangent = Vector3.RIGHT - up * Vector3.RIGHT.dot(up)
+	tangent = tangent.normalized()
+	return Basis(up.cross(-tangent).normalized(), up, -tangent)
+
+
+func shop_local_transform() -> Transform3D:
+	var direction := Vector3(SHOP_XZ.x - LANDING_XZ.x,
+		PLAYABLE_RADIUS_METERS, SHOP_XZ.y - LANDING_XZ.y).normalized()
+	return Transform3D(surface_basis(direction), surface_position(direction))
+
+
+static func shop_position_for_seed(seed_value: int) -> Vector3:
+	# Dedicated servers need the exact interaction point without building meshes,
+	# textures, lights or the NPC. Three deterministic triangle vertices suffice.
+	var sampler := MoonWorld.new()
+	sampler.moon_seed = seed_value
+	var point := sampler.shop_local_transform().origin
+	sampler.free()
+	return point
+
+
 func height_at(local_x: float, local_z: float) -> float:
-	# Broad undulation prevents a tiled look; crater centres/radii are generated
-	# from stable integer hashes so server and clients produce identical ground.
-	var height := sin(local_x * 0.007 + float(moon_seed % 31)) * 2.2
-	height += cos(local_z * 0.009 - float(moon_seed % 47)) * 1.7
-	height += sin((local_x + local_z) * 0.0045) * 2.6
-	for index in range(14):
-		var crater := crater_definition(index, moon_seed)
-		var centre := Vector2(float(crater.x), float(crater.z))
-		var radius := float(crater.radius)
-		var distance := Vector2(local_x, local_z).distance_to(centre)
-		if distance >= radius * 1.32:
+	# Compatibility for old top-hemisphere callers. New movement uses the full
+	# directional API; x/z alone cannot address the back of a sphere.
+	var dx := local_x - PLAYABLE_CENTER.x
+	var dz := local_z - PLAYABLE_CENTER.z
+	var y := sqrt(maxf(PLAYABLE_RADIUS_METERS * PLAYABLE_RADIUS_METERS
+		- dx * dx - dz * dz, 0.0))
+	return surface_position(Vector3(dx, y, dz)).y
+
+
+func _ensure_craters() -> void:
+	if _crater_seed == moon_seed:
+		return
+	_crater_seed = moon_seed
+	_crater_directions.clear()
+	_crater_radii.clear()
+	_crater_depths.clear()
+	_crater_cutoffs.clear()
+	for index in range(SPHERE_CRATER_COUNT):
+		var hashed := _hash_u32(moon_seed + index * 68917 + 193)
+		var direction := _fibonacci_direction(index, SPHERE_CRATER_COUNT)
+		direction = Basis(Vector3.UP, float(moon_seed % 8191) * 0.001) * direction
+		var radius := lerpf(18.0, 65.0, float(hashed & 0xffff) / 65535.0)
+		_crater_directions.append(direction)
+		_crater_radii.append(radius)
+		_crater_depths.append(lerpf(2.0, 8.5,
+			float((hashed >> 16) & 0xffff) / 65535.0))
+		_crater_cutoffs.append(1.0 - pow(radius * 1.32
+			/ PLAYABLE_RADIUS_METERS, 2.0) * 0.5)
+
+
+func _surface_relief(direction: Vector3) -> float:
+	_ensure_craters()
+	var point := direction * PLAYABLE_RADIUS_METERS
+	# All noise uses 3D position, so longitude wrapping never changes the seed or
+	# samples a different height on either side of a face boundary.
+	var relief := sin(point.x * 0.010 + float(moon_seed % 31)) * 0.9
+	relief += sin(point.y * 0.012 + point.z * 0.007) * 1.1
+	relief += cos(point.z * 0.014 - point.x * 0.005) * 0.7
+	for index in range(_crater_directions.size()):
+		var alignment := direction.dot(_crater_directions[index])
+		if alignment <= _crater_cutoffs[index]:
 			continue
-		var normalized := distance / radius
+		var distance := sqrt(maxf(2.0 - 2.0 * alignment, 0.0)) \
+			* PLAYABLE_RADIUS_METERS
+		var normalized := distance / _crater_radii[index]
 		if normalized < 1.0:
-			# Bowl reaches maximum depth at centre and eases flat at the wall.
 			var bowl := 1.0 - normalized * normalized
-			height -= bowl * float(crater.depth)
+			relief -= bowl * bowl * _crater_depths[index]
 		else:
-			# Narrow raised rim outside the bowl.
-			var rim_t := (normalized - 1.0) / 0.32
-			height += sin(rim_t * PI) * float(crater.depth) * 0.22
-	# Keep the launch/landing pads usable without erasing nearby relief.
+			relief += sin((normalized - 1.0) / 0.32 * PI) \
+				* _crater_depths[index] * 0.22
 	for pad in [LANDING_XZ, SHOP_XZ]:
-		var pad_distance := Vector2(local_x, local_z).distance_to(pad)
-		if pad_distance < 18.0:
-			var blend := smoothstep(18.0, 5.0, pad_distance)
-			height = lerpf(height, 0.0, blend)
-	return height
+		var pad_direction := Vector3(pad.x - LANDING_XZ.x,
+			PLAYABLE_RADIUS_METERS, pad.y - LANDING_XZ.y).normalized()
+		var distance := direction.distance_to(pad_direction) * PLAYABLE_RADIUS_METERS
+		if distance < 72.0:
+			relief *= smoothstep(30.0, 72.0, distance)
+	return relief
+
+
+static func _cube_grid_point(face: int, x: int, y: int) -> Vector3i:
+	var u := x * 2 - SPHERE_FACE_SEGMENTS
+	var v := y * 2 - SPHERE_FACE_SEGMENTS
+	match face:
+		0: return Vector3i(SPHERE_FACE_SEGMENTS, v, -u)
+		1: return Vector3i(-SPHERE_FACE_SEGMENTS, v, u)
+		2: return Vector3i(u, SPHERE_FACE_SEGMENTS, -v)
+		3: return Vector3i(u, -SPHERE_FACE_SEGMENTS, v)
+		4: return Vector3i(u, v, SPHERE_FACE_SEGMENTS)
+		_: return Vector3i(-u, v, -SPHERE_FACE_SEGMENTS)
+
+
+static func _direction_grid(direction: Vector3) -> Vector3:
+	var face: int
+	var uv: Vector2
+	var absolute := direction.abs()
+	if absolute.x >= absolute.y and absolute.x >= absolute.z:
+		face = 0 if direction.x >= 0.0 else 1
+		uv = Vector2(-direction.z if face == 0 else direction.z,
+			direction.y) / absolute.x
+	elif absolute.y >= absolute.z:
+		face = 2 if direction.y >= 0.0 else 3
+		uv = Vector2(direction.x, -direction.z if face == 2 else direction.z) \
+			/ absolute.y
+	else:
+		face = 4 if direction.z >= 0.0 else 5
+		uv = Vector2(direction.x if face == 4 else -direction.x,
+			direction.y) / absolute.z
+	return Vector3(float(face), (uv.x + 1.0) * 0.5 * SPHERE_FACE_SEGMENTS,
+		(uv.y + 1.0) * 0.5 * SPHERE_FACE_SEGMENTS)
+
+
+func _grid_surface_vertex(face: int, x: int, y: int) -> Vector3:
+	var key := _cube_grid_point(face, x, y)
+	if _grid_vertex_indices.has(key):
+		return _sphere_vertices[int(_grid_vertex_indices[key])]
+	var direction := Vector3(key).normalized()
+	return PLAYABLE_CENTER + direction \
+		* (PLAYABLE_RADIUS_METERS + _surface_relief(direction))
+
+
+## Astronomical surface sampler retained for the orbital voyage. Walking,
+## collisions and gameplay placement use surface_position on the compact sphere.
+func cinematic_surface_point(flat_local_position: Vector3) -> Vector3:
+	var offset := Vector2(flat_local_position.x - LANDING_XZ.x,
+		flat_local_position.z - LANDING_XZ.y)
+	var radial_squared := offset.length_squared()
+	var sag := MOON_RADIUS_METERS if radial_squared \
+		>= MOON_RADIUS_METERS * MOON_RADIUS_METERS \
+		else MOON_RADIUS_METERS - sqrt(MOON_RADIUS_METERS \
+			* MOON_RADIUS_METERS - radial_squared)
+	return Vector3(flat_local_position.x,
+		flat_local_position.y - sag, flat_local_position.z)
+
+
+func _cinematic_surface_normal(local_position: Vector3) -> Vector3:
+	var surface := cinematic_surface_point(Vector3(
+		local_position.x, 0.0, local_position.z))
+	var centre := Vector3(LANDING_XZ.x, -MOON_RADIUS_METERS, LANDING_XZ.y)
+	return (surface - centre).normalized()
+
+
+## Restores the playable sphere after the shader-only orbital presentation.
+func set_cinematic_render_radius(_render_radius: float) -> void:
+	# End the shader-only orbital transform before walking. Physics always uses
+	# the compact sphere, so touchdown returns both visual and physical ground to
+	# the same vertices in one operation.
+	if _horizon_material:
+		_horizon_material.set_shader_parameter("scaled_space_active", 0.0)
+		_horizon_material.set_shader_parameter("scaled_cap_retraction", 0.0)
+	if is_instance_valid(terrain_mesh):
+		terrain_mesh.extra_cull_margin = 0.0
+		terrain_mesh.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	if is_instance_valid(landing_platform):
+		landing_platform.extra_cull_margin = 0.0
+
+
+func set_cinematic_render_transform(surface_local: Vector3,
+		render_radius: float, compression: float) -> void:
+	if not _horizon_material:
+		return
+	_horizon_material.set_shader_parameter("scaled_surface_local", surface_local)
+	_horizon_material.set_shader_parameter("scaled_moon_radius", maxf(render_radius, 0.001))
+	_horizon_material.set_shader_parameter("scaled_space_active", 1.0)
+	_horizon_material.set_shader_parameter("scaled_cap_retraction", clampf(compression, 0.0, 1.0))
+	if is_instance_valid(terrain_mesh):
+		terrain_mesh.extra_cull_margin = maxf(render_radius * 2.0,
+			surface_local.distance_to(Vector3(LANDING_XZ.x, 0.0, LANDING_XZ.y)))
+		terrain_mesh.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	if is_instance_valid(landing_platform):
+		landing_platform.extra_cull_margin = maxf(render_radius * 2.0,
+			surface_local.distance_to(Vector3(LANDING_XZ.x, 0.0, LANDING_XZ.y)))
 
 
 static func crater_definition(index: int, seed_value: int) -> Dictionary:
@@ -120,15 +450,12 @@ static func _hash_u32(value: int) -> int:
 
 
 func landing_transform() -> Transform3D:
-	return Transform3D(Basis(Vector3.UP, PI), Vector3(LANDING_XZ.x,
-		height_at(LANDING_XZ.x, LANDING_XZ.y) + ROCKET_ORIGIN_ABOVE_PAD,
-		LANDING_XZ.y))
+	return Transform3D(Basis(Vector3.UP, PI),
+		surface_position(Vector3.UP, ROCKET_ORIGIN_ABOVE_PAD))
 
 
 func actor_landing_position() -> Vector3:
-	return Vector3(LANDING_XZ.x + 4.0,
-		height_at(LANDING_XZ.x + 4.0, LANDING_XZ.y) + 0.8,
-		LANDING_XZ.y)
+	return surface_position(Vector3(9.0, PLAYABLE_RADIUS_METERS, 0.0), 0.8)
 
 
 func admin_teleport_actor(target: Node3D, is_authorized_admin: bool) -> bool:
@@ -152,106 +479,129 @@ func admin_teleport_actor(target: Node3D, is_authorized_admin: bool) -> bool:
 
 
 func terrain_vertex_count() -> int:
-	return TERRAIN_RESOLUTION * TERRAIN_RESOLUTION
+	return 6 * SPHERE_FACE_SEGMENTS * SPHERE_FACE_SEGMENTS + 2
 
 
 func terrain_triangle_count() -> int:
-	return (TERRAIN_RESOLUTION - 1) * (TERRAIN_RESOLUTION - 1) * 2
+	return 12 * SPHERE_FACE_SEGMENTS * SPHERE_FACE_SEGMENTS
 
 
 func _build_terrain() -> void:
 	_ensure_surface_material()
-	var vertices := PackedVector3Array()
 	var normals := PackedVector3Array()
-	var uvs := PackedVector2Array()
 	var colors := PackedColorArray()
-	vertices.resize(terrain_vertex_count())
-	normals.resize(terrain_vertex_count())
-	uvs.resize(terrain_vertex_count())
-	colors.resize(terrain_vertex_count())
-	var heights := PackedFloat32Array()
-	heights.resize(terrain_vertex_count())
-	for z_index in range(TERRAIN_RESOLUTION):
-		for x_index in range(TERRAIN_RESOLUTION):
-			var index := z_index * TERRAIN_RESOLUTION + x_index
-			var x := (x_index - (TERRAIN_RESOLUTION - 1) * 0.5) \
-				* TERRAIN_SPACING
-			var z := (z_index - (TERRAIN_RESOLUTION - 1) * 0.5) \
-				* TERRAIN_SPACING
-			var y := height_at(x, z)
-			heights[index] = y
-			vertices[index] = Vector3(x, y, z)
-			var dx := height_at(x + 1.0, z) - height_at(x - 1.0, z)
-			var dz := height_at(x, z + 1.0) - height_at(x, z - 1.0)
-			normals[index] = Vector3(-dx * 0.5, 1.0, -dz * 0.5).normalized()
-			uvs[index] = Vector2(float(x_index), float(z_index)) / 8.0
-			# Stable mineral/grain variation breaks up the flat white sheet while
-			# normals still carry the physically important crater relief.
-			var grain_hash := _hash_u32(moon_seed + x_index * 1709
-				+ z_index * 3253 + 991)
-			var grain := float(grain_hash & 0xff) / 255.0
-			var tone := lerpf(0.38, 0.56, grain)
-			colors[index] = Color(tone, tone * 0.985, tone * 0.94)
-	var indices := PackedInt32Array()
-	indices.resize(terrain_triangle_count() * 3)
-	var write := 0
-	for z_index in range(TERRAIN_RESOLUTION - 1):
-		for x_index in range(TERRAIN_RESOLUTION - 1):
-			var a := z_index * TERRAIN_RESOLUTION + x_index
-			var b := a + 1
-			var c := a + TERRAIN_RESOLUTION
-			var d := c + 1
-			for vertex_index in [a, b, c, b, d, c]:
-				indices[write] = vertex_index
-				write += 1
+	# Weld the six cube faces by integer lattice coordinates before projection.
+	# Every edge belongs to exactly two triangles, including all eight corners.
+	for face in range(6):
+		for y in range(SPHERE_FACE_SEGMENTS + 1):
+			for x in range(SPHERE_FACE_SEGMENTS + 1):
+				var key := _cube_grid_point(face, x, y)
+				if _grid_vertex_indices.has(key):
+					continue
+				var point := _grid_surface_vertex(face, x, y)
+				_grid_vertex_indices[key] = _sphere_vertices.size()
+				_sphere_vertices.append(point)
+				normals.append(Vector3.ZERO)
+				var mineral := 0.97 + 0.035 * sin(point.x * 0.017 + point.z * 0.011)
+				colors.append(Color(mineral, mineral * 0.99, mineral * 0.96))
+		for y in range(SPHERE_FACE_SEGMENTS):
+			for x in range(SPHERE_FACE_SEGMENTS):
+				var a: int = _grid_vertex_indices[_cube_grid_point(face, x, y)]
+				var b: int = _grid_vertex_indices[_cube_grid_point(face, x + 1, y)]
+				var c: int = _grid_vertex_indices[_cube_grid_point(face, x, y + 1)]
+				var d: int = _grid_vertex_indices[_cube_grid_point(face, x + 1, y + 1)]
+				_sphere_indices.append_array(PackedInt32Array([a, c, b, b, c, d]))
+	for index in range(0, _sphere_indices.size(), 3):
+		var a := _sphere_indices[index]
+		var b := _sphere_indices[index + 1]
+		var c := _sphere_indices[index + 2]
+		# Godot's clockwise winding has the opposite sign to the usual cross.
+		var normal := (_sphere_vertices[c] - _sphere_vertices[a]).cross(
+			_sphere_vertices[b] - _sphere_vertices[a])
+		normals[a] += normal
+		normals[b] += normal
+		normals[c] += normal
+	for index in range(normals.size()):
+		normals[index] = normals[index].normalized()
 	var arrays := []
 	arrays.resize(Mesh.ARRAY_MAX)
-	arrays[Mesh.ARRAY_VERTEX] = vertices
+	arrays[Mesh.ARRAY_VERTEX] = _sphere_vertices
 	arrays[Mesh.ARRAY_NORMAL] = normals
-	arrays[Mesh.ARRAY_TEX_UV] = uvs
 	arrays[Mesh.ARRAY_COLOR] = colors
-	arrays[Mesh.ARRAY_INDEX] = indices
+	arrays[Mesh.ARRAY_INDEX] = _sphere_indices
 	var mesh := ArrayMesh.new()
 	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
 	terrain_mesh = MeshInstance3D.new()
-	terrain_mesh.name = "LunarTerrain"
+	terrain_mesh.name = "ClosedLunarSphere"
 	terrain_mesh.mesh = mesh
-	terrain_mesh.material_override = _surface_material
-	terrain_mesh.visibility_range_end = 2200.0
+	terrain_mesh.material_override = _horizon_material
+	# Receive actor/rock/kiosk shadows without projecting this entire curved
+	# receiver back onto itself; spherical self-shadow acne reads as contour rings.
+	terrain_mesh.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	# A 150 km cull margin inflated local shadow bounds and lost contact detail.
+	# The actual mesh bounds are sufficient whenever gameplay owns the surface.
+	terrain_mesh.extra_cull_margin = 0.0
 	add_child(terrain_mesh)
-
-	var height_shape := HeightMapShape3D.new()
-	height_shape.map_width = TERRAIN_RESOLUTION
-	height_shape.map_depth = TERRAIN_RESOLUTION
-	height_shape.map_data = heights
-	var collision := CollisionShape3D.new()
-	collision.name = "LunarHeightCollision"
-	collision.shape = height_shape
-	collision.scale = Vector3(TERRAIN_SPACING, 1.0, TERRAIN_SPACING)
+	# Diagnostic aliases reference this one closed surface rather than an
+	# overlapping cap, tile and decorative horizon.
+	lunar_far_surface_fill = terrain_mesh
+	lunar_visual_horizon = terrain_mesh
 	terrain_body = StaticBody3D.new()
-	terrain_body.name = "LunarGround"
+	terrain_body.name = "ClosedLunarGround"
 	terrain_body.collision_layer = 1
 	terrain_body.collision_mask = 1
+	var collision := CollisionShape3D.new()
+	collision.name = "ExactSphericalTerrainCollision"
+	collision.shape = mesh.create_trimesh_shape()
 	terrain_body.add_child(collision)
-	# The landing core is intentionally flat in height_at(). Give that critical
-	# spawn area a simple convex contact as well: convex sweeps are the most
-	# reliable way to recover a small CharacterBody immediately after a remote
-	# realm teleport, before it starts walking onto the surrounding terrain.
-	var landing_contact := CollisionShape3D.new()
-	landing_contact.name = "LunarLandingPadContact"
-	var landing_cylinder := CylinderShape3D.new()
-	landing_cylinder.radius = 6.0
-	landing_cylinder.height = 1.0
-	landing_contact.shape = landing_cylinder
-	landing_contact.position = Vector3(LANDING_XZ.x, -0.5, LANDING_XZ.y)
-	terrain_body.add_child(landing_contact)
 	add_child(terrain_body)
 
 
+func _build_landing_platform() -> void:
+	# A rigid four-legged vehicle needs a common contact plane. The surrounding
+	# terrain remains a sphere; this shallow foundation buries its skirt below
+	# the native collision facets while its top meets the authored landing pose.
+	var landing_surface := surface_position(Vector3.UP)
+	var cylinder := CylinderMesh.new()
+	cylinder.top_radius = LANDING_PLATFORM_RADIUS
+	cylinder.bottom_radius = LANDING_PLATFORM_RADIUS
+	cylinder.height = LANDING_PLATFORM_THICKNESS
+	cylinder.radial_segments = 64
+	var arrays := cylinder.surface_get_arrays(0)
+	var vertices: PackedVector3Array = arrays[Mesh.ARRAY_VERTEX]
+	var normals: PackedVector3Array = arrays[Mesh.ARRAY_NORMAL]
+	var colors := PackedColorArray()
+	var offset := landing_surface - Vector3.UP * LANDING_PLATFORM_THICKNESS * 0.5
+	for index in range(vertices.size()):
+		vertices[index] += offset
+		colors.append(Color(1.12, 1.13, 1.12) if normals[index].y > 0.5
+			else Color(0.78, 0.80, 0.82))
+	arrays[Mesh.ARRAY_VERTEX] = vertices
+	arrays[Mesh.ARRAY_COLOR] = colors
+	var mesh := ArrayMesh.new()
+	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
+	landing_platform = MeshInstance3D.new()
+	landing_platform.name = "LunarLandingPlatform"
+	landing_platform.mesh = mesh
+	# The shared shader expects Moon-local vertices, including the planet centre.
+	# Baking that offset above keeps the platform attached during every scaled
+	# arrival/departure frame instead of leaving an early floating slab in space.
+	landing_platform.material_override = _horizon_material
+	landing_platform.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	add_child(landing_platform)
+	landing_platform_body = StaticBody3D.new()
+	landing_platform_body.name = "LunarLandingPlatformContact"
+	landing_platform_body.collision_layer = 1
+	landing_platform_body.collision_mask = 1
+	var collision := CollisionShape3D.new()
+	collision.shape = mesh.create_trimesh_shape()
+	landing_platform_body.add_child(collision)
+	add_child(landing_platform_body)
+
+
 func _build_rock_field() -> void:
-	# One deterministic MultiMesh scatters low-poly ejecta and boulders around
-	# crater rims. It adds close-range scale without spawning or updating dozens
-	# of independent nodes.
+	# One draw scatters ejecta over the entire sphere. The close landing field is
+	# denser; every large visible boulder has a matching convex contact shape.
 	_ensure_lunar_sky_resources()
 	var rocks := MultiMeshInstance3D.new()
 	rocks.name = "LunarEjectaBoulders"
@@ -260,53 +610,76 @@ func _build_rock_field() -> void:
 	multimesh.use_colors = true
 	multimesh.mesh = _lunar_rock_mesh
 	multimesh.instance_count = LUNAR_ROCK_COUNT
+	var reserved_directions: Array[Vector3] = [Vector3.UP,
+		Vector3(SHOP_XZ.x - LANDING_XZ.x, PLAYABLE_RADIUS_METERS,
+			SHOP_XZ.y - LANDING_XZ.y).normalized()]
+	var reserved_radii: Array[float] = [25.0, 25.0]
+	for facility in [&"farm", &"aging", &"observatory", &"relay", &"crystal_garden"]:
+		reserved_directions.append(MoonColony.facility_direction(facility))
+		reserved_radii.append(18.0 if facility == &"farm" else (8.0 if facility == &"aging" else 12.0))
+	for plot_id in range(MoonColony.PLOT_COUNT):
+		reserved_directions.append(MoonColony.plot_direction(plot_id))
+		reserved_radii.append(6.0)
 	for index in range(LUNAR_ROCK_COUNT):
 		var hx := _hash_u32(moon_seed + index * 2719 + 43)
 		var hz := _hash_u32(moon_seed + index * 4517 + 101)
 		var hs := _hash_u32(moon_seed + index * 6991 + 229)
-		var x := lerpf(-TERRAIN_HALF_EXTENT * 0.92,
-			TERRAIN_HALF_EXTENT * 0.92, float(hx & 0xffff) / 65535.0)
-		var z := lerpf(-TERRAIN_HALF_EXTENT * 0.92,
-			TERRAIN_HALF_EXTENT * 0.92, float(hz & 0xffff) / 65535.0)
-		# Keep both authored pads clear. Deterministically mirror any would-be
-		# obstruction instead of a variable-length rejection loop.
-		for pad in [LANDING_XZ, SHOP_XZ]:
-			if Vector2(x, z).distance_to(pad) < 21.0:
-				x = -x
-				z = -z
-		var size := lerpf(0.35, 2.1, pow(float(hs & 0xff) / 255.0, 2.2))
+		var direction := _fibonacci_direction(index, LUNAR_ROCK_COUNT)
+		if index < LUNAR_ROCK_COUNT / 2:
+			var x := lerpf(-360.0, 360.0, float(hx & 0xffff) / 65535.0)
+			var z := lerpf(-360.0, 360.0, float(hz & 0xffff) / 65535.0)
+			direction = Vector3(x, PLAYABLE_RADIUS_METERS, z).normalized()
+		for reserved_id in range(reserved_directions.size()):
+			# Include the maximum boulder radius so an edge rock cannot reach
+			# into a plot, terminal, landing pad or the farmer's service lane.
+			var exclusion := (reserved_radii[reserved_id] + 2.6) / PLAYABLE_RADIUS_METERS
+			if direction.distance_squared_to(reserved_directions[reserved_id]) < exclusion * exclusion:
+				direction = -direction
+				break
+		var size := lerpf(0.35, 2.6, pow(float(hs & 0xff) / 255.0, 2.2))
 		var yaw := float((hs >> 8) & 0xffff) / 65535.0 * TAU
 		var squash := lerpf(0.42, 0.76, float((hs >> 24) & 0xff) / 255.0)
-		var basis := Basis(Vector3.UP, yaw).scaled(
-			Vector3(size, size * squash, size * 0.78))
-		var origin := Vector3(x, height_at(x, z) + size * squash * 0.32, z)
+		var rotation_basis := surface_basis(direction) * Basis(Vector3.UP, yaw)
+		var basis := rotation_basis.scaled_local(Vector3(size, size * squash, size * 0.78))
+		# Partly embed ejecta so even the sloping side of a faceted rock meets the
+		# exact triangle beneath it rather than balancing above a radial sample.
+		var origin := surface_position(direction, size * squash * 0.12)
 		multimesh.set_instance_transform(index, Transform3D(basis, origin))
 		var tint := lerpf(0.58, 0.84, float((hs >> 16) & 0xff) / 255.0)
-		multimesh.set_instance_color(index,
-			Color(tint, tint * 0.98, tint * 0.93))
+		multimesh.set_instance_color(index, Color(tint, tint * 0.98, tint * 0.93))
+		if size >= 1.0:
+			var collision := CollisionShape3D.new()
+			var shape := ConvexPolygonShape3D.new()
+			var rock_vertices: PackedVector3Array = _lunar_rock_mesh.get_mesh_arrays()[Mesh.ARRAY_VERTEX]
+			for vertex in range(rock_vertices.size()):
+				rock_vertices[vertex] *= Vector3(size, size * squash, size * 0.78)
+			shape.points = rock_vertices
+			collision.shape = shape
+			collision.transform = Transform3D(rotation_basis, origin)
+			terrain_body.add_child(collision)
 	rocks.multimesh = multimesh
 	rocks.material_override = _lunar_rock_material
 	rocks.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
-	rocks.visibility_range_end = 900.0
 	add_child(rocks)
 
 
 func _build_gravity_volume() -> void:
 	gravity_area = Area3D.new()
-	gravity_area.name = "LunarVacuumAndGravity"
+	gravity_area.name = "SphericalLunarVacuumAndGravity"
+	gravity_area.position = PLAYABLE_CENTER
 	gravity_area.gravity_space_override = Area3D.SPACE_OVERRIDE_REPLACE
-	gravity_area.gravity_point = false
-	gravity_area.gravity_direction = Vector3.DOWN
+	gravity_area.gravity_point = true
+	gravity_area.gravity_point_center = Vector3.ZERO
+	# Zero unit distance keeps lunar acceleration constant throughout gameplay.
+	gravity_area.gravity_point_unit_distance = 0.0
 	gravity_area.gravity = LUNAR_GRAVITY
 	gravity_area.monitoring = true
 	gravity_area.collision_layer = 0
-	gravity_area.collision_mask = 1
+	gravity_area.collision_mask = 1 | 2
 	var shape_node := CollisionShape3D.new()
-	var box := BoxShape3D.new()
-	box.size = Vector3(TERRAIN_HALF_EXTENT * 2.0, VACUUM_HEIGHT,
-		TERRAIN_HALF_EXTENT * 2.0)
-	shape_node.shape = box
-	shape_node.position.y = VACUUM_HEIGHT * 0.5 - 100.0
+	var sphere := SphereShape3D.new()
+	sphere.radius = PLAYABLE_RADIUS_METERS + VACUUM_HEIGHT
+	shape_node.shape = sphere
 	gravity_area.add_child(shape_node)
 	gravity_area.body_entered.connect(_on_body_entered)
 	gravity_area.body_exited.connect(_on_body_exited)
@@ -317,14 +690,38 @@ func _build_lighting() -> void:
 	var sunlight := DirectionalLight3D.new()
 	sunlight.name = "HarshLunarSunlight"
 	sunlight.light_color = Color(1.0, 0.94, 0.82)
-	sunlight.light_energy = 0.62
-	# Earth's celestial sun already supplies the single shadow pass in both
-	# realms. Keep this as warm lunar fill so the hidden Moon never doubles the
-	# directional shadow cost, and so there are not two conflicting "suns" after
-	# touchdown.
-	sunlight.shadow_enabled = false
+	sunlight.light_energy = 1.15
+	# One short-range lunar shadow pass anchors boots, kiosk supports, rocks and
+	# the lander. The parent realm toggle retires Earth's directional lights.
+	sunlight.shadow_enabled = true
+	sunlight.directional_shadow_mode = DirectionalLight3D.SHADOW_ORTHOGONAL
+	sunlight.directional_shadow_max_distance = 60.0
+	sunlight.light_angular_distance = 0.0
+	sunlight.shadow_blur = 0.0
+	sunlight.shadow_bias = 0.004
+	sunlight.shadow_normal_bias = 0.04
 	sunlight.rotation_degrees = Vector3(-52.0, -28.0, 0.0)
 	add_child(sunlight)
+	var fill := DirectionalLight3D.new()
+	fill.name = "SoftLunarSuitFill"
+	fill.light_color = Color(0.78, 0.86, 1.0)
+	fill.light_energy = 0.20
+	fill.shadow_enabled = false
+	fill.rotation_degrees = Vector3(-28.0, 150.0, 0.0)
+	add_child(fill)
+	# The camera override gives an airless background in every direction, even
+	# when a far-plane clips the decorative star shell. Earth keeps its own sky.
+	lunar_environment = Environment.new()
+	lunar_environment.background_mode = Environment.BG_COLOR
+	lunar_environment.background_color = Color(0.0015, 0.0020, 0.004)
+	lunar_environment.ambient_light_source = Environment.AMBIENT_SOURCE_COLOR
+	lunar_environment.ambient_light_color = Color(0.61, 0.65, 0.72)
+	lunar_environment.ambient_light_energy = 0.36
+	lunar_environment.ssao_enabled = true
+	lunar_environment.ssao_radius = 0.7
+	lunar_environment.ssao_intensity = 1.0
+	lunar_environment.ssao_power = 1.15
+	lunar_environment.tonemap_mode = Environment.TONE_MAPPER_FILMIC
 
 
 func _build_lunar_sky() -> void:
@@ -332,13 +729,14 @@ func _build_lunar_sky() -> void:
 	# An inward-facing dark shell replaces Earth's atmospheric sky only while the
 	# MoonWorld is visible. One bounded MultiMesh supplies sharp airless stars.
 	var vacuum_mesh := SphereMesh.new()
-	vacuum_mesh.radius = 1750.0
-	vacuum_mesh.height = 3500.0
+	vacuum_mesh.radius = 12_000.0
+	vacuum_mesh.height = 24_000.0
 	vacuum_mesh.radial_segments = 48
 	vacuum_mesh.rings = 24
 	var vacuum := MeshInstance3D.new()
 	vacuum.name = "AirlessBlackSky"
 	vacuum.mesh = vacuum_mesh
+	vacuum.position = PLAYABLE_CENTER
 	vacuum.material_override = _vacuum_material
 	vacuum.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	add_child(vacuum)
@@ -353,10 +751,11 @@ func _build_lunar_sky() -> void:
 	for index in range(LUNAR_STAR_COUNT):
 		var direction := _fibonacci_direction(index, LUNAR_STAR_COUNT)
 		var hash := _hash_u32(moon_seed + index * 3571 + 211)
-		var radius := 1080.0 + float(hash & 0xffff) / 65535.0 * 560.0
+		var radius := 8_000.0 + float(hash & 0xffff) / 65535.0 * 2_000.0
 		var sparkle := 0.65 + float((hash >> 16) & 0xff) / 255.0 * 1.6
 		multimesh.set_instance_transform(index, Transform3D(
-			Basis.IDENTITY.scaled(Vector3.ONE * sparkle), direction * radius))
+			Basis.IDENTITY.scaled(Vector3.ONE * sparkle),
+			PLAYABLE_CENTER + direction * radius))
 		multimesh.set_instance_color(index, Color(
 			0.72 + sparkle * 0.10, 0.82 + sparkle * 0.06, 1.0))
 	stars.multimesh = multimesh
@@ -368,8 +767,10 @@ func _build_lunar_sky() -> void:
 	# larger than strict angular scale so players can read continents and cloud
 	# bands without a telescope.
 	var earth_mesh := SphereMesh.new()
-	earth_mesh.radius = 74.0
-	earth_mesh.height = 148.0
+	# At roughly 1.5 km in this bounded sky, a 26 m render radius gives the
+	# Earth's real ~1.9 degree lunar-surface angular diameter.
+	earth_mesh.radius = 26.0
+	earth_mesh.height = 52.0
 	earth_mesh.radial_segments = 48
 	earth_mesh.rings = 24
 	var earth_material := StandardMaterial3D.new()
@@ -386,8 +787,8 @@ func _build_lunar_sky() -> void:
 	earth.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	add_child(earth)
 	var halo_mesh := SphereMesh.new()
-	halo_mesh.radius = 79.0
-	halo_mesh.height = 158.0
+	halo_mesh.radius = 28.0
+	halo_mesh.height = 56.0
 	halo_mesh.radial_segments = 40
 	halo_mesh.rings = 20
 	var halo := MeshInstance3D.new()
@@ -416,7 +817,7 @@ static func _ensure_lunar_sky_resources() -> void:
 	_vacuum_material.disable_receive_shadows = true
 	_vacuum_material.disable_fog = true
 	_lunar_star_mesh = BoxMesh.new()
-	_lunar_star_mesh.size = Vector3(0.90, 0.90, 0.90)
+	_lunar_star_mesh.size = Vector3(1.6, 1.6, 1.6)
 	_lunar_star_material = StandardMaterial3D.new()
 	_lunar_star_material.albedo_color = Color.WHITE
 	_lunar_star_material.emission_enabled = true
@@ -480,12 +881,17 @@ static func _disable_fog_on_descendants(root: Node) -> void:
 		_disable_fog_on_descendants(child)
 
 
-static func _ensure_surface_material() -> void:
-	if _surface_material:
-		return
-	_surface_material = StandardMaterial3D.new()
-	_surface_material.albedo_color = Color(0.50, 0.50, 0.48)
-	_surface_material.roughness = 0.96
-	_surface_material.metallic = 0.03
-	_surface_material.vertex_color_use_as_albedo = true
-	_surface_material.disable_fog = true
+func _ensure_surface_material() -> void:
+	if not _surface_shader:
+		_surface_shader = Shader.new()
+		_surface_shader.code = LUNAR_CAP_SHADER
+	# The geometry constants feed shader uniforms so surface projection, gravity,
+	# collision and rendering cannot silently disagree after a radius change.
+	_horizon_material = ShaderMaterial.new()
+	_horizon_material.shader = _surface_shader
+	_horizon_material.set_shader_parameter("playable_center", PLAYABLE_CENTER)
+	_horizon_material.set_shader_parameter("playable_radius", PLAYABLE_RADIUS_METERS)
+	_horizon_material.set_shader_parameter("scaled_moon_radius", PLAYABLE_RADIUS_METERS)
+	_horizon_material.set_shader_parameter("scaled_surface_local", Vector3(LANDING_XZ.x, 0.0, LANDING_XZ.y))
+	_horizon_material.set_shader_parameter("lunar_atlas", SpaceVoyageVisuals.shared_moon_texture())
+	_horizon_material.set_shader_parameter("lunar_microdetail", LUNAR_MICRODETAIL)

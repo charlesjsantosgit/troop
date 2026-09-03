@@ -73,7 +73,7 @@ func _ready() -> void:
 	weapon_panel.anchor_bottom = 1.0
 	weapon_panel.offset_left = -448
 	weapon_panel.offset_right = -8
-	weapon_panel.offset_top = -104
+	weapon_panel.offset_top = -146
 	weapon_panel.offset_bottom = -8
 	weapon_panel.add_theme_stylebox_override("panel",
 		_panel_style(Color(0.055, 0.055, 0.03, 0.86), Color(1.0, 0.68, 0.12, 0.75)))
@@ -169,8 +169,8 @@ func _ready() -> void:
 	ammo_label.anchor_bottom = 1.0
 	ammo_label.offset_left = -390
 	ammo_label.offset_right = -28
-	ammo_label.offset_top = -92
-	ammo_label.offset_bottom = -18
+	ammo_label.offset_top = -132
+	ammo_label.offset_bottom = -38
 	ammo_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
 	ammo_label.add_theme_color_override("font_color", Color(1.0, 0.80, 0.20))
 	add_child(ammo_label)
@@ -205,7 +205,9 @@ func _ready() -> void:
 	hint.anchor_bottom = 1.0
 	hint.offset_left = -400
 	hint.offset_right = 400
-	hint.offset_top = -70
+	hint.offset_top = -178
+	hint.offset_bottom = -150
+	hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	hint.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	add_child(hint)
 
@@ -511,6 +513,10 @@ func clear_sniper_scope() -> void:
 
 
 func _process(dt: float) -> void:
+	# CanvasLayer visibility does not stop its node callbacks. Captures and
+	# cinematic overlays must not keep rebuilding hidden HUD state every frame.
+	if not visible:
+		return
 	_update_fps_meter(dt)
 	if not player or not is_instance_valid(player):
 		return
@@ -530,7 +536,8 @@ func _process(dt: float) -> void:
 	health_label.text = "HP %d" % ceili(player.health)
 
 	if minimap:
-		minimap.visible = minimap.mode != 2 and not _sniper_scope_active \
+		minimap.visible = Net.player_realm() in [Net.PlayerRealm.EARTH, Net.PlayerRealm.MOON] \
+			and minimap.mode != 2 and not _sniper_scope_active \
 			and (not world_map or not world_map.is_open())
 		roster.position.y = 12.0 + (minimap.size.y + 8.0 \
 			if minimap.visible else 0.0)
@@ -539,7 +546,7 @@ func _process(dt: float) -> void:
 	_update_sniper_scope(weapon, front_camera)
 	var aircraft_aim_active := _update_aircraft_aim_reticle(front_camera)
 	spread_label.visible = not _sniper_scope_active and not aircraft_aim_active
-	camera_badge.visible = not _sniper_scope_active
+	camera_badge.visible = not _sniper_scope_active and not is_instance_valid(player.lunar_world)
 	hint.visible = not _sniper_scope_active
 	voice_label.visible = not _sniper_scope_active
 	enemy_label.visible = not _sniper_scope_active
@@ -700,6 +707,8 @@ func _process(dt: float) -> void:
 		hint.text = "swim: WASD paddle · SHIFT stroke faster · SPACE hop out"
 	elif not player.last_target.is_empty():
 		hint.text = "hold E to GRAB · LMB fire · hold RMB to aim"
+	elif is_instance_valid(player.lunar_world) and _help_t > 0.0:
+		hint.text = "WASD walk · SPACE low-gravity jump · E trade / oxygen · I backpack · L launch"
 	elif _help_t > 0.0:
 		hint.text = "WASD run · E vine/chest · LMB fire · H bandage · RMB aim · C camera · X world map · 1/2/3/4 weapons · R reload"
 	else:
@@ -764,8 +773,8 @@ func _update_vehicle_cluster() -> void:
 	var v: Vehicle = player.vehicle if player else null
 	if v == null or not is_instance_valid(v):
 		vehicle_panel.visible = false
-		hint.offset_top = -70
-		hint.offset_bottom = 0
+		hint.offset_top = -178
+		hint.offset_bottom = -150
 		return
 	vehicle_panel.visible = true
 	# Vehicle instructions sit above the instruments instead of running through
@@ -851,7 +860,9 @@ func _update_sniper_scope(weapon: Node, front_camera: bool) -> void:
 	var solution := _sniper_scope_solution(SNIPER_SCOPE_RANGE)
 	var range_m: float = solution.range_m
 	set_sniper_scope_state(true, sniper.magnification(), range_m,
-		SniperRifle.drop_below_zero_at(range_m), int(solution.target_zone))
+		SniperRifle.drop_below_zero_at(range_m,
+			MoonWorld.LUNAR_GRAVITY if is_instance_valid(player.lunar_world)
+			else SniperRifle.BALLISTIC_GRAVITY), int(solution.target_zone))
 
 
 func _sniper_scope_solution(maximum: float) -> Dictionary:

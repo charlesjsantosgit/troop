@@ -30,6 +30,7 @@ func run() -> void:
 	print("PLANETTEST begin seed=%d circumference=%.0fm" % [Gen.world_seed,
 		Gen.PLANET_CIRCUMFERENCE])
 	var started_ms := Time.get_ticks_msec()
+	_test_home_terrain()
 	_test_spherical_topology()
 	_test_pangaea_poles_and_distribution()
 	_test_summit_and_mountains()
@@ -41,6 +42,138 @@ func run() -> void:
 	print("PLANETTEST %d/%d %s" % [passed, total,
 		"PASS" if passed == total else "FAIL"])
 	get_tree().quit(0 if passed == total else 1)
+
+
+func _test_home_terrain() -> void:
+	# Globe-spaced upland checks never encounter the old 720-2900 m spawn rim.
+	# These transects cross that entire transition and its far shoulder. Include
+	# seeds that formerly placed a 1-2 km mountain range around every spawn exit,
+	# as well as the local and dedicated-server defaults and quieter landscapes.
+	# The actual 3 m mesh triangles catch crag cliffs that a 384 m rise misses.
+	# Lakes and oceans retain their natural basin walls and are tested separately.
+	var original_seed := Gen.world_seed
+	var cell := Gen.CHUNK / float(Gen.CELLS)
+	var corners := PackedVector2Array([Vector2.ZERO, Vector2(cell, 0.0),
+		Vector2(0.0, cell), Vector2(cell, cell)])
+	var lowlands_safe := true
+	var grades_safe := true
+	var lowland_failures: Array[String] = []
+	var grade_failures: Array[String] = []
+	var mountain_slopes := PackedFloat32Array()
+	var worst_mountain_grade := 0.0
+	var worst_mountain_point := Vector2.ZERO
+	var worst_mountain_seed := 0
+	for seed_value in [1337, 20260805, 99, 2026, 8675309, 42, 4, 19, 27, 54, 100]:
+		Gen.setup(seed_value)
+		var heights := PackedFloat32Array()
+		var slopes := PackedFloat32Array()
+		var open_directions := 0
+		var lowland_max_height := -INF
+		var max_grade := 0.0
+		var worst := Vector2.ZERO
+		for ray in range(24):
+			var direction := Vector2.from_angle(TAU * float(ray) / 24.0)
+			var ray_max_grade := 0.0
+			for distance in range(720, 8001, 48):
+				var p := (direction * float(distance)).snapped(Vector2(cell, cell))
+				var quad_heights := _dry_terrain_cell_heights(p, corners)
+				if quad_heights.size() != 4:
+					continue
+				var h00 := quad_heights[0]
+				var grade := _terrain_cell_grade(quad_heights, cell)
+				heights.append(h00)
+				slopes.append(grade)
+				if distance <= 4000:
+					lowland_max_height = maxf(lowland_max_height, h00)
+				ray_max_grade = maxf(ray_max_grade, grade)
+				if grade > max_grade:
+					max_grade = grade
+					worst = p
+			open_directions += 1 if ray_max_grade <= 0.55 else 0
+		heights.sort()
+		slopes.sort()
+		var relief := _percentile(heights, 1.0) - _percentile(heights, 0.0)
+		var grade_p95 := _percentile(slopes, 0.95)
+		var seed_lowlands_safe := lowland_max_height <= 200.0 and relief >= 0.1
+		# Most ground stays below an 8.6-degree grade; even the worst sampled
+		# shoulder is under 29 degrees, safely below the player's 45-degree limit.
+		# Some seeds place broad lakes beyond the home coast, leaving only the
+		# inner dry samples. Require four cells per direction in aggregate without
+		# treating intentional water as missing walkable terrain.
+		var seed_grades_safe := slopes.size() >= 96 and grade_p95 <= 0.15 \
+			and max_grade <= 0.55
+		lowlands_safe = lowlands_safe and seed_lowlands_safe
+		grades_safe = grades_safe and seed_grades_safe
+		var summary := "seed=%d h=%.1f..%.1f lowland_max=%.1f p95grade=%.3f max=%.3f open=%d/24 cells=%d worst=%s" % [
+			seed_value, _percentile(heights, 0.0), _percentile(heights, 1.0),
+			lowland_max_height, grade_p95, max_grade,
+			open_directions, slopes.size(), worst]
+		print("PLANET_HOME " + summary)
+		if not seed_lowlands_safe:
+			lowland_failures.append(summary)
+		if not seed_grades_safe:
+			grade_failures.append(summary)
+
+		# Audit surviving ranges well beyond the spawn lowlands too. Otherwise a
+		# lowland mask could hide the original multiplication of kilometre-high
+		# peaks by fine noise, leaving unwalkable walls in every distant range.
+		for ray in range(24):
+			var direction := Vector2.from_angle(TAU * float(ray) / 24.0)
+			for distance in [32000.0, 48000.0, 64000.0, 96000.0, 128000.0]:
+				var p: Vector2 = (direction * distance).snapped(Vector2(cell, cell))
+				var macro := Gen.planet_terrain_sample(p.x, p.y)
+				if float(macro.mountain) < 0.42 \
+						or float(macro.summit_weight) > 0.02:
+					continue
+				var quad_heights := _dry_terrain_cell_heights(p, corners)
+				if quad_heights.size() != 4:
+					continue
+				var grade := _terrain_cell_grade(quad_heights, cell)
+				mountain_slopes.append(grade)
+				if grade > worst_mountain_grade:
+					worst_mountain_grade = grade
+					worst_mountain_point = p
+					worst_mountain_seed = seed_value
+	Gen.setup(original_seed)
+	_check(lowlands_safe,
+		"spawn surroundings stay low and rolling instead of forming a mountain ring",
+		"; ".join(lowland_failures))
+	_check(grades_safe,
+		"dry terrain across every spawn-outskirts direction stays comfortably walkable",
+		"; ".join(grade_failures))
+	mountain_slopes.sort()
+	var mountain_p95 := _percentile(mountain_slopes, 0.95)
+	var mountain_summary := "cells=%d p95grade=%.3f max=%.3f worst_seed=%d worst=%s" % [
+		mountain_slopes.size(), mountain_p95, worst_mountain_grade,
+		worst_mountain_seed, worst_mountain_point]
+	_check(mountain_slopes.size() >= 60 and mountain_p95 <= 0.20 \
+		and worst_mountain_grade <= 0.50,
+		"distant mountain detail stays bounded on the collision lattice",
+		mountain_summary)
+	print("PLANET_MOUNTAIN_DETAIL " + mountain_summary)
+
+
+func _dry_terrain_cell_heights(p: Vector2,
+		corners: PackedVector2Array) -> PackedFloat32Array:
+	var heights := PackedFloat32Array()
+	for offset in corners:
+		var corner := p + offset
+		var macro := Gen.planet_terrain_sample(corner.x, corner.y)
+		if float(macro.lake) > 0.02 or float(macro.ocean) > 0.02:
+			break
+		heights.append(Gen.planet_height_from_sample(macro))
+	return heights
+
+
+func _terrain_cell_grade(heights: PackedFloat32Array, cell: float) -> float:
+	var h00 := heights[0]
+	var h10 := heights[1]
+	var h01 := heights[2]
+	var h11 := heights[3]
+	# Chunk uses triangles (00,10,11) and (00,11,01), so each pair below is the
+	# exact X/Z gradient of one collision triangle rather than a broad average.
+	return maxf(Vector2(h10 - h00, h11 - h10).length(),
+		Vector2(h11 - h01, h01 - h00).length()) / cell
 
 
 func _test_spherical_topology() -> void:

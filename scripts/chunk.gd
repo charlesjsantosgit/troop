@@ -16,8 +16,8 @@ static var _mat_water: Material
 static var _mat_grass: Material
 static var _mat_rock: Material
 static var _tuft_mesh: ArrayMesh
-static var _foliage_high_mesh: SphereMesh
-static var _foliage_low_mesh: SphereMesh
+static var _foliage_high_meshes: Array[ArrayMesh] = []
+static var _foliage_low_meshes: Array[ArrayMesh] = []
 static var _trunk_high_mesh: CylinderMesh
 static var _trunk_low_mesh: CylinderMesh
 static var _rock_mesh: SphereMesh
@@ -53,6 +53,7 @@ var _literal_foliage_nodes: Array[GeometryInstance3D] = []
 const TREE_HIGH_END := 72.0
 const TREE_LOW_BEGIN := 60.0
 const TREE_LOD_MARGIN := 12.0
+const FOLIAGE_VARIANT_COUNT := 3
 const COARSE_TERRAIN_CELLS := 1
 
 
@@ -75,16 +76,12 @@ static func _init_mats() -> void:
 		st.add_vertex(right); st.add_vertex(tip); st.add_vertex(-right)
 	st.generate_normals()
 	_tuft_mesh = st.commit()
-	_foliage_high_mesh = SphereMesh.new()
-	_foliage_high_mesh.radius = 1.0
-	_foliage_high_mesh.height = 1.5
-	_foliage_high_mesh.radial_segments = 8
-	_foliage_high_mesh.rings = 4
-	_foliage_low_mesh = SphereMesh.new()
-	_foliage_low_mesh.radius = 1.0
-	_foliage_low_mesh.height = 1.5
-	_foliage_low_mesh.radial_segments = 5
-	_foliage_low_mesh.rings = 2
+	# Reuse a tiny deterministic set of faceted crown clusters. A populated
+	# chunk still emits exactly one high and one low foliage MultiMesh; selecting
+	# one cached variant per chunk avoids adding draw calls or per-tree resources.
+	for variant in range(FOLIAGE_VARIANT_COUNT):
+		_foliage_high_meshes.append(_make_foliage_cluster_mesh(variant, false))
+		_foliage_low_meshes.append(_make_foliage_cluster_mesh(variant, true))
 	_trunk_high_mesh = CylinderMesh.new()
 	_trunk_high_mesh.bottom_radius = 1.0
 	_trunk_high_mesh.top_radius = 0.7
@@ -109,6 +106,91 @@ static func _init_mats() -> void:
 		_make_understory_mesh(1),
 		_make_understory_mesh(2),
 	]
+
+
+## Builds overlapping asymmetric bipyramids instead of a smooth sphere. The
+## high mesh is 72 opaque triangles (8 + 7 + 7 + 7 + 7 sided lobes); the low
+## mesh is 20 (two 5-sided lobes), both safely inside the foliage LOD budgets.
+static func _make_foliage_cluster_mesh(variant: int, low_detail: bool) -> ArrayMesh:
+	var st := SurfaceTool.new()
+	st.begin(Mesh.PRIMITIVE_TRIANGLES)
+	var centers: Array[Vector3] = []
+	var radii: Array[Vector3] = []
+	var sides: Array[int] = []
+	var phase := float(variant) * 0.67
+	if low_detail:
+		match variant:
+			0:
+				centers = [Vector3(-0.27, 0.08, -0.07),
+					Vector3(0.30, -0.10, 0.09)]
+				radii = [Vector3(0.70, 0.65, 0.66),
+					Vector3(0.68, 0.62, 0.67)]
+			1:
+				centers = [Vector3(-0.18, -0.09, 0.24),
+					Vector3(0.22, 0.10, -0.22)]
+				radii = [Vector3(0.76, 0.61, 0.61),
+					Vector3(0.68, 0.65, 0.71)]
+			_:
+				centers = [Vector3(-0.31, -0.05, -0.15),
+					Vector3(0.25, 0.07, 0.18)]
+				radii = [Vector3(0.66, 0.63, 0.72),
+					Vector3(0.73, 0.64, 0.63)]
+		sides = [5, 5]
+	else:
+		match variant:
+			0:
+				centers = [Vector3(0.0, 0.03, 0.0),
+					Vector3(-0.45, 0.04, 0.12), Vector3(0.44, -0.07, 0.15),
+					Vector3(0.08, 0.24, -0.38), Vector3(-0.07, -0.18, 0.39)]
+				radii = [Vector3(0.70, 0.66, 0.68),
+					Vector3(0.54, 0.48, 0.50), Vector3(0.54, 0.46, 0.49),
+					Vector3(0.48, 0.52, 0.51), Vector3(0.50, 0.50, 0.51)]
+			1:
+				centers = [Vector3(-0.03, 0.01, 0.02),
+					Vector3(-0.38, -0.10, -0.26), Vector3(0.43, 0.10, -0.12),
+					Vector3(-0.18, 0.26, 0.34), Vector3(0.20, -0.19, 0.37)]
+				radii = [Vector3(0.68, 0.67, 0.70),
+					Vector3(0.55, 0.47, 0.48), Vector3(0.52, 0.49, 0.54),
+					Vector3(0.50, 0.51, 0.49), Vector3(0.51, 0.48, 0.50)]
+			_:
+				centers = [Vector3(0.02, -0.02, -0.01),
+					Vector3(-0.46, 0.12, -0.06), Vector3(0.40, -0.16, 0.25),
+					Vector3(0.17, 0.26, -0.35), Vector3(-0.21, -0.13, 0.38)]
+				radii = [Vector3(0.71, 0.64, 0.67),
+					Vector3(0.50, 0.51, 0.54), Vector3(0.56, 0.47, 0.48),
+					Vector3(0.50, 0.50, 0.51), Vector3(0.52, 0.49, 0.49)]
+		sides = [8, 7, 7, 7, 7]
+	for i in range(centers.size()):
+		_add_foliage_lobe(st, centers[i], radii[i], sides[i],
+			phase + float(i) * 0.91)
+	st.generate_normals()
+	return st.commit()
+
+
+static func _add_foliage_lobe(st: SurfaceTool, center: Vector3, radii: Vector3,
+		side_count: int, phase: float) -> void:
+	var ring: Array[Vector3] = []
+	for i in range(side_count):
+		var angle := phase + TAU * float(i) / float(side_count)
+		var radial_wobble := 1.0 + sin(float(i) * 2.37 + phase * 1.71) * 0.085
+		var vertical_wobble := sin(float(i) * 1.79 + phase) * radii.y * 0.075
+		ring.append(center + Vector3(cos(angle) * radii.x * radial_wobble,
+			vertical_wobble,
+			sin(angle) * radii.z * (2.0 - radial_wobble)))
+	var lean := Vector3(cos(phase * 1.31), 0, sin(phase * 1.31))
+	var top := center + Vector3.UP * radii.y \
+		+ lean * minf(radii.x, radii.z) * 0.10
+	var bottom := center - Vector3.UP * radii.y \
+		- lean * minf(radii.x, radii.z) * 0.045
+	for i in range(side_count):
+		var next := (i + 1) % side_count
+		# Clockwise from outside so generated normals keep seasonal snow on top.
+		st.add_vertex(top)
+		st.add_vertex(ring[next])
+		st.add_vertex(ring[i])
+		st.add_vertex(bottom)
+		st.add_vertex(ring[i])
+		st.add_vertex(ring[next])
 
 
 static func _make_understory_mesh(kind: int) -> ArrayMesh:
@@ -360,16 +442,17 @@ func _build_water(coarse := false) -> void:
 	_water_instance.position = Vector3(x0 + Gen.CHUNK * 0.5,
 		Gen.WATER_Y, z0 + Gen.CHUNK * 0.5)
 	_water_instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-	_water_instance.visibility_range_end = 120.0
-	_water_instance.visibility_range_end_margin = 14.0
-	_water_instance.visibility_range_fade_mode = \
-		GeometryInstance3D.VISIBILITY_RANGE_FADE_SELF
+	# The streamer bounds this fine-water grid. Camera-to-tile-center culling
+	# disagreed with the coarse shader's player-to-fragment handoff, exposing
+	# holes near chunk edges and beneath elevated cameras. Keep normal frustum
+	# culling; the resident-grid boundary is covered by the water-only fade.
 	add_child(_water_instance)
 
 
 func _build_trees() -> void:
 	var center := Vector3(key.x * Gen.CHUNK + Gen.CHUNK * 0.5, 0,
 		key.y * Gen.CHUNK + Gen.CHUNK * 0.5)
+	var foliage_variant: int = _foliage_variant_index()
 	var high_trunk_xforms: Array[Transform3D] = []
 	var low_trunk_xforms: Array[Transform3D] = []
 	var high_trunk_colors: Array[Color] = []
@@ -399,8 +482,15 @@ func _build_trees() -> void:
 				Color(0.93, 0.55, 0.68) if bl.flower else \
 				Color.from_hsv(0.27 + bl.shade * 0.07, 0.58,
 					0.42 + bl.shade * 0.3))
-			var leaf_basis := Basis.IDENTITY.scaled(Vector3.ONE * bl.r)
-			leaf_xforms.append(Transform3D(leaf_basis, t.pos + bl.off - center))
+			var leaf_position: Vector3 = t.pos + bl.off
+			var leaf_hash: int = _foliage_instance_hash(leaf_position)
+			var yaw := TAU * float(_positive_mod(leaf_hash, 2048)) / 2048.0
+			var x_scale := 0.94 + float(_positive_mod(leaf_hash >> 11, 7)) * 0.02
+			var y_scale := 0.96 + float(_positive_mod(leaf_hash >> 17, 5)) * 0.02
+			var leaf_scale: Vector3 = \
+				Vector3(x_scale, y_scale, 2.0 - x_scale) * bl.r
+			var leaf_basis := Basis(Vector3.UP, yaw) * Basis.from_scale(leaf_scale)
+			leaf_xforms.append(Transform3D(leaf_basis, leaf_position - center))
 			leaf_colors.append(leaf_color)
 
 		for br in t.branches:
@@ -418,10 +508,28 @@ func _build_trees() -> void:
 	_add_tree_lod_multimesh(_trunk_low_mesh, low_trunk_xforms,
 		low_trunk_colors, _mat_trunk, center,
 		TREE_LOW_BEGIN, 220.0, false)
-	_add_foliage_lod_multimesh(_foliage_high_mesh, leaf_xforms, leaf_colors, center,
-		0.0, TREE_HIGH_END, false)
-	_add_foliage_lod_multimesh(_foliage_low_mesh, leaf_xforms, leaf_colors, center,
-		TREE_LOW_BEGIN, 220.0, false)
+	_add_foliage_lod_multimesh(_foliage_high_meshes[foliage_variant], leaf_xforms,
+		leaf_colors, center, 0.0, TREE_HIGH_END, false)
+	_add_foliage_lod_multimesh(_foliage_low_meshes[foliage_variant], leaf_xforms,
+		leaf_colors, center, TREE_LOW_BEGIN, 220.0, false)
+
+
+func _foliage_variant_index() -> int:
+	var mixed := key.x * 73856093
+	mixed = mixed ^ (key.y * 19349663)
+	mixed = mixed ^ (int(Gen.world_seed) * 83492791)
+	return _positive_mod(mixed, FOLIAGE_VARIANT_COUNT)
+
+
+static func _foliage_instance_hash(position: Vector3) -> int:
+	var mixed := roundi(position.x * 64.0) * 73856093
+	mixed = mixed ^ (roundi(position.y * 64.0) * 19349663)
+	mixed = mixed ^ (roundi(position.z * 64.0) * 83492791)
+	return mixed
+
+
+static func _positive_mod(value: int, divisor: int) -> int:
+	return ((value % divisor) + divisor) % divisor
 
 
 func _make_tree_collision(t: Dictionary) -> StaticBody3D:

@@ -14,7 +14,7 @@ signal update_staged(version: String)
 signal installer_ready(version: String, path: String)
 signal update_error(message: String)
 
-const BOOTSTRAP_VERSION := 1
+const BOOTSTRAP_VERSION := 2
 const MANIFEST_SCHEMA := 1
 const STATE_SCHEMA := 1
 const APP_ID := "com.charlessantos.troop"
@@ -67,6 +67,10 @@ var _check_timer: Timer
 func _init() -> void:
 	_base_version = str(ProjectSettings.get_setting(
 		"application/config/version", "0.0.0"))
+	if OS.has_feature("editor"):
+		status = "source"
+		detail = "Local source build"
+		return
 	_ensure_update_dir()
 	_state = _load_state()
 	_mount_selected_pack()
@@ -131,6 +135,9 @@ func manifest_url() -> String:
 
 
 func check_for_updates(force := false) -> Error:
+	if OS.has_feature("editor"):
+		_set_status("source", "Local source build")
+		return ERR_UNAVAILABLE
 	if status in ["checking", "downloading"]:
 		return ERR_BUSY
 	var repository := _configured_repository()
@@ -236,7 +243,7 @@ func _configured_repository() -> String:
 
 
 func _should_check_automatically() -> bool:
-	if Engine.is_editor_hint() or DisplayServer.get_name() == "headless":
+	if OS.has_feature("editor") or DisplayServer.get_name() == "headless":
 		return false
 	if not bool(ProjectSettings.get_setting(
 			"application/config/update_auto_check", true)):
@@ -289,6 +296,9 @@ func confirm_pending_boot() -> void:
 
 
 func _mount_selected_pack() -> void:
+	# Source runs and tests must never mount or mutate the installed game's packs.
+	if OS.has_feature("editor"):
+		return
 	var pending := str(_state.get("pending_version", ""))
 	if not pending.is_empty():
 		if bool(_state.get("pending_attempted", false)):

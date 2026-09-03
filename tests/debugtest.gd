@@ -189,12 +189,15 @@ func run(main) -> void:
 		"minimap baked satellite tiles")
 
 	# 12 — the chosen name persists to disk
+	var original_name: String = Settings.player_name
 	Settings.set_player_name("OokTester")
 	Settings.save()
 	var reread := ConfigFile.new()
 	reread.load(Settings.CONFIG_PATH)
 	_check(str(reread.get_value("profile", "name", "")) == "OokTester",
 		"player name persists in settings.cfg")
+	Settings.set_player_name(original_name)
+	Settings.save()
 
 	# 13 — a version-mismatch rejection tears down to the menu and immediately
 	# arms the updater (we assert the flow starts, not the network result)

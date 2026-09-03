@@ -30,6 +30,7 @@ func _run() -> void:
 	_test_level_flight_mountain_lookahead(world_script)
 	_test_incremental_stratos_build()
 	_test_complementary_material_handoffs()
+	_test_water_chunk_boundary_coverage()
 	_test_full_sphere_nadir_palette()
 	_finish()
 
@@ -250,6 +251,82 @@ func _test_complementary_material_handoffs() -> void:
 	# Restore runtime defaults for any subsequent in-process suite.
 	Visuals.set_altitude_lod_handoffs(Gen.SKYLINE_NEAR_FADE,
 		Gen.STRATOS_NEAR_FADE)
+
+
+func _test_water_chunk_boundary_coverage() -> void:
+	var gen: Node = root.get_node("Gen")
+	gen.call("setup", 2026)
+	var lake: Vector2 = gen.call("planet_home_lake_center")
+	var chunk_script: GDScript = load("res://scripts/chunk.gd")
+	var chunk: Node3D = chunk_script.new()
+	root.add_child(chunk)
+	var lake_key := Vector2i(floori(lake.x / Gen.CHUNK), floori(lake.y / Gen.CHUNK))
+	chunk.call("setup", lake_key, {}, false, true, false)
+	var water: MeshInstance3D = chunk.get("_water_instance")
+	_expect(is_instance_valid(water), "water coverage fixture must build the actual wet near-tile mesh")
+	if not is_instance_valid(water):
+		chunk.free()
+		return
+	var plane := water.mesh as PlaneMesh
+	_expect(plane != null and plane.size.is_equal_approx(Vector2.ONE * Gen.CHUNK),
+		"fine-water tile geometry must cover its complete streamed chunk")
+	_expect(water.visibility_range_end <= 0.0 \
+		and water.visibility_range_fade_mode == GeometryInstance3D.VISIBILITY_RANGE_FADE_DISABLED,
+		"fine water must not disappear by camera-to-mesh-center distance before a fragment handoff")
+	var material := Visuals.far_water_material()
+	var near_fade := float(material.get_shader_parameter("near_fade"))
+	var band := float(material.get_shader_parameter("fade_band"))
+	_expect(near_fade + band <= Gen.CHUNK * Gen.VIEW_R,
+		"coarse water must become complete inside the minimum 5x5 grid boundary")
+	var uncovered := 0
+	var sampled := 0
+	var first_gap := ""
+	# Sweep both signs of the world grid, nearly exact chunk edges, the center,
+	# and elevated/off-center cameras. Tile membership comes from the actual
+	# PlaneMesh size; opacity comes from the shipped material/node properties.
+	for base in [Vector2i.ZERO, Vector2i(-7, -5)]:
+		for fx in [0.001, 24.0, 47.999]:
+			for fz in [0.001, 24.0, 47.999]:
+				var focus := Vector2(base) * Gen.CHUNK + Vector2(fx, fz)
+				for camera_offset in [Vector3.ZERO, Vector3(17, 7, 23),
+						Vector3(40, 120, -40), Vector3(0, 300, 0), Vector3(0, 479, 0)]:
+					var camera: Vector3 = Vector3(focus.x, Gen.WATER_Y, focus.y) + camera_offset
+					for spoke in range(64):
+						var direction := Vector2.from_angle(TAU * float(spoke) / 64.0)
+						for distance in [0.0, 64.0, 79.0, 80.0, 90.0, 95.999,
+								96.0, 96.001, 108.0, 123.999, 124.0, 128.0, 160.0]:
+							var point: Vector2 = focus + direction * distance
+							var key := Vector2i(floori(point.x / plane.size.x),
+								floori(point.y / plane.size.y))
+							var tile_delta: Vector2i = key - base
+							var near_present := maxi(absi(tile_delta.x), absi(tile_delta.y)) <= Gen.VIEW_R
+							if near_present and water.visibility_range_end > 0.0:
+								var tile_center := Vector3((key.x + 0.5) * plane.size.x,
+									Gen.WATER_Y, (key.y + 0.5) * plane.size.y)
+								near_present = camera.distance_to(tile_center) \
+									< water.visibility_range_end - water.visibility_range_end_margin
+							var far_complete := near_fade <= 0.0 or smoothstep(
+								near_fade - band, near_fade + band, point.distance_to(focus)) >= 0.999999
+							sampled += 1
+							if not near_present and not far_complete:
+								uncovered += 1
+								if first_gap.is_empty():
+									first_gap = "focus=%s point=%s camera=%s" % [focus, point, camera]
+	_expect(uncovered == 0, "normal near tiles and coarse water must cover every boundary/camera sample: " + first_gap)
+	print("WATER_COVERAGE_BENCHMARK samples=%d gaps=%d far_complete_m=%.3f near_camera_cull_m=%.3f" \
+		% [sampled, uncovered, near_fade + band, water.visibility_range_end])
+	for handoff in [Vector2(0, Gen.STRATOS_NEAR_FADE), Vector2.ZERO,
+			Vector2(Gen.SKYLINE_NEAR_FADE, Gen.STRATOS_NEAR_FADE)]:
+		Visuals.set_altitude_lod_handoffs(handoff.x, handoff.y)
+		_expect(is_equal_approx(float(material.get_shader_parameter("near_fade")), near_fade) \
+			and is_equal_approx(float(material.get_shader_parameter("fade_band")), band) \
+			and is_equal_approx(float(material.get_shader_parameter("far_fade")), handoff.x) \
+			and is_equal_approx(float(Visuals.skyline_water_material().get_shader_parameter("near_fade")), handoff.x),
+			"altitude handoff must preserve near-water coverage and the complementary far-water boundary")
+	_expect(is_equal_approx(float(Visuals.far_ground_material().get_shader_parameter("near_fade")), Gen.HORIZON_NEAR_FADE) \
+		and is_equal_approx(float(Visuals.far_jungle_material().get_shader_parameter("near_fade")), Gen.HORIZON_NEAR_FADE),
+		"water repair must preserve terrain and canopy fade distances")
+	chunk.free()
 
 
 func _test_full_sphere_nadir_palette() -> void:

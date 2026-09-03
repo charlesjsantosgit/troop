@@ -5,6 +5,7 @@ extends Node
 const RATE := 22050
 
 var streams: Dictionary = {}
+var audio_enabled := true
 var _pool: Array = []
 var _pi := 0
 var _pool_3d: Array = []
@@ -12,6 +13,10 @@ var _pi_3d := 0
 
 
 func _ready() -> void:
+	# Dedicated servers and headless physics probes have no listener. Starting
+	# voices on the Dummy driver wastes work and can retain playback resources
+	# when a fast simulation exits before the audio mixer consumes them.
+	audio_enabled = DisplayServer.get_name() != "headless"
 	streams["jump"] = _tone(300, 560, 0.12, 0.4)
 	streams["djump"] = _tone(430, 760, 0.13, 0.4)
 	streams["grab"] = _tone(170, 110, 0.09, 0.5)
@@ -204,7 +209,7 @@ func _ready() -> void:
 
 
 func play(sname: String, vol_db := 0.0, pitch := 1.0) -> void:
-	if not streams.has(sname):
+	if not audio_enabled or not streams.has(sname):
 		return
 	var p: AudioStreamPlayer = _pool[_pi]
 	_pi = (_pi + 1) % _pool.size()
@@ -217,7 +222,7 @@ func play(sname: String, vol_db := 0.0, pitch := 1.0) -> void:
 
 func play_at(sname: String, pos: Vector3, vol_db := 0.0, pitch := 1.0,
 		max_distance := 60.0) -> void:
-	if not streams.has(sname):
+	if not audio_enabled or not streams.has(sname):
 		return
 	var p: AudioStreamPlayer3D = _pool_3d[_pi_3d]
 	_pi_3d = (_pi_3d + 1) % _pool_3d.size()

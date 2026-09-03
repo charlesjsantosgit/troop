@@ -105,6 +105,8 @@ var _vehicle_chase_yaw_offset := 0.0
 var _vehicle_chase_pitch := -0.20
 var _aircraft_aim_world_direction := Vector3.FORWARD
 var _aircraft_aim_tracks_nose := false
+var _lunar_follow_origin := Vector3.ZERO
+var _lunar_follow_source := 0
 
 
 func _ready() -> void:
@@ -126,7 +128,9 @@ func _ready() -> void:
 	_arm.shape = camera_shape
 	_pitch_node.add_child(_arm)
 	_camera_mount = Node3D.new()
-	_arm.add_child(_camera_mount)
+	# SpringArm3D rewrites all direct Node3D children during physics. Keep the
+	# render-owned mount alongside it and consume only its collision distance.
+	_pitch_node.add_child(_camera_mount)
 	_cam = Camera3D.new()
 	_cam.fov = BASE_FOV
 	_cam.near = 0.035
@@ -161,6 +165,12 @@ func apply_planet_heading_delta(delta_yaw: float) -> void:
 	reset_physics_interpolation()
 
 
+func _walking_reference_basis() -> Basis:
+	if target and is_instance_valid(target.lunar_world) and not _vehicle_view:
+		return (target.lunar_camera_sample().frame as Transform3D).basis.orthonormalized()
+	return Basis.IDENTITY
+
+
 func cam_basis() -> Basis:
 	return _cam.global_transform.basis
 
@@ -185,7 +195,16 @@ func snap_to_target() -> void:
 	var height := DEATH_FOLLOW_HEIGHT if _death_view \
 		else (FIRST_PERSON_HEIGHT if first_person \
 		else (FRONT_VIEW_HEIGHT if front_view else THIRD_PERSON_HEIGHT))
-	global_position = follow.global_position + Vector3.UP * height
+	if is_instance_valid(target.lunar_world) and not _death_view:
+		target._reset_lunar_camera_sample()
+		var sample: Dictionary = target.lunar_camera_sample(1.0)
+		var local_frame: Transform3D = sample.local_frame
+		_lunar_follow_origin = local_frame.origin + local_frame.basis.y * height
+		_lunar_follow_source = target.lunar_world.get_instance_id()
+		global_position = (sample.reference as Transform3D) * _lunar_follow_origin
+	else:
+		_lunar_follow_source = 0
+		global_position = follow.global_position + target.up_direction * height
 	reset_physics_interpolation()
 
 
@@ -237,11 +256,11 @@ func _apply_view_mode(mode: int) -> void:
 	pitch = clampf(pitch, limits.x, limits.y)
 	_arm.spring_length = FIRST_PERSON_ARM if first_person \
 		else (FRONT_VIEW_ARM if front_view else THIRD_PERSON_ARM)
-	if is_instance_valid(_camera_mount):
-		_camera_mount.position = _mount_base_position()
 	_arm.position = SHOULDER_OFFSET \
 		if view_mode == ViewMode.SHOULDER and not _vehicle_view \
 		else Vector3.ZERO
+	if is_instance_valid(_camera_mount):
+		_camera_mount.position = _mount_base_position()
 	if crossed_vehicle_cockpit_boundary:
 		# Chase banks its intermediate mount with the chassis. Carrying that bank
 		# into cockpit for even one eased frame rotates the HUD's screen axes away
@@ -267,7 +286,7 @@ func _apply_view_mode(mode: int) -> void:
 		# level orbit immediately so chase, front, and eventual on-foot views never
 		# inherit the aircraft or bike horizon in their x/z Euler components.
 		var orbit_yaw := yaw + (PI if front_view else 0.0)
-		global_basis = Basis(Vector3.UP, orbit_yaw + _recoil_yaw)
+		global_basis = _walking_reference_basis() * Basis(Vector3.UP, orbit_yaw + _recoil_yaw)
 
 
 func toggle_view() -> int:
@@ -447,7 +466,7 @@ func end_vehicle_view() -> void:
 	_zero_movement_output()
 	_apply_view_mode(preferred_view_mode)
 	var orbit_yaw := yaw + (PI if front_view else 0.0)
-	global_basis = Basis(Vector3.UP, orbit_yaw + _recoil_yaw)
+	global_basis = _walking_reference_basis() * Basis(Vector3.UP, orbit_yaw + _recoil_yaw)
 	_last_velocity = target.velocity if target else Vector3.ZERO
 
 
@@ -694,6 +713,8 @@ func add_weapon_recoil(strength: float) -> void:
 
 
 func _input(e: InputEvent) -> void:
+	if target and target.expedition_locked:
+		return
 	# _input (not _unhandled_input): captured-mouse look must never be starved
 	# by a Control that happens to sit under the centered cursor
 	if e is InputEventMouseMotion and Input.mouse_mode == Input.MOUSE_MODE_CAPTURED:
@@ -706,6 +727,12 @@ func _input(e: InputEvent) -> void:
 
 
 func _process(dt: float) -> void:
+	render_frame(dt)
+
+
+## All lunar camera inputs use one interpolation phase. Fixtures may provide a
+## phase explicitly while exercising the same production composition path.
+func render_frame(dt: float, physics_fraction: float = -1.0) -> void:
 	if not target:
 		return
 	if _death_view and not is_instance_valid(_death_follow_target):
@@ -717,10 +744,19 @@ func _process(dt: float) -> void:
 	if _vehicle_view and not is_instance_valid(_vehicle):
 		end_vehicle_view()
 	var follow := _current_follow_target()
-	var target_pos: Vector3 = follow.get_global_transform_interpolated().origin
+	var follow_frame: Transform3D = follow.get_global_transform_interpolated()
 	var motion_velocity: Vector3 = target.velocity
 	var grounded: bool = target.is_on_floor()
+	var walking_basis := Basis.IDENTITY
+	var lunar_sample: Dictionary = {}
+	if not _death_view and not _vehicle_view and is_instance_valid(target.lunar_world):
+		lunar_sample = target.lunar_camera_sample(physics_fraction)
+		follow_frame = lunar_sample.frame
+		walking_basis = follow_frame.basis.orthonormalized()
+		motion_velocity = lunar_sample.velocity
+	var target_pos := follow_frame.origin
 	if _death_view:
+		walking_basis = _walking_reference_basis()
 		grounded = false
 		if follow is RigidBody3D:
 			motion_velocity = follow.linear_velocity
@@ -769,9 +805,23 @@ func _process(dt: float) -> void:
 			global_position = global_position.lerp(
 				target_pos + Vector3.UP * height,
 				1.0 - exp(-follow_rate * dt))
+	elif not lunar_sample.is_empty():
+		var local_frame: Transform3D = lunar_sample.local_frame
+		var desired := local_frame.origin + local_frame.basis.y * height
+		if _lunar_follow_source != target.lunar_world.get_instance_id():
+			_lunar_follow_origin = desired
+			_lunar_follow_source = target.lunar_world.get_instance_id()
+		# Preserve sub-millimetre follow state locally; the final world transform
+		# is rounded only once instead of feeding 4 mm rounding back into the lerp.
+		# First person already follows an interpolated body. A second render-rate
+		# dependent chase lerp makes its eyes slide behind the helmet at high FPS.
+		_lunar_follow_origin = desired if first_person else _lunar_follow_origin.lerp(
+			desired, 1.0 - exp(-follow_rate * dt))
+		global_position = (lunar_sample.reference as Transform3D) * _lunar_follow_origin
 	else:
+		_lunar_follow_source = 0
 		global_position = global_position.lerp(
-			target_pos + Vector3.UP * height, 1.0 - exp(-follow_rate * dt))
+			target_pos + target.up_direction * height, 1.0 - exp(-follow_rate * dt))
 	var orbit_yaw := yaw + (PI if front_view else 0.0)
 	var cockpit_view := _vehicle_view and first_person \
 		and is_instance_valid(_vehicle)
@@ -791,8 +841,8 @@ func _process(dt: float) -> void:
 	else:
 		# Assign the whole basis, not only rotation.y: the prior cockpit frame may
 		# have left full vehicle pitch/roll on this top-level camera root.
-		global_basis = Basis(Vector3.UP, orbit_yaw + _recoil_yaw)
-	_advance_movement_camera(dt, motion_velocity, grounded, orbit_yaw)
+		global_basis = walking_basis * Basis(Vector3.UP, orbit_yaw + _recoil_yaw)
+	_advance_movement_camera(dt, walking_basis.inverse() * motion_velocity, grounded, orbit_yaw)
 	_pitch_node.rotation.x = clampf(
 		_recoil_pitch if cockpit_view else pitch + _recoil_pitch,
 		-CAMERA_PITCH_LIMIT, CAMERA_PITCH_LIMIT)
@@ -842,7 +892,7 @@ func _process(dt: float) -> void:
 			weapon_visually_stowed = target.is_weapon_visually_stowed()
 		var show_weapon_arms: bool = first_person and target.active_weapon \
 			and not weapon_visually_stowed and not is_sniper_scoped()
-		_view_arms.visible = first_person \
+		_view_arms.visible = first_person and not target.rocket_cabin_view \
 			and (healing_view or melee_view or show_weapon_arms)
 		if first_person and healing_view:
 			_view_arms.update_bandage_pose(dt, target.bandage_progress(), sp,
@@ -931,6 +981,11 @@ func _advance_movement_camera(dt: float, motion_velocity: Vector3,
 	# Slow breathing prevents a perfectly static camera from feeling mounted on
 	# a tripod. It vanishes with the rest of the movement layer in sniper ADS.
 	var idle_weight := 1.0 - speed_weight * 0.72
+	if first_person and target and is_instance_valid(target.lunar_world):
+		# Millimetre breathing becomes visible stepping at the remote Moon origin.
+		# A stationary suit view rests quietly; deliberate stride, look, damage,
+		# landing and firearm recoil keep their independent feedback.
+		idle_weight = 0.0
 	desired_position.y += sin(_motion_t * 0.48) * 0.0026 * idle_weight
 	desired_rotation.x += sin(_motion_t * 0.48 + 0.8) * 0.0015 * idle_weight
 	desired_rotation.z += sin(_motion_t * 0.36) * 0.0012 * idle_weight
@@ -993,9 +1048,8 @@ func _advance_movement_camera(dt: float, motion_velocity: Vector3,
 		1.0 - exp(-12.0 * safe_dt))
 	_movement_blend = lerpf(_movement_blend, view_scale,
 		1.0 - exp(-8.0 * safe_dt))
-	# SpringArm3D only places a direct Camera3D child at its collision-aware
-	# endpoint. Our intermediate mount owns locomotion/recoil layers, so preserve
-	# that endpoint explicitly and add the small procedural offset on top.
+	# The render-owned sibling mount consumes the arm's collision endpoint and
+	# adds procedural feedback without being rewritten by the physics arm.
 	_camera_mount.position = _mount_base_position() \
 		+ _applied_motion_position * _movement_blend
 	_camera_mount.rotation = _applied_motion_rotation * _movement_blend
@@ -1104,7 +1158,7 @@ func _reset_movement_camera() -> void:
 	_landing_velocity = 0.0
 	_landing_pitch = 0.0
 	_landing_pitch_velocity = 0.0
-	_last_velocity = target.velocity if target else Vector3.ZERO
+	_last_velocity = _walking_reference_basis().inverse() * target.velocity if target else Vector3.ZERO
 	if is_instance_valid(_camera_mount):
 		_camera_mount.position = _mount_base_position()
 		_camera_mount.rotation = Vector3.ZERO
@@ -1125,7 +1179,7 @@ func _zero_movement_output() -> void:
 func _mount_base_position() -> Vector3:
 	if first_person or not is_instance_valid(_arm):
 		return Vector3.ZERO
-	return Vector3(0.0, 0.0, _arm.get_hit_length())
+	return _arm.position + Vector3(0.0, 0.0, _arm.get_hit_length())
 
 
 func _advance_recoil(dt: float) -> void:

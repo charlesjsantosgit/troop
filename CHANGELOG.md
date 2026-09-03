@@ -1,5 +1,39 @@
 # TROOP changelog
 
+## 0.4.5 — REUSABLE LUNAR SHIP
+
+This release brings the local lunar ship, colony, and planetary presentation
+work to the public multiplayer build. Clients and the dedicated server use
+multiplayer protocol **11**.
+
+### A reusable four-player lunar expedition
+
+- Travel together in a larger four-seat rocket with a first-person cabin,
+  continuous Earth-to-Moon presentation, and steadier passenger cameras.
+- Return under power to the launch pad, with synchronized landing phases and
+  a reusable ship instead of a one-way expedition prop.
+- Explore the curved lunar surface, visit merchants, and build a lunar colony
+  with server-authoritative purchases and farming actions. Solo colonies save
+  locally; public multiplayer colonies currently last for the connected session.
+- Improve first-person lunar combat presentation, player recovery, map detail,
+  and terrain/water transitions while preserving existing gameplay changes.
+
+### Multiplayer release and update safety
+
+- Use **PLAY ONLINE** to join the matching managed public server. Players do
+  not need Godot, a GitHub account, a home server, or port forwarding.
+- This is a **one-time full installer update** because project protocol
+  settings and the updater bootstrap changed. Existing players should download
+  and open the offered installer, close TROOP, and install 0.4.5.
+- Updater bootstrap **2** keeps development/editor runs from mounting or
+  changing the installed game's update state. Compatible future content
+  releases can continue downloading and applying automatically.
+- Adaptive rendering selects MetalFX on Mac and FSR2 on Windows Vulkan/D3D12,
+  with a supported fallback for compatibility rendering. A delayed disconnect
+  can no longer target a vanished peer or a different server session.
+- See [Playing with classmates](docs/PLAY_WITH_CLASSMATES.md) for downloads,
+  voice controls, matching versions, and school-device/network limitations.
+
 ## 0.4.3 — SATELLITE MAP
 
 This content-only patch replaces the blocky close world-map zoom with a sharper,
