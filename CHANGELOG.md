@@ -1,6 +1,10 @@
 # TROOP changelog
 
-## 0.4.6 — SMOOTHER ONLINE JOINING
+## 0.4.7 — SMOOTHER ONLINE JOINING
+
+The 0.4.6 candidate was not published. The performance measurements below were
+collected with that candidate; 0.4.7 preserves its gameplay code and updates
+release-check diagnostics and version metadata.
 
 ### Online loading and gameplay responsiveness
 
@@ -29,7 +33,7 @@
 - TROOP 0.4.5 downloads this signed content update automatically and activates
   it on restart; no engine upgrade or new installer is required for 0.4.5 users.
 - Multiplayer remains protocol **11**, but connection checks still require the
-  same game version: the public server and every classmate must run **0.4.6**.
+  same game version: the public server and every classmate must run **0.4.7**.
   Older installations still need the full installer to obtain updater bootstrap
   2 and protocol 11.
 
