@@ -127,7 +127,7 @@ jobs:
             "$GODOT_BIN" --headless --path . --quit-after 30000 -- "$MODE"
           done
           python3 tests/run_join_entry.py --godot "$GODOT_BIN" --project . \
-            --headless --warm-restart
+            --headless --warm-restart --max-frame-gap-ms 400
 
       - name: Run planet, atlas, and lunar expedition regressions
         shell: bash

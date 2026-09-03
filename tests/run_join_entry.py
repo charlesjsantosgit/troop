@@ -71,7 +71,8 @@ class JoinEntryRun:
     def __init__(self, godot: str, project: Path, rendered: bool,
                  warm_restart: bool, client_timeout: float,
                  native_app: Path | None = None, bake_shaders: bool = False,
-                 rendering_driver: str | None = None) -> None:
+                 rendering_driver: str | None = None,
+                 max_frame_gap_ms: float = 250.0) -> None:
         self.godot = godot
         self.project = project
         self.rendered = rendered
@@ -79,6 +80,7 @@ class JoinEntryRun:
         self.native_app = native_app
         self.bake_shaders = bake_shaders
         self.rendering_driver = rendering_driver
+        self.max_frame_gap_ms = max_frame_gap_ms
         self.native_executable: Path | None = None
         self.run_id = uuid.uuid4().hex
         self.root = Path(tempfile.mkdtemp(
@@ -377,6 +379,7 @@ class JoinEntryRun:
             "--resolution", "1600x900", "--max-fps", "60",
             "--quit-after", "9000", "--", "joinentrytest",
             "127.0.0.1", str(self.port),
+            f"{self.max_frame_gap_ms:.3f}",
         ]
 
     def run(self) -> None:
@@ -522,9 +525,14 @@ def main() -> int:
                              "the source server and export settings are unchanged")
     parser.add_argument("--timeout", type=float, default=120.0,
                         help="Maximum seconds for each client; must be at least 90")
+    parser.add_argument("--max-frame-gap-ms", type=float, default=250.0,
+                        help="Maximum client frame gap; default is the strict 250 ms local gate")
     arguments = parser.parse_args()
     if not math.isfinite(arguments.timeout) or arguments.timeout < 90.0:
         parser.error("--timeout must be finite and at least 90 seconds")
+    if not math.isfinite(arguments.max_frame_gap_ms) \
+            or arguments.max_frame_gap_ms <= 0.0 or arguments.max_frame_gap_ms > 1000.0:
+        parser.error("--max-frame-gap-ms must be finite, positive, and no more than 1000")
     executable = shutil.which(arguments.godot)
     if executable is None:
         parser.error(f"Godot executable not found: {arguments.godot}")
@@ -545,7 +553,8 @@ def main() -> int:
             parser.error(f"export_presets.cfg not found in {project}")
     run = JoinEntryRun(executable, project, arguments.rendered,
                        arguments.warm_restart, arguments.timeout, native_app,
-                       arguments.bake_shaders, arguments.rendering_driver)
+                       arguments.bake_shaders, arguments.rendering_driver,
+                       arguments.max_frame_gap_ms)
     failure = ""
     try:
         run.run()

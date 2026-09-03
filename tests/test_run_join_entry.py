@@ -92,9 +92,25 @@ class BufferedClientDiagnosticsTest(unittest.TestCase):
                                  "client-cold", "JOINENTRYTEST PASS ", 1)
 
     def test_server_never_uses_client_shutdown_exception(self):
-        output = HEADER + PASS + "DEDICATED_SERVER_READY version=0.4.7\n" + RID
+        output = HEADER + PASS + "DEDICATED_SERVER_READY version=0.4.9\n" + RID
         with self.assertRaises(JoinEntryFailure):
             JoinEntryRun.wait_for(self.runner(output), "server", "DEDICATED_SERVER_READY ", 1)
+
+
+class ClientCommandTest(unittest.TestCase):
+    def test_configured_frame_gap_is_forwarded_to_fixture(self):
+        runner = SimpleNamespace(
+            native_executable=None,
+            godot="godot",
+            rendered=False,
+            projects={"client": "/tmp/troop-client"},
+            rendering_driver=None,
+            port=30623,
+            max_frame_gap_ms=400.0,
+        )
+        command = JoinEntryRun.client_command(runner)
+        self.assertEqual(command[-4:],
+                         ["joinentrytest", "127.0.0.1", "30623", "400.000"])
 
 
 if __name__ == "__main__":

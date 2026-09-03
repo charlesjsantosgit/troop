@@ -31,6 +31,7 @@ var saw_chat := false
 var saw_bullet := false
 var saw_voice := false
 var saw_voice_ack := false
+var voice_ack_received_msec := -1
 var saw_banana := false
 var saw_chest := false
 var saw_sender_leave := false
@@ -178,8 +179,9 @@ func _send_checks() -> void:
 		voice_sequence += 1
 		voice_retries += 1
 		await create_timer(VOICE_RETRY_SECONDS).timeout
-	if not saw_voice_ack:
-		_finish(false, "voice acknowledgment timeout retries=%d" % voice_retries)
+	if not saw_voice_ack or voice_ack_received_msec > voice_ack_deadline:
+		_finish(false, "voice acknowledgment timeout retries=%d received=%d deadline=%d" % [
+			voice_retries, voice_ack_received_msec, voice_ack_deadline])
 		return
 	await create_timer(0.4).timeout
 	_finish(net.collected.has(TEST_BANANA) \
@@ -213,7 +215,9 @@ func _on_chat(peer_id: int, _sender_name: String, message: String,
 		saw_chat = true
 	elif role == "sender" and peer_id != net.local_id() and not from_admin \
 			and message == VOICE_ACK_PREFIX + str(net.local_id()):
-		saw_voice_ack = true
+		if not saw_voice_ack:
+			saw_voice_ack = true
+			voice_ack_received_msec = Time.get_ticks_msec()
 
 
 func _on_bullet(peer_id: int, _origin: Vector3, _velocity: Vector3,
