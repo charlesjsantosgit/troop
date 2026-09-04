@@ -2,7 +2,7 @@
   "godot_compatibility": "4.7",
   "minimum_bootstrap": 3,
   "network_protocol": 13,
-  "release_title": "TROOP 0.6.2 \u2014 NPC HEIGHTS & CONVERSATIONS",
-  "notes": "The player stands 5 feet 10 inches tall, with adult NPCs ranging from 5 feet 7 inches to 6 feet 2 inches. Camera, collisions and seated poses follow the new dimensions. E beside Nana opens their own conversation and trading desk, advances the tutorial, and shows one compact nearby nameplate. B opens the personal journal. Includes the town surface and shared-network fixes from 0.6.1. Apply the signed update and restart, or install the full package. Every client and the public server must use 0.6.2 / protocol 13. Bootstrap 3 is retained; installations older than 0.4.10 need the full installer. Existing saves are preserved.",
+  "release_title": "TROOP 0.7.0 \u2014 MENUS & BOARDING",
+  "notes": "A muted sage title landscape surrounds charcoal panels with ivory text and amber actions. Organized menus put Play, your career, practice, controls and settings in clear sections. Compact in-game windows keep the world visible around NPC conversations, shops, inventory, the journal and map. Search and filter market goods, inspect cargo, and follow your next useful action. E uses the same nearby target as the prompt for rockets, vehicles and workplaces. The Earth rocket fits its actual landing feet to the final town terrain, with matching server boarding checks. Apply the signed update and restart, or install the full package. All clients and the public server use 0.7.0 / protocol 13. Bootstrap 3 is retained; versions older than 0.4.10 need the full installer. Existing saves are preserved.",
   "requires_installer": false
 }

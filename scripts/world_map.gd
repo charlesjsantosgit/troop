@@ -1,11 +1,13 @@
 class_name WorldMap
 extends Control
-## Full-screen, spherical world atlas. Close local zooms reuse the same analytic
+## Windowed, spherical world atlas. Close local zooms reuse the same analytic
 ## Gen fields as the terrain instead of a second camera; distant zooms use
 ## imported 4K equirectangular atlases wrapped onto interactive globes. Local
 ## tile baking remains incremental and keeps a strict per-frame sampling budget.
 ## A transparent satellite micro-detail plate gives every new tile crisp natural
 ## texture immediately while the low-frequency live terrain mask refines.
+
+const MenuTheme = preload("res://scripts/menu_theme.gd")
 
 signal opened
 signal closed
@@ -48,7 +50,7 @@ const GLOBE_BLEND_START_FRACTION := 0.075
 const GLOBE_FULL_FRACTION := 0.18
 const MAX_VIEW_SPAN_FRACTION := 1.08
 const HEADER_H := 72.0
-const FOOTER_H := 48.0
+const FOOTER_H := 68.0
 const MAP_MARGIN := 24.0
 const ZOOM_RESPONSE := 12.0
 const PAN_RESPONSE := 14.0
@@ -113,13 +115,23 @@ func configure(owner_world: Node3D) -> void:
 
 func _ready() -> void:
 	_font = ThemeDB.fallback_font
-	set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	set_anchors_and_offsets_preset(Control.PRESET_TOP_LEFT)
+	clip_contents = true
+	get_viewport().size_changed.connect(_resize_panel)
+	_resize_panel()
 	mouse_filter = Control.MOUSE_FILTER_STOP
 	focus_mode = Control.FOCUS_ALL
 	texture_filter = CanvasItem.TEXTURE_FILTER_LINEAR_WITH_MIPMAPS_ANISOTROPIC
 	visible = false
 	set_process(false)
 	set_process_input(false)
+
+
+func _resize_panel() -> void:
+	var viewport := get_viewport_rect().size
+	size = Vector2(minf(900.0, viewport.x * 0.88), minf(600.0, viewport.y * 0.82))
+	position = (viewport - size) * 0.5
+	queue_redraw()
 
 
 func is_open() -> bool:
@@ -1460,32 +1472,32 @@ func _draw_moon_markers(center: Vector2, radius: float,
 
 func _draw_chrome(blend: float) -> void:
 	var rect := map_rect()
-	draw_rect(Rect2(0, 0, size.x, HEADER_H), Color(0.018, 0.045, 0.064, 0.96))
+	draw_rect(Rect2(0, 0, size.x, HEADER_H), MenuTheme.INK)
 	draw_line(Vector2(0, HEADER_H - 1), Vector2(size.x, HEADER_H - 1),
-		Color(0.36, 0.86, 0.66, 0.58), 2.0)
-	draw_string(_font, Vector2(96, 31), "TROOP PLANETARY ATLAS",
-		HORIZONTAL_ALIGNMENT_LEFT, -1, 22, Color("d9ffdf"))
+		MenuTheme.BORDER, 2.0)
+	draw_string(_font, Vector2(MAP_MARGIN, 31), "World map",
+		HORIZONTAL_ALIGNMENT_LEFT, -1, 24, MenuTheme.TEXT)
 	draw_string(_font, Vector2(MAP_MARGIN, 54),
-		"LIVE TERRAIN  •  SPHERICAL WORLD  •  SEAMLESS NAVIGATION",
-		HORIZONTAL_ALIGNMENT_LEFT, -1, 11, Color(0.47, 0.78, 0.67, 0.92))
+		"Explore Earth and the Moon",
+		HORIZONTAL_ALIGNMENT_LEFT, -1, 11, MenuTheme.MUTED)
 	var button_y := 18.0
-	_earth_button_rect = Rect2(size.x - 348, button_y, 94, 38)
-	_moon_button_rect = Rect2(size.x - 246, button_y, 92, 38)
-	_home_button_rect = Rect2(size.x - 146, button_y, 54, 38)
-	_close_button_rect = Rect2(size.x - 84, button_y, 60, 38)
-	_draw_button(_earth_button_rect, "EARTH",
+	_earth_button_rect = Rect2(size.x - 426, button_y, 90, 38)
+	_moon_button_rect = Rect2(size.x - 328, button_y, 90, 38)
+	_home_button_rect = Rect2(size.x - 230, button_y, 110, 38)
+	_close_button_rect = Rect2(size.x - 112, button_y, 88, 38)
+	_draw_button(_earth_button_rect, "Earth",
 		selected_body == CelestialBody.EARTH)
-	_draw_button(_moon_button_rect, "MOON",
+	_draw_button(_moon_button_rect, "Moon",
 		selected_body == CelestialBody.MOON)
-	_draw_button(_home_button_rect, "⌖", false)
-	_draw_button(_close_button_rect, "X", false)
+	_draw_button(_home_button_rect, "Recenter", false)
+	_draw_button(_close_button_rect, "Close", false)
 	draw_rect(Rect2(0, size.y - FOOTER_H, size.x, FOOTER_H),
-		Color(0.018, 0.045, 0.064, 0.97))
+		MenuTheme.INK)
 	draw_line(Vector2(0, size.y - FOOTER_H),
-		Vector2(size.x, size.y - FOOTER_H), Color(0.36, 0.86, 0.66, 0.4), 1.0)
-	var footer := "DRAG / WASD PAN    •    WHEEL ZOOM    •    HOME RECENTER    •    X OR ESC CLOSE"
-	draw_string(_font, Vector2(MAP_MARGIN, size.y - 18), footer,
-		HORIZONTAL_ALIGNMENT_LEFT, -1, 12, Color(0.79, 0.91, 0.84, 0.9))
+		Vector2(size.x, size.y - FOOTER_H), MenuTheme.BORDER, 1.0)
+	var footer := "Drag / WASD to pan   ·   Scroll to zoom   ·   Home to recenter   ·   X / Esc to close"
+	draw_string(_font, Vector2(MAP_MARGIN, size.y - 40), footer,
+		HORIZONTAL_ALIGNMENT_LEFT, -1, 12, MenuTheme.MUTED)
 	var right_status := ""
 	if selected_body == CelestialBody.MOON:
 		right_status = "MOON  •  1.62 m/s²  •  TRAVEL TARGET"
@@ -1512,14 +1524,14 @@ func _draw_chrome(blend: float) -> void:
 
 func _draw_button(rect: Rect2, text_value: String, active: bool) -> void:
 	var hovered := rect.has_point(_hover_screen)
-	var fill := Color("18634f") if active else Color(0.035, 0.10, 0.135, 0.95)
+	var fill := MenuTheme.ACCENT if active else MenuTheme.INSET
 	if hovered:
 		fill = fill.lightened(0.10)
 	draw_style_box(_rounded_box(fill,
-		Color("73e0a6") if active else Color(0.32, 0.58, 0.62, 0.75), 1, 8), rect)
+		MenuTheme.ACCENT if active else MenuTheme.BORDER, 1, 8), rect)
 	draw_string(_font, rect.position + Vector2(0, 25), text_value,
 		HORIZONTAL_ALIGNMENT_CENTER, rect.size.x, 12,
-		Color.WHITE if active or hovered else Color(0.72, 0.84, 0.86))
+		MenuTheme.INK if active else MenuTheme.TEXT)
 
 
 func _draw_scale_bar(rect: Rect2) -> void:

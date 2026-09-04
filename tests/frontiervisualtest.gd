@@ -11,6 +11,7 @@ class TestController extends Node:
 	var simulation: RefCounted
 	var selected_interaction: Dictionary = {}
 	var world: Node
+	var tutorial: Node
 	var last_message := ""
 	var _observation := false
 	var realm := "earth"
@@ -34,6 +35,18 @@ class TestController extends Node:
 	func request_action(kind: String, payload: Dictionary) -> Dictionary:
 		actions.append({"kind":kind,"payload":payload.duplicate(true)})
 		return {"ok":true,"message":"test accepted"}
+
+class TestGuide extends Node:
+	var started := ""
+	var target_calls := 0
+	var active := true
+	func summary() -> Dictionary:
+		return {"title":"Meet Nana", "text":"Find Nana at the market and say hello.",
+			"active":active, "complete":false, "step":1, "total":4}
+	func start(chapter := "") -> void: started = chapter; active = true
+	func show_target() -> void: target_calls += 1
+	func pause() -> void: active = false
+	func restart() -> void: started = "restart"; active = true
 
 class ErrorRecorder extends Logger:
 	var errors: Array[String] = []
@@ -149,13 +162,47 @@ func _run() -> void:
 	var controller := TestController.new()
 	controller.simulation = sim
 	root.add_child(controller)
+	var guide := TestGuide.new()
+	controller.add_child(guide)
+	controller.tutorial = guide
 	var ui = ui_script.new()
 	ui.configure(controller)
 	root.add_child(ui)
 	await process_frame
+	ui._set_navigation_layout(false)
+	_check(not ui._sidebar_navigation(688) and ui._journal_nav.get_parent()==ui._main_stack,
+		"compact journal moves navigation above content and remains inside the viewport")
+	ui._set_navigation_layout(true)
+	_check(ui._sidebar_navigation(760) and ui._journal_nav.get_parent()==ui._workspace and ui._workspace.get_child(0)==ui._journal_nav,
+		"wide journal uses a stable left navigation beside its content")
+	ui.open({})
+	await process_frame
+	await process_frame
+	_check(ui._panel.size.x<=760 and ui._panel.size.y<=600
+		and (ui.get_child(0) as ColorRect).color.a<=0.18,
+		"journal stays compact and its light veil leaves the gameplay world visible")
+	_check(_text(ui).contains("What should I do next?") and _text(ui).contains("Meet Nana")
+		and _text(ui).contains("At a glance") and _action_buttons(ui).is_empty(),
+		"overview leads with the live tutorial step, cargo and town summary without remote actions")
+	_button(ui,"Show me where").pressed.emit()
+	_check(guide.target_calls==1,"overview next-step button uses the real tutorial waypoint callback")
+	_button(ui,"Open tutorial").pressed.emit()
+	_button(ui,"Grow food").pressed.emit()
+	_check(ui.page=="Tutorial" and guide.started=="farming",
+		"tutorial navigation exposes intentional chapters and starts the selected real guide")
 	ui.open({"kind":"citizen","id":"mango","town_id":"earth_test"})
+	await process_frame
+	_check(ui._panel.size.x<=620 and ui._panel.size.y<=560,
+		"resident conversation uses the smaller in-world panel size")
 	_check(ui._heading.text=="Mango" and not _text(ui).contains("Derrick") and not _text(ui).contains("Petra"),"NPC conversation shows only the chosen person")
+	_check(ui._context_line.text.contains("TOWN STEWARD") and ui._context_line.text.contains("HERE: Mango"),
+		"context bar names the visited resident and the player's local authority")
 	_check(_button(ui,"Water")==null and _button(ui,"Buy")==null,"grower conversation cannot operate a crop or arbitrary market")
+	_check(not _text(ui).contains("Skill ") and _button(ui,"Show details")!=null,
+		"resident conversation keeps secondary work statistics out of the first decision view")
+	_button(ui,"Show details").pressed.emit()
+	_check(_text(ui).contains("Skill ") and _text(ui).contains("jobs completed") and _button(ui,"Hide details")!=null,
+		"resident details reveal only the selected resident's live work history")
 	_button(ui,"Pause / resume work").pressed.emit()
 	_check(controller.actions.back().payload.citizen=="mango" and controller.actions.back().payload.town_id=="earth_test","citizen callback scopes both the actual worker and town")
 	ui.open({"kind":"plot","id":"earth_1","town_id":"earth_test"})
@@ -164,6 +211,55 @@ func _run() -> void:
 	_check(_button(ui,"Pause / resume work")==null and _button(ui,"Buy")==null,"crop bed has no crew or market controls")
 	ui.open({"kind":"facility","id":"oil_rig","town_id":"earth_test"})
 	_check(_button(ui,"Maintain equipment")!=null and _button(ui,"Buy")==null and _button(ui,"Dispatch shipment")==null,"oil rig offers only its maintenance and relevant local functions")
+	ui._quantity = 1
+	sim.state.citizens.nana.trade_location = "earth_market"
+	sim.state.citizens.nana.can_manage = true
+	ui.open({"kind":"citizen","id":"nana","label":"Nana · Merchant","town_id":"earth_test"})
+	_check(_label(ui,"Banana")!=null and _buttons(ui,"Buy").size()==1
+		and _button(ui,"Browse all goods")!=null and _text(ui).contains("Work together"),
+		"merchant conversation puts one useful quick trade before work and secondary details")
+	var browse_all := _button(ui,"Browse all goods")
+	if browse_all: browse_all.pressed.emit()
+	_check(_buttons(ui,"Buy").size()==10 and _button(ui,"Search")!=null
+		and _button(ui,"Show quick trade")!=null,
+		"merchant can expand the same physical desk into searchable paged stock on demand")
+	controller.actions.clear()
+	ui._market_search = ""
+	ui._market_category = "All"
+	ui._market_page = 0
+	ui.open({"kind":"market","id":"earth_market","label":"Canopy market","town_id":"earth_test"})
+	_check(_buttons(ui,"Buy").size()==10 and _button(ui,"Next page")!=null,
+		"large market stock is paged into ten concise rows instead of one endless card wall")
+	var search: LineEdit = ui._body.find_children("*","LineEdit",true,false)[0]
+	search.text = "banana"
+	_button(ui,"Search").pressed.emit()
+	_check(_label(ui,"Banana")!=null and _label(ui,"Banana Start")!=null and _label(ui,"Tomato")==null,
+		"market search narrows visible live goods by readable name")
+	var banana_label := _label(ui,"Banana")
+	var banana_buy: Button = _button(banana_label.get_parent(),"Buy") if banana_label else null
+	if banana_buy: banana_buy.pressed.emit()
+	_check(banana_buy!=null and controller.actions.back().kind=="buy"
+		and controller.actions.back().payload.item=="banana" and controller.actions.back().payload.quantity==1,
+		"filtered Buy keeps the exact market, item, quantity and town-scoped action")
+	search = ui._body.find_children("*","LineEdit",true,false)[0]
+	search.text = ""
+	_button(ui,"Search").pressed.emit()
+	var category: OptionButton = ui._body.find_children("*","OptionButton",true,false)[0]
+	category.select(2)
+	category.item_selected.emit(2)
+	await process_frame
+	_check(_label(ui,"Banana Start")!=null and _label(ui,"Bean Seed")!=null and _label(ui,"Banana")==null,
+		"Planting category separates seed and starter stock from harvested crops")
+	ui._market_search = ""
+	ui._market_category = "All"
+	ui._market_page = 0
+	sim.state.permissions.trade = false
+	ui.open({"kind":"market","id":"earth_market","label":"Canopy market","town_id":"earth_test"})
+	_check(_text(ui).contains("Trading is unavailable for your current role")
+		and _buttons(ui,"Buy").all(func(button: Button): return button.disabled)
+		and _buttons(ui,"Sell").all(func(button: Button): return button.disabled),
+		"market explains local permission limits and disables unavailable orders")
+	sim.state.permissions.trade = true
 	ui.open({"kind":"facility","id":"refinery","town_id":"earth_test"})
 	_check(_button(ui,"Buy")!=null and _button(ui,"Start processing batch")!=null and not _text(ui).contains("Dry bananas"),"refinery includes fuel trading and its recipe without unrelated processing")
 	controller.actions.clear()
@@ -175,7 +271,8 @@ func _run() -> void:
 	_check(controller.actions.is_empty(),"journal cannot dispatch mutations even through the shared callback")
 	sim.state.permissions.manage = false
 	ui.open({"kind":"citizen","id":"mango","town_id":"earth_test"})
-	_check(_button(ui,"Pause / resume work")==null,"visitors cannot manage another town's citizen")
+	_check(_button(ui,"Pause / resume work")==null and ui._context_line.text.contains("LOCAL VISITOR"),
+		"visitors see their local role and cannot manage another town's citizen")
 	sim.state.town.claimed = false
 	sim.state.permissions.claim = true
 	ui.open({"kind":"board","id":"town_square","town_id":"earth_test"})
@@ -222,6 +319,19 @@ func _button(node: Node, caption: String) -> Button:
 	if node is Button and node.text==caption: return node
 	for child in node.get_children():
 		var found := _button(child,caption)
+		if found: return found
+	return null
+
+func _buttons(node: Node, caption: String) -> Array[Button]:
+	var result: Array[Button] = []
+	if node is Button and node.text==caption: result.append(node)
+	for child in node.get_children(): result.append_array(_buttons(child,caption))
+	return result
+
+func _label(node: Node, caption: String) -> Label:
+	if node is Label and node.text==caption: return node
+	for child in node.get_children():
+		var found := _label(child,caption)
 		if found: return found
 	return null
 

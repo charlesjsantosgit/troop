@@ -11,6 +11,7 @@ extends Node
 
 const DebugWorldBuilder = preload("res://scripts/debug_world_builder.gd")
 const FriendlyMonkeyScript = preload("res://scripts/friendly_monkey.gd")
+const MenuTheme = preload("res://scripts/menu_theme.gd")
 const MONKEY_NAMES := ["Bongo", "Mango", "Kiko", "Chimpy", "Zuzu", "Coco", "Peel", "Momo", "Banzai", "Ooki", "Jojo", "Tarz"]
 const RENDER_PIXEL_BUDGET := 1440000.0
 const MIN_RENDER_SCALE := 0.72
@@ -38,7 +39,17 @@ var status_label: Label
 var name_edit: LineEdit
 var update_button: Button
 var mode := "menu"
-var _menu_scalars: Array[Dictionary] = []
+var _menu_frame: PanelContainer
+var _menu_columns: HBoxContainer
+var _menu_nav: VBoxContainer
+var _menu_pages: Dictionary = {}
+var _menu_nav_buttons: Dictionary = {}
+var _menu_profile: PanelContainer
+var _menu_heading: Label
+var _menu_description: Label
+var _menu_page := "Play"
+var _menu_cancel_button: Button
+var _title_settings: PauseMenu
 var _perf_warmup := 0.0
 var _perf_sample_t := 0.0
 var _perf_low_samples := 0
@@ -97,7 +108,7 @@ func _ready() -> void:
 			var traffic_test = load("res://tests/frontiertraffictest.gd").new()
 			add_child(traffic_test)
 			traffic_test.call_deferred("run", self)
-		"frontiertest", "lunarskytest":
+		"frontiertest", "lunarskytest", "rocketgroundingtest":
 			mode = args[0]
 			var expansion_test = load("res://tests/%s.gd" % args[0]).new()
 			add_child(expansion_test)
@@ -1107,13 +1118,15 @@ func _cancel_join() -> void:
 
 
 func _set_join_button_busy(busy: bool) -> void:
+	if is_instance_valid(_menu_cancel_button):
+		_menu_cancel_button.visible = busy
 	for button in _offline_buttons:
 		if is_instance_valid(button):
 			button.disabled = busy
 	if _online_button and is_instance_valid(_online_button):
 		_online_button.disabled = not busy and _public_server_host().is_empty()
 		_online_button.text = ("CANCEL CONNECTION" if busy else
-			"PLAY ONLINE · PUBLIC CANOPY")
+			"Play online")
 
 
 func _await_join_or_timeout(sig: Signal, secs: float, attempt: int) -> bool:
@@ -1399,419 +1412,345 @@ func _show_menu() -> void:
 	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
 	if menu:
 		menu.queue_free()
-	_menu_scalars.clear()
 	_offline_buttons.clear()
+	_menu_pages.clear()
+	_menu_nav_buttons.clear()
+	_title_settings = null
 	menu = Control.new()
-	menu.set_anchors_preset(Control.PRESET_FULL_RECT)
+	menu.name = "MainMenu"
+	menu.theme = MenuTheme.build()
+	menu.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	menu.resized.connect(_refresh_menu_scale)
 	var bg := MenuBackdrop.new()
-	bg.set_anchors_preset(Control.PRESET_FULL_RECT)
+	bg.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	menu.add_child(bg)
 	var shade := ColorRect.new()
-	shade.color = Color(0.0, 0.07, 0.05, 0.26)
-	shade.set_anchors_preset(Control.PRESET_FULL_RECT)
+	shade.color = Color(0.035, 0.04, 0.045, 0.12)
+	shade.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	shade.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	menu.add_child(shade)
-
-	var center := CenterContainer.new()
-	center.set_anchors_preset(Control.PRESET_FULL_RECT)
-	center.offset_left = 24
-	center.offset_top = 24
-	center.offset_right = -24
-	center.offset_bottom = -24
-	menu.add_child(center)
-	var panel := PanelContainer.new()
-	panel.add_theme_stylebox_override("panel", _menu_panel_style())
-	panel.custom_minimum_size = Vector2(880, 0)
-	_menu_scale_size(panel, Vector2(880, 0))
-	center.add_child(panel)
-
-	var v := VBoxContainer.new()
-	v.add_theme_constant_override("separation", 14)
-	panel.add_child(v)
-
-	# ---- header: identity block left, feature badges right
+	_menu_frame = PanelContainer.new()
+	_menu_frame.name = "MainMenuFrame"
+	_menu_frame.add_theme_stylebox_override("panel", MenuTheme.panel(MenuTheme.INK, MenuTheme.BORDER, 28, 18))
+	menu.add_child(_menu_frame)
+	var frame := VBoxContainer.new()
+	frame.add_theme_constant_override("separation", 14)
+	_menu_frame.add_child(frame)
 	var header := HBoxContainer.new()
-	header.add_theme_constant_override("separation", 18)
-	var title_block := VBoxContainer.new()
-	title_block.add_theme_constant_override("separation", 2)
-	var eyebrow := Label.new()
-	eyebrow.text = "WELCOME TO THE CANOPY"
-	eyebrow.add_theme_color_override("font_color", Color("b8e979"))
-	_menu_scale_font(eyebrow, 12)
-	title_block.add_child(eyebrow)
-	var title := Label.new()
-	title.text = "TROOP"
-	title.add_theme_color_override("font_color", Color("f4ffd3"))
-	title.add_theme_color_override("font_shadow_color",
-		Color(0.02, 0.11, 0.06, 0.9))
-	title.add_theme_constant_override("shadow_offset_x", 4)
-	title.add_theme_constant_override("shadow_offset_y", 5)
-	_menu_scale_font(title, 68)
-	title_block.add_child(title)
-	var sub := Label.new()
-	sub.text = "SWING · SHOOT · OOK  —  AN INFINITE JUNGLE"
-	sub.add_theme_color_override("font_color", Color("b7d9b6"))
-	_menu_scale_font(sub, 15)
-	title_block.add_child(sub)
-	header.add_child(title_block)
-	var header_spacer := Control.new()
-	header_spacer.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	header.add_child(header_spacer)
-	var badge_column := VBoxContainer.new()
-	badge_column.add_theme_constant_override("separation", 6)
-	badge_column.alignment = BoxContainer.ALIGNMENT_END
-	for text in ["∞  PROCEDURAL JUNGLE + MOUNTAINS", "🍌  MOMENTUM VINE PHYSICS",
-			"🌐  WORLDWIDE SERVER · VOICE"]:
-		var badge := Label.new()
-		badge.text = text
-		badge.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
-		badge.add_theme_color_override("font_color", Color("d6f2bd"))
-		badge.add_theme_stylebox_override("normal", _menu_badge_style())
-		_menu_scale_font(badge, 11)
-		badge_column.add_child(badge)
-	header.add_child(badge_column)
-	v.add_child(header)
-
-	var divider := ColorRect.new()
-	divider.color = Color(0.67, 0.90, 0.42, 0.22)
-	divider.custom_minimum_size = Vector2(0, 1)
-	v.add_child(divider)
-
-	# ---- two columns: play actions left, monkey setup right
-	var columns := HBoxContainer.new()
-	columns.add_theme_constant_override("separation", 22)
-	v.add_child(columns)
-
-	var play_column := VBoxContainer.new()
-	play_column.add_theme_constant_override("separation", 10)
-	play_column.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	play_column.size_flags_stretch_ratio = 1.15
-	columns.add_child(play_column)
-	var play_head := Label.new()
-	play_head.text = "JUMP IN"
-	play_head.add_theme_color_override("font_color", Color("8fb98f"))
-	_menu_scale_font(play_head, 12)
-	play_column.add_child(play_head)
-	var society := _menu_action_card(play_column, "ROOTS & ROCKETS · OFFLINE CAREER",
-		"Your local farms · working citizens · Earth and Moon",
-		Color("4c7443"), Color("80a961"))
-	_offline_buttons.append(society)
-	society.pressed.connect(func(): _begin_menu_offline("frontier"))
-
-	var solo := _menu_action_card(play_column, "SOLO BANANA DUEL",
-		"Instant match against Captain Peel in a fresh jungle",
-		Color("88cf3f"), Color("bdf06b"))
-	_offline_buttons.append(solo)
-	solo.pressed.connect(func(): _begin_menu_offline("solo"))
-
-	_online_button = _menu_action_card(play_column, "PLAY ONLINE · SHARED TOWNS",
-		"Claim towns · shared markets · working societies · Earth and Moon",
-		Color("257f70"), Color("39aa8f"))
+	frame.add_child(header)
+	var identity := VBoxContainer.new()
+	identity.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	identity.add_theme_constant_override("separation", 3)
+	header.add_child(identity)
+	identity.add_child(MenuTheme.label("T R O O P", 36, MenuTheme.TEXT))
+	identity.add_child(MenuTheme.label("A world to explore. A place to belong.", 17, MenuTheme.MUTED))
+	var version := MenuTheme.label("ROOTS & ROCKETS\n" + Updater.current_version(), 13, MenuTheme.SECONDARY)
+	version.size_flags_horizontal = Control.SIZE_SHRINK_END
+	version.custom_minimum_size.x = 160
+	version.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+	header.add_child(version)
+	var divider := HSeparator.new()
+	frame.add_child(divider)
+	_menu_columns = HBoxContainer.new()
+	_menu_columns.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	_menu_columns.add_theme_constant_override("separation", 24)
+	frame.add_child(_menu_columns)
+	_menu_nav = VBoxContainer.new()
+	_menu_nav.custom_minimum_size.x = 170
+	_menu_nav.add_theme_constant_override("separation", 8)
+	var nav_scroll := ScrollContainer.new()
+	nav_scroll.follow_focus = true
+	nav_scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+	nav_scroll.custom_minimum_size.x = 174
+	nav_scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	_menu_columns.add_child(nav_scroll)
+	_menu_nav.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_menu_nav.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	nav_scroll.add_child(_menu_nav)
+	_menu_nav.add_child(MenuTheme.label("YOUR NEXT ADVENTURE", 11, MenuTheme.MUTED))
+	for item in ["Play", "Explore & practice", "How to play", "Your monkey"]:
+		var button := Button.new()
+		button.name = item.replace(" ", "") + "Navigation"
+		button.text = item
+		button.alignment = HORIZONTAL_ALIGNMENT_LEFT
+		MenuTheme.style_button(button)
+		button.pressed.connect(func(): _select_menu_page(item))
+		_menu_nav.add_child(button)
+		_menu_nav_buttons[item] = button
+	var settings := Button.new()
+	settings.name = "TitleSettings"
+	settings.text = "Settings"
+	settings.alignment = HORIZONTAL_ALIGNMENT_LEFT
+	MenuTheme.style_button(settings)
+	settings.pressed.connect(_open_title_settings)
+	_menu_nav.add_child(settings)
+	_offline_buttons.append(settings)
+	var nav_space := Control.new()
+	nav_space.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	_menu_nav.add_child(nav_space)
+	var quit_button := Button.new()
+	quit_button.name = "QuitGame"
+	quit_button.text = "Quit game"
+	MenuTheme.style_button(quit_button)
+	quit_button.pressed.connect(func(): get_tree().quit())
+	_menu_nav.add_child(quit_button)
+	var main_column := VBoxContainer.new()
+	main_column.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	main_column.add_theme_constant_override("separation", 10)
+	_menu_columns.add_child(main_column)
+	_menu_heading = MenuTheme.label("Choose your world", 28)
+	main_column.add_child(_menu_heading)
+	_menu_description = MenuTheme.label("Build a life with others, or make your own way.", 15, MenuTheme.MUTED)
+	main_column.add_child(_menu_description)
+	var page_scroll := ScrollContainer.new()
+	page_scroll.follow_focus = true
+	page_scroll.name = "MainMenuContent"
+	page_scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+	page_scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	main_column.add_child(page_scroll)
+	var page_stack := VBoxContainer.new()
+	page_stack.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	page_scroll.add_child(page_stack)
+	for item in ["Play", "Explore & practice", "How to play", "Your monkey"]:
+		var page := VBoxContainer.new()
+		page.name = item.replace(" ", "") + "Page"
+		page.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		page.add_theme_constant_override("separation", 16)
+		page_stack.add_child(page)
+		_menu_pages[item] = page
+	var play: VBoxContainer = _menu_pages["Play"]
+	_online_button = _entry_card(play, "SHARED WORLD", "Make a home in the canopy",
+		"Meet other players, claim a town, trade with working societies, and travel between Earth and the Moon.", "Play online", true)
 	_online_button.disabled = _public_server_host().is_empty()
-	if _online_button.disabled:
-		_online_button.tooltip_text = ("No hosted address is embedded in this "
-			+ "source build; releases connect automatically.")
+	_online_button.tooltip_text = "Join the shared public world. Your towns and inventory are saved by the server." if not _online_button.disabled else "Online play is unavailable in this build."
 	_online_button.pressed.connect(func(): _begin_public_join(_pname()))
-
-	var debug_b := _menu_action_card(play_column, "DEBUG WORLD",
-		"Flat playground: parkour · rope garden · regenerating robot range",
-		Color("6b5d33"), Color("9a8850"))
-	_offline_buttons.append(debug_b)
-	debug_b.pressed.connect(func(): _begin_menu_offline("debugworld"))
-
-	var moon_b := _menu_action_card(play_column, "MOON EXPEDITION",
-		"Solar farms · lunar agriculture · photographic observatory · Muenster",
-		Color("46566e"), Color("9dc5ed"))
-	_offline_buttons.append(moon_b)
-	moon_b.pressed.connect(func(): _begin_menu_offline("moon"))
-
-	var setup_column := VBoxContainer.new()
-	setup_column.add_theme_constant_override("separation", 10)
-	setup_column.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	columns.add_child(setup_column)
-	var setup_head := Label.new()
-	setup_head.text = "YOUR MONKEY"
-	setup_head.add_theme_color_override("font_color", Color("8fb98f"))
-	_menu_scale_font(setup_head, 12)
-	setup_column.add_child(setup_head)
-
+	var has_career := FileAccess.file_exists(FrontierController.SAVE_PATH) or FileAccess.file_exists(FrontierController.SAVE_PATH + ".bak")
+	var career := _entry_card(play, "YOUR OWN WORLD", "Roots & Rockets career",
+		"Grow crops, meet your neighbors, and build an Earth-to-Moon business at your own pace. Your progress saves on this device.",
+		"Continue career" if has_career else "Start a career", false)
+	_offline_buttons.append(career)
+	career.pressed.connect(func(): _begin_menu_offline("frontier"))
+	var practice: VBoxContainer = _menu_pages["Explore & practice"]
+	for item in [
+		["moon", "THE MOON", "Lunar expedition", "Visit the Moon directly. Explore the colony, meet Muenster, and learn the lunar equipment.", "Explore the Moon"],
+		["solo", "QUICK MATCH", "Banana duel", "Practice movement and weapons against Captain Peel in a fresh jungle.", "Start a duel"],
+		["debugworld", "PRACTICE GROUNDS", "Sandbox", "Try vehicles, ropes, parkour and regenerating targets in an open practice area.", "Enter sandbox"]]:
+		var button := _entry_card(practice, item[1], item[2], item[3], item[4], false)
+		_offline_buttons.append(button)
+		button.pressed.connect(func(): _begin_menu_offline(item[0]))
+	_build_menu_help(_menu_pages["How to play"])
+	_menu_profile = PanelContainer.new()
+	_menu_profile.name = "PlayerProfile"
+	_menu_profile.custom_minimum_size.x = 235
+	_menu_profile.size_flags_vertical = Control.SIZE_SHRINK_BEGIN
+	_menu_profile.add_theme_stylebox_override("panel", MenuTheme.panel(MenuTheme.INK, MenuTheme.BORDER, 18, 12))
+	_menu_columns.add_child(_menu_profile)
+	var profile := VBoxContainer.new()
+	profile.add_theme_constant_override("separation", 12)
+	_menu_profile.add_child(profile)
+	profile.add_child(MenuTheme.label("Your monkey", 21))
+	profile.add_child(MenuTheme.label("The name other players see", 13, MenuTheme.MUTED))
 	name_edit = LineEdit.new()
-	name_edit.text = Settings.player_name \
-		if not Settings.player_name.is_empty() else _rand_name()
+	name_edit.name = "PlayerName"
+	name_edit.text = Settings.player_name if not Settings.player_name.is_empty() else _rand_name()
 	name_edit.placeholder_text = "Choose a name"
-	name_edit.add_theme_stylebox_override("normal", _menu_input_style())
-	name_edit.add_theme_stylebox_override("focus", _menu_input_style(true))
-	_menu_scale_font(name_edit, 17)
-	setup_column.add_child(name_edit)
-	name_edit.text_submitted.connect(
-		func(_text: String):
-			if not _join_in_progress:
-				solo.emit_signal("pressed"))
-
+	name_edit.max_length = 24
+	name_edit.custom_minimum_size.y = 44
+	name_edit.expand_to_text_length = false
+	profile.add_child(name_edit)
+	name_edit.text_submitted.connect(func(_text: String):
+		_pname()
+		name_edit.release_focus())
+	profile.add_child(MenuTheme.label("Camera", 14, MenuTheme.MUTED))
 	var camera_select := OptionButton.new()
-	camera_select.add_item("CAMERA · RIGHT SHOULDER", 0)
-	camera_select.add_item("CAMERA · FIRST PERSON", 1)
-	camera_select.add_item("CAMERA · FRONT VIEW", 2)
+	camera_select.name = "CameraPreference"
+	for camera_name in ["Right shoulder", "First person", "Front view"]:
+		camera_select.add_item(camera_name)
 	camera_select.selected = _camera_mode_preference
-	camera_select.custom_minimum_size = Vector2(0, 42)
-	camera_select.add_theme_stylebox_override("normal", _menu_input_style())
-	camera_select.add_theme_stylebox_override("hover", _menu_input_style(true))
-	camera_select.add_theme_stylebox_override("focus", _menu_input_style(true))
-	camera_select.add_theme_color_override("font_color", Color("e9ffd7"))
-	camera_select.add_theme_color_override("font_hover_color", Color.WHITE)
-	_menu_scale_font(camera_select, 14)
-	_menu_scale_size(camera_select, Vector2(0, 42))
-	camera_select.item_selected.connect(func(index: int):
-		_camera_mode_preference = index)
-	setup_column.add_child(camera_select)
-
-	var sensitivity_row := HBoxContainer.new()
-	sensitivity_row.add_theme_constant_override("separation", 10)
-	var sensitivity_label := Label.new()
-	sensitivity_label.text = "LOOK"
-	sensitivity_label.add_theme_color_override("font_color", Color("b8d0ba"))
-	_menu_scale_font(sensitivity_label, 12)
-	sensitivity_row.add_child(sensitivity_label)
-	var sensitivity_slider := HSlider.new()
-	sensitivity_slider.min_value = 0.25
-	sensitivity_slider.max_value = 2.5
-	sensitivity_slider.step = 0.05
-	sensitivity_slider.value = _mouse_sensitivity
-	sensitivity_slider.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	sensitivity_slider.custom_minimum_size = Vector2(0, 36)
-	sensitivity_slider.tooltip_text = "Mouse look sensitivity"
-	_menu_scale_size(sensitivity_slider, Vector2(0, 36))
-	sensitivity_row.add_child(sensitivity_slider)
-	var sensitivity_value := Label.new()
-	sensitivity_value.text = "%.2f×" % _mouse_sensitivity
-	sensitivity_value.custom_minimum_size = Vector2(52, 0)
-	sensitivity_value.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
-	sensitivity_value.add_theme_color_override("font_color", Color("e9ffd7"))
-	_menu_scale_font(sensitivity_value, 13)
-	_menu_scale_size(sensitivity_value, Vector2(52, 0))
-	sensitivity_row.add_child(sensitivity_value)
-	sensitivity_slider.value_changed.connect(func(value: float):
-		_apply_mouse_sensitivity(value)
-		Settings.set_mouse_sensitivity(value)
-		sensitivity_value.text = "%.2f×" % value
-	)
-	sensitivity_slider.drag_ended.connect(func(changed: bool):
-		if changed:
-			Settings.save())
-	sensitivity_slider.focus_exited.connect(func(): Settings.save())
-	setup_column.add_child(sensitivity_row)
-
-	var tip_panel := PanelContainer.new()
-	tip_panel.add_theme_stylebox_override("panel", _menu_tip_style())
-	setup_column.add_child(tip_panel)
-	var foot := Label.new()
-	foot.text = ("WASD MOVE · E GRAB / CHEST · LMB FIRE · RMB AIM\n"
-		+ "1–4 WEAPONS · R RELOAD · H BANDAGE\n"
-		+ "HOLD T TO TALK · ENTER CHAT · C CAMERA\n"
-		+ "SOCIETY CAREER · B BOARD · E TALK / WORK")
-	foot.add_theme_color_override("font_color", Color("a5c8a5"))
-	foot.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	_menu_scale_font(foot, 11)
-	tip_panel.add_child(foot)
-
-	status_label = Label.new()
-	status_label.text = ""
-	status_label.add_theme_color_override("font_color", Color("ffd58a"))
-	status_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	status_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	_menu_scale_font(status_label, 13)
-	v.add_child(status_label)
-
-	update_button = _menu_button("DOWNLOAD UPDATE", Color("a06628"),
-		Color("c78331"))
+	camera_select.custom_minimum_size.y = 42
+	camera_select.item_selected.connect(func(index: int): _camera_mode_preference = index)
+	profile.add_child(camera_select)
+	profile.add_child(HSeparator.new())
+	profile.add_child(MenuTheme.label("Start with Nana", 16, MenuTheme.ACCENT))
+	profile.add_child(MenuTheme.label("The guided career teaches trading, contracts and farming, one useful step at a time.", 14, MenuTheme.MUTED))
+	var learn := Button.new()
+	learn.text = "View controls"
+	MenuTheme.style_button(learn)
+	learn.pressed.connect(func(): _select_menu_page("How to play"))
+	profile.add_child(learn)
+	status_label = MenuTheme.label("", 14, MenuTheme.ACCENT)
+	status_label.name = "ConnectionStatus"
+	status_label.custom_minimum_size.y = 22
+	var status_row := HBoxContainer.new()
+	frame.add_child(status_row)
+	status_row.add_child(status_label)
+	_menu_cancel_button = Button.new()
+	_menu_cancel_button.text = "Cancel loading"
+	MenuTheme.style_button(_menu_cancel_button)
+	_menu_cancel_button.visible = false
+	_menu_cancel_button.pressed.connect(_cancel_join)
+	status_row.add_child(_menu_cancel_button)
+	update_button = Button.new()
+	update_button.text = "Download update"
+	MenuTheme.style_button(update_button, true)
 	update_button.visible = false
 	update_button.pressed.connect(_on_update_button_pressed)
-	v.add_child(update_button)
+	frame.add_child(update_button)
 	_refresh_update_button()
-
-	# ---- footer: version left, live update state right
 	var footer := HBoxContainer.new()
-	footer.add_theme_constant_override("separation", 10)
-	var version_label := Label.new()
-	version_label.text = "TROOP %s · PROTOCOL %d · F11 FULLSCREEN" % [
-		Updater.current_version(), Net.PROTOCOL_VERSION]
-	version_label.add_theme_color_override("font_color",
-		Color(0.62, 0.80, 0.63, 0.7))
-	_menu_scale_font(version_label, 11)
-	footer.add_child(version_label)
-	var footer_spacer := Control.new()
-	footer_spacer.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	footer.add_child(footer_spacer)
-	update_chip = Label.new()
-	update_chip.add_theme_color_override("font_color",
-		Color(0.72, 0.85, 0.70, 0.85))
-	_menu_scale_font(update_chip, 11)
+	frame.add_child(footer)
+	footer.add_child(MenuTheme.label("Earth & Moon   ·   F11 Fullscreen", 12, MenuTheme.MUTED))
+	update_chip = MenuTheme.label("", 12, MenuTheme.MUTED)
+	update_chip.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
 	footer.add_child(update_chip)
-	v.add_child(footer)
 	_set_update_chip(Updater.status)
-
 	add_child(menu)
+	_select_menu_page("Play")
 	call_deferred("_refresh_menu_scale")
 	_warm_menu_textures(menu)
-	# The updater already checks on boot and every six hours; a menu visit is
-	# rare and user-initiated, so force past the throttle to keep the footer
-	# chip honest about what the latest release actually is.
 	Updater.check_for_updates(true)
 	if not _update_version.is_empty() and Updater.is_update_staged():
 		_schedule_staged_update_restart(_update_version)
 
 
-## A large left-aligned action button with a caption line underneath.
-func _menu_action_card(parent: VBoxContainer, title_text: String,
-		caption_text: String, base: Color, hover: Color) -> Button:
-	var card := VBoxContainer.new()
-	card.add_theme_constant_override("separation", 3)
-	var button := _menu_button(title_text, base, hover)
-	button.alignment = HORIZONTAL_ALIGNMENT_LEFT
-	card.add_child(button)
-	var caption := Label.new()
-	caption.text = caption_text
-	caption.add_theme_color_override("font_color", Color(0.62, 0.76, 0.62))
-	_menu_scale_font(caption, 11)
-	card.add_child(caption)
+func _entry_card(parent: VBoxContainer, eyebrow: String, title: String,
+		copy: String, action: String, primary: bool) -> Button:
+	var card := PanelContainer.new()
+	card.add_theme_stylebox_override("panel", MenuTheme.panel(MenuTheme.INSET if primary else MenuTheme.PANEL,
+		MenuTheme.SECONDARY if primary else MenuTheme.BORDER, 20, 12))
 	parent.add_child(card)
+	var content := VBoxContainer.new()
+	content.add_theme_constant_override("separation", 8)
+	card.add_child(content)
+	content.add_child(MenuTheme.label(eyebrow, 11, MenuTheme.SECONDARY if primary else MenuTheme.MUTED))
+	content.add_child(MenuTheme.label(title, 23))
+	content.add_child(MenuTheme.label(copy, 15, MenuTheme.MUTED))
+	var button := Button.new()
+	button.text = action
+	MenuTheme.style_button(button, primary)
+	content.add_child(button)
 	return button
+
+
+func _select_menu_page(next_page: String) -> void:
+	if not _menu_pages.has(next_page) or _join_in_progress:
+		return
+	_menu_page = next_page
+	for key in _menu_pages:
+		_menu_pages[key].visible = key == next_page
+		_menu_nav_buttons[key].button_pressed = key == next_page
+		MenuTheme.style_button(_menu_nav_buttons[key], key == next_page)
+	_menu_heading.text = {"Play": "Choose your world", "Explore & practice": "Find your own pace", "How to play": "A few keys. A whole world.", "Your monkey": "Make yourself at home"}[next_page]
+	_menu_description.text = {"Play": "Build a life with others, or make your own way.",
+		"Explore & practice": "Short adventures and a place to learn your equipment.",
+		"How to play": "These shortcuts use your current control bindings.", "Your monkey": "Choose how you appear and how you see the world."}[next_page]
+	_refresh_menu_scale.call_deferred()
+
+
+func _build_menu_help(parent: VBoxContainer) -> void:
+	for section in [
+		["Move & explore", [["move_fwd", "Move forward"], ["jump", "Jump"], ["grab", "Interact, enter vehicles or grab a vine"], ["camera_mode", "Change camera"]]],
+		["Your society", [["society", "Journal, tutorial and destinations"], ["world_map", "World map"], ["menu", "Pause and settings"]]],
+		["Other players", [["push_to_talk", "Hold to speak nearby"], ["chat", "Text chat"]]],
+		["Combat", [["shoot", "Use weapon"], ["aim", "Aim"], ["reload", "Reload"], ["use_bandage", "Use a bandage"]]]]:
+		var card := PanelContainer.new()
+		card.add_theme_stylebox_override("panel", MenuTheme.panel(MenuTheme.PANEL, MenuTheme.BORDER, 18, 10))
+		parent.add_child(card)
+		var stack := VBoxContainer.new()
+		card.add_child(stack)
+		stack.add_child(MenuTheme.label(section[0], 20, MenuTheme.ACCENT))
+		for item in section[1]:
+			var row := HBoxContainer.new()
+			stack.add_child(row)
+			var binding := MenuTheme.label(_menu_binding(StringName(item[0])), 14, MenuTheme.SECONDARY)
+			binding.custom_minimum_size.x = 100
+			binding.size_flags_horizontal = Control.SIZE_FILL
+			row.add_child(binding)
+			row.add_child(MenuTheme.label(item[1], 15))
+	parent.add_child(MenuTheme.label("Approach a person or vehicle and follow its interaction prompt. Your journal keeps the tutorial and your destinations together.", 15, MenuTheme.MUTED))
+
+
+func _menu_binding(action: StringName) -> String:
+	var binding := Settings.binding_text(action)
+	if binding != "Unbound":
+		return binding
+	if InputMap.has_action(action):
+		var events := InputMap.action_get_events(action)
+		if not events.is_empty():
+			var event: InputEvent = events[0]
+			if event is InputEventKey:
+				return OS.get_keycode_string(event.physical_keycode if event.physical_keycode != 0 else event.keycode)
+			return event.as_text()
+	return "Unbound"
+
+
+func _open_title_settings() -> void:
+	if _join_in_progress or not is_instance_valid(menu) or is_instance_valid(_title_settings):
+		return
+	_title_settings = PauseMenu.new()
+	_title_settings.name = "TitleSettingsMenu"
+	menu.add_child(_title_settings)
+	_title_settings.resume_requested.connect(_close_title_settings)
+	_title_settings.main_menu_requested.connect(_close_title_settings)
+	_title_settings.sensitivity_changed.connect(_apply_mouse_sensitivity)
+	_title_settings.open_settings_from_title()
+
+
+func _close_title_settings() -> void:
+	if is_instance_valid(_title_settings):
+		_title_settings.queue_free()
+	_title_settings = null
+	if is_instance_valid(menu):
+		var help: VBoxContainer = _menu_pages["How to play"]
+		for child in help.get_children():
+			help.remove_child(child)
+			child.queue_free()
+		_build_menu_help(help)
+		_menu_nav_buttons[_menu_page].grab_focus()
 
 
 func _set_update_chip(status: String) -> void:
 	if not update_chip or not is_instance_valid(update_chip):
 		return
-	var text := "AUTO-UPDATE · READY"
+	var text := "Updates ready"
 	match status:
 		"source":
-			text = "LOCAL SOURCE BUILD · %s" % Updater.current_version()
+			text = "Development build · %s" % Updater.current_version()
 		"disabled":
-			text = "AUTO-UPDATE · SOURCE BUILD (RELEASES SELF-UPDATE)"
+			text = "Development build"
 		"checking":
-			text = "AUTO-UPDATE · CHECKING…"
+			text = "Checking for updates…"
 		"current":
-			text = "AUTO-UPDATE · UP TO DATE (%s)" % Updater.current_version()
+			text = "Up to date · %s" % Updater.current_version()
 		"available":
-			text = ("UPDATE · INSTALLER REQUIRED"
-				if _update_requires_installer else "AUTO-UPDATE · AVAILABLE")
+			text = ("New installer available"
+				if _update_requires_installer else "Update available")
 		"downloading":
-			text = "AUTO-UPDATE · DOWNLOADING NEW VERSION"
+			text = "Downloading update…"
 		"staged":
-			text = "AUTO-UPDATE · READY — RESTARTS FROM THE MENU"
+			text = "Update ready · Restarting from menu"
 		"installer_ready":
-			text = "AUTO-UPDATE · INSTALLER DOWNLOADED"
+			text = "Installer downloaded"
 		"error":
-			text = "AUTO-UPDATE · CHECK FAILED (OFFLINE?)"
+			text = "Could not check for updates"
 	update_chip.text = text
 
 
-func _menu_button(text: String, base: Color, hover: Color) -> Button:
-	var button := Button.new()
-	button.text = text
-	button.custom_minimum_size = Vector2(0, 52)
-	button.add_theme_color_override("font_color", Color("f6ffe7"))
-	button.add_theme_color_override("font_hover_color", Color.WHITE)
-	button.add_theme_color_override("font_pressed_color", Color("e2ffd0"))
-	button.add_theme_stylebox_override("normal", _menu_button_style(base))
-	button.add_theme_stylebox_override("hover", _menu_button_style(hover, 3))
-	button.add_theme_stylebox_override("pressed", _menu_button_style(base.darkened(0.18), 1))
-	button.add_theme_stylebox_override("focus", _menu_button_style(hover, 3, true))
-	_menu_scale_font(button, 17)
-	_menu_scale_size(button, Vector2(0, 52))
-	return button
-
-
-func _menu_panel_style() -> StyleBoxFlat:
-	var style := StyleBoxFlat.new()
-	style.bg_color = Color(0.025, 0.11, 0.075, 0.88)
-	style.border_color = Color(0.63, 0.88, 0.37, 0.36)
-	style.set_border_width_all(1)
-	style.set_corner_radius_all(24)
-	style.shadow_color = Color(0, 0, 0, 0.42)
-	style.shadow_size = 22
-	style.shadow_offset = Vector2(0, 10)
-	style.content_margin_left = 38
-	style.content_margin_right = 38
-	style.content_margin_top = 28
-	style.content_margin_bottom = 26
-	return style
-
-
-func _menu_tip_style() -> StyleBoxFlat:
-	var style := StyleBoxFlat.new()
-	style.bg_color = Color(0.18, 0.40, 0.23, 0.22)
-	style.border_color = Color(0.62, 0.86, 0.4, 0.16)
-	style.set_border_width_all(1)
-	style.set_corner_radius_all(12)
-	style.content_margin_left = 16
-	style.content_margin_right = 16
-	style.content_margin_top = 10
-	style.content_margin_bottom = 10
-	return style
-
-
-func _menu_badge_style() -> StyleBoxFlat:
-	var style := StyleBoxFlat.new()
-	style.bg_color = Color(0.46, 0.73, 0.25, 0.13)
-	style.border_color = Color(0.7, 0.9, 0.4, 0.18)
-	style.set_border_width_all(1)
-	style.set_corner_radius_all(8)
-	style.content_margin_left = 9
-	style.content_margin_right = 9
-	style.content_margin_top = 5
-	style.content_margin_bottom = 5
-	return style
-
-
-func _menu_input_style(focused := false) -> StyleBoxFlat:
-	var style := StyleBoxFlat.new()
-	style.bg_color = Color(0.04, 0.17, 0.11, 0.92)
-	style.border_color = Color("9ee657") if focused else Color(0.48, 0.72, 0.47, 0.42)
-	style.set_border_width_all(2 if focused else 1)
-	style.set_corner_radius_all(10)
-	style.content_margin_left = 14
-	style.content_margin_right = 14
-	style.content_margin_top = 8
-	style.content_margin_bottom = 8
-	return style
-
-
-func _menu_button_style(color: Color, border_width := 1, focused := false) -> StyleBoxFlat:
-	var style := StyleBoxFlat.new()
-	style.bg_color = color
-	style.border_color = Color("e5ff9a") if focused else color.lightened(0.22)
-	style.set_border_width_all(border_width)
-	style.set_corner_radius_all(12)
-	style.shadow_color = Color(0, 0, 0, 0.26)
-	style.shadow_size = 6
-	style.shadow_offset = Vector2(0, 3)
-	style.content_margin_left = 16
-	style.content_margin_right = 16
-	return style
-
-
-func _menu_scale_font(node: Control, base_size: int) -> void:
-	_menu_scalars.append({"node": node, "kind": "font", "base": base_size})
-
-
-func _menu_scale_size(node: Control, base_size: Vector2) -> void:
-	_menu_scalars.append({"node": node, "kind": "size", "base": base_size})
-
-
 func _refresh_menu_scale() -> void:
-	if not menu or not is_instance_valid(menu):
+	if not is_instance_valid(menu) or not is_instance_valid(_menu_frame):
 		return
-	var viewport_size := menu.size
-	var scale := clampf(minf(viewport_size.x / 1600.0, viewport_size.y / 900.0), 0.72, 1.45)
-	for item in _menu_scalars:
-		var node: Control = item.node
-		if not is_instance_valid(node):
-			continue
-		if item.kind == "font":
-			node.add_theme_font_size_override("font_size", maxi(10, roundi(int(item.base) * scale)))
-		else:
-			node.custom_minimum_size = item.base * scale
+	var available := menu.size
+	var dimensions := Vector2(minf(1180, available.x - 40), minf(800, available.y - 40))
+	var sidebar := dimensions.x >= 1020 and dimensions.y >= 740 and _menu_page != "Your monkey"
+	var profile_parent: Node = _menu_columns if sidebar else _menu_pages["Your monkey"]
+	if _menu_profile.get_parent() != profile_parent:
+		_menu_profile.reparent(profile_parent, false)
+	_menu_profile.custom_minimum_size.x = 235 if sidebar else 0
+	_menu_profile.size_flags_horizontal = Control.SIZE_FILL if sidebar else Control.SIZE_EXPAND_FILL
+	_menu_profile.visible = true
+	_menu_nav.custom_minimum_size.x = 170 if dimensions.x >= 900 else 150
+	_menu_frame.size = dimensions
+	_menu_frame.position = (available - _menu_frame.size) * 0.5
 
 
 func _pname() -> String:

@@ -577,6 +577,9 @@ func run(main) -> void:
 		"coarse atlas pixels retain narrow roads without widening terrain")
 	_check(InputMap.has_action("world_map"), "X world-map input is registered")
 	atlas.open_map()
+	_check(atlas.size.x <= 900.0 and atlas.size.y <= 600.0 \
+		and atlas.position.x > 0.0 and atlas.position.y > 0.0,
+		"atlas opens as a bounded panel with the world visible around it")
 	var camera_mode_before := int(main.world.local_player.cam.view_mode)
 	var camera_event := InputEventAction.new()
 	camera_event.action = "camera_mode"
