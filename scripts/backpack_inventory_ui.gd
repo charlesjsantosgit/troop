@@ -248,7 +248,7 @@ func _refresh() -> void:
 	if _selected_slot >= 0 and _selected_slot < _rows.size():
 		var selected: Dictionary = _rows[_selected_slot]
 		_detail_title.text = str(selected.name)
-		_detail_body.text = "%d available · %s. Select this tile at a merchant to sell; work uses these same supplies." % [int(selected.count), str(selected.category)] if goods_mode else _item_description(StringName(selected.id))
+		_detail_body.text = "%d available · %s. Select this tile at a merchant to sell; work uses these same supplies." % [int(selected.count), str(selected.category)] if goods_mode else "%d in this stack · Maximum %d\n%s" % [int(selected.count), int(selected.max_stack), _item_description(StringName(selected.id))]
 	else:
 		_detail_title.text = "Your backpack is empty" if goods_mode and _rows.is_empty() else "Select an item"
 		_detail_body.text = "Buy supplies at the market or harvest a ripe crop. Capacity is checked before goods enter your backpack." if goods_mode else "Choose a pocket to see its contents. Empty pockets are ready for the next item you collect."
