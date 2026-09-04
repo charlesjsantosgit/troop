@@ -204,7 +204,7 @@ func _interact(id: String, kind: String, label: String, xz: Vector2, height := 0
 		"position": _point(xz, height)})
 
 
-func _process(dt: float) -> void:
+func _physics_process(dt: float) -> void:
 	if not _built or _collision_only or not is_visible_in_tree():
 		return
 	if not _crop_jobs.is_empty():

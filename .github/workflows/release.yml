@@ -106,6 +106,7 @@ jobs:
           "$GODOT_BIN" --headless --path . --script res://tests/netrostertest.gd
           "$GODOT_BIN" --headless --path . --script res://tests/enetbandwidthtest.gd
           python3 tests/run_frontier_mtu.py --godot "$GODOT_BIN" --project .
+          python3 tests/run_frontier_latency.py --godot "$GODOT_BIN" --project .
           "$GODOT_BIN" --headless --path . --quit-after 1200 -- renderbackendtest
           python3 tests/run_dedicated_relay.py --godot "$GODOT_BIN" --project .
           "$GODOT_BIN" --headless --path . res://scenes/main.tscn \
@@ -144,6 +145,7 @@ jobs:
           set -euo pipefail
           "$GODOT_BIN" --headless --path . --script res://tests/menu_redesign_capture.gd
           "$GODOT_BIN" --headless --path . --script res://tests/settings_menu_capture.gd
+          "$GODOT_BIN" --headless --path . --script res://tests/menu_density_capture.gd
           "$GODOT_BIN" --headless --path . --quit-after 3000 -- rocketgroundingtest \
             2>&1 | tee "$RUNNER_TEMP/rocketgroundingtest.log"
           grep -Eq '^ROCKETGROUNDINGTEST [0-9]+/[0-9]+ PASS$' "$RUNNER_TEMP/rocketgroundingtest.log"
@@ -199,7 +201,7 @@ jobs:
           # Main initializes autoloads and disposable careers for the gameplay
           # fixtures. Require their completion sentinels: --quit-after alone
           # exits successfully even if a broken fixture never reaches its end.
-          for MODE in frontiertest frontierplaytest frontierinteractiontest frontierroutetest frontiertraffictest lunarskytest; do
+          for MODE in frontiertest frontierplaytest frontierinteractiontest responsivenesstest backpacktest frontierroutetest frontiertraffictest lunarskytest; do
             TEST_LOG="$RUNNER_TEMP/troop-$MODE.log"
             TEST_PREFIX="$(printf '%s' "$MODE" | tr '[:lower:]' '[:upper:]')"
             TEST_FRAMES=30000
@@ -211,7 +213,15 @@ jobs:
             grep -Eq "^${TEST_PREFIX} (result=)?[0-9]+/[0-9]+ PASS$" "$TEST_LOG"
             ! grep -q 'SCRIPT ERROR:' "$TEST_LOG"
           done
-          for MODE in frontiersocietiestest frontiervisualtest frontiertowngeographytest frontierreliabilitytest spacephototest frontierpavingtest avatarheighttest; do
+          for MODE in frontierpedestriantest frontiercrowdtest fieldbackpackfittest; do
+            TEST_LOG="$RUNNER_TEMP/$MODE.log"
+            "$GODOT_BIN" --headless --path . --fixed-fps 60 --quit-after 18000 \
+              --script "res://tests/$MODE.gd" 2>&1 | tee "$TEST_LOG"
+            SENTINEL="$(printf '%s' "$MODE" | tr '[:lower:]' '[:upper:]')"
+            grep -Eq "^${SENTINEL}( [0-9]+/[0-9]+)? PASS$" "$TEST_LOG"
+            ! grep -q 'SCRIPT ERROR:' "$TEST_LOG"
+          done
+          for MODE in frontiersocietiestest frontiervisualtest frontiertowngeographytest frontierreliabilitytest frontierorderingtest spacephototest frontierpavingtest avatarheighttest; do
             TEST_LOG="$RUNNER_TEMP/troop-$MODE.log"
             TEST_PREFIX="$(printf '%s' "$MODE" | tr '[:lower:]' '[:upper:]')"
             "$GODOT_BIN" --headless --path . --quit-after 30000 \

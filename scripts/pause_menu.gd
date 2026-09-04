@@ -44,6 +44,7 @@ const BINDABLE_ACTIONS := [
 ]
 
 const MenuTheme := preload("res://scripts/menu_theme.gd")
+const ConnectionInfo := preload("res://scripts/connection_quality.gd")
 const COLOR_INK := MenuTheme.INK
 const COLOR_PANEL := MenuTheme.PANEL
 const COLOR_LEAF := MenuTheme.SECONDARY
@@ -92,7 +93,7 @@ var _save_timer: Timer
 
 
 func _ready() -> void:
-	theme = MenuTheme.build()
+	theme = MenuTheme.build(true)
 	process_mode = Node.PROCESS_MODE_ALWAYS
 	mouse_filter = Control.MOUSE_FILTER_STOP
 	set_process_input(true)
@@ -116,6 +117,7 @@ func _exit_tree() -> void:
 func _notification(what: int) -> void:
 	if what == NOTIFICATION_VISIBILITY_CHANGED and _built and visible:
 		_sync_from_settings()
+		_refresh_connection_notice()
 		if _current_view == VIEW_HOME:
 			call_deferred("_focus_control", _resume_button)
 
@@ -125,10 +127,22 @@ func configure(online: bool) -> void:
 	_online = online
 	if not _built:
 		return
-	_online_warning.visible = online
-	_online_warning.text = ("Your online world keeps running. Return to the title screen to disconnect.") \
-		if online else ""
+	_refresh_connection_notice()
 	_main_menu_button.text = "Leave online world" if online else "Return to title"
+
+
+func _refresh_connection_notice() -> void:
+	_online_warning.visible = _online
+	if not _online:
+		_online_warning.text = ""
+		_online_warning.tooltip_text = ""
+		return
+	var connection := ConnectionInfo.sample(get_tree().root.get_node("Net"))
+	_online_warning.text = "Your online world keeps running."
+	if bool(connection.get("visible", false)):
+		_online_warning.text += "\n" + str(connection.text)
+	_online_warning.tooltip_text = str(connection.detail)
+	_online_warning.mouse_filter = Control.MOUSE_FILTER_PASS
 
 
 ## Public shortcut used by Main when opening directly onto pause settings.
@@ -183,7 +197,7 @@ func _build_ui() -> void:
 	add_child(_panel)
 
 	var frame := VBoxContainer.new()
-	frame.add_theme_constant_override("separation", 12)
+	frame.add_theme_constant_override("separation", 8)
 	_panel.add_child(frame)
 
 	var header := HBoxContainer.new()
@@ -193,9 +207,9 @@ func _build_ui() -> void:
 	titles.add_theme_constant_override("separation", 4)
 	header.add_child(titles)
 	titles.add_child(MenuTheme.label("TROOP / YOUR SESSION", 12, COLOR_LEAF_BRIGHT))
-	_heading = MenuTheme.label("Paused", 34)
+	_heading = MenuTheme.label("Paused", 28)
 	titles.add_child(_heading)
-	_subtitle = MenuTheme.label("Take a moment. Pick up where you left off.", 15, COLOR_MUTED)
+	_subtitle = MenuTheme.label("Take a moment. Pick up where you left off.", 14, COLOR_MUTED)
 	titles.add_child(_subtitle)
 	var divider := ColorRect.new()
 	divider.color = MenuTheme.BORDER
@@ -236,7 +250,7 @@ func _build_home_view() -> Control:
 	var center := CenterContainer.new()
 	var column := VBoxContainer.new()
 	column.custom_minimum_size = Vector2(340, 0)
-	column.add_theme_constant_override("separation", 12)
+	column.add_theme_constant_override("separation", 8)
 	center.add_child(column)
 	_resume_button = _action_button("Resume playing", COLOR_LEAF_BRIGHT, COLOR_LEAF_BRIGHT)
 	_resume_button.pressed.connect(_request_resume)
@@ -259,14 +273,14 @@ func _build_home_view() -> Control:
 
 func _build_settings_view() -> Control:
 	var column := VBoxContainer.new()
-	column.add_theme_constant_override("separation", 14)
+	column.add_theme_constant_override("separation", 10)
 	_settings_back = _small_button("‹  Back to pause")
 	_settings_back.size_flags_horizontal = Control.SIZE_SHRINK_BEGIN
 	_settings_back.pressed.connect(_back_from_settings)
 	column.add_child(_settings_back)
 	var body := HBoxContainer.new()
 	body.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	body.add_theme_constant_override("separation", 24)
+	body.add_theme_constant_override("separation", 16)
 	column.add_child(body)
 	var tabs := VBoxContainer.new()
 	tabs.custom_minimum_size.x = 142
@@ -306,14 +320,14 @@ func _build_graphics_view() -> Control:
 	scroll.follow_focus = true
 	var column := VBoxContainer.new()
 	column.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	column.add_theme_constant_override("separation", 14)
+	column.add_theme_constant_override("separation", 10)
 	scroll.add_child(column)
 
 	column.add_child(_section_copy("Frame rate", "Set a limit for steadier pacing and lower power use. Choose Unlimited for the highest possible frame rate."))
 
 	var preset_row := HBoxContainer.new()
-	preset_row.custom_minimum_size = Vector2(0, 52)
-	preset_row.add_theme_constant_override("separation", 12)
+	preset_row.custom_minimum_size = Vector2(0, 42)
+	preset_row.add_theme_constant_override("separation", 8)
 	var preset_label := Label.new()
 	preset_label.text = "Frame limit"
 	preset_label.custom_minimum_size = Vector2(118, 0)
@@ -325,7 +339,7 @@ func _build_graphics_view() -> Control:
 	_fps_limit_select.name = "FPSLimitPreset"
 	_fps_limit_select.focus_mode = Control.FOCUS_ALL
 	_fps_limit_select.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	_fps_limit_select.custom_minimum_size = Vector2(140, 42)
+	_fps_limit_select.custom_minimum_size = Vector2(140, 34)
 	_fps_limit_select.tooltip_text = "Maximum rendered frames per second"
 	for fps_limit in GameSettings.FPS_LIMIT_PRESETS:
 		_fps_limit_select.add_item("UNLIMITED" if fps_limit == 0 \
@@ -341,8 +355,8 @@ func _build_graphics_view() -> Control:
 
 	_custom_fps_row = HBoxContainer.new()
 	_custom_fps_row.name = "CustomFPSRow"
-	_custom_fps_row.custom_minimum_size = Vector2(0, 52)
-	_custom_fps_row.add_theme_constant_override("separation", 12)
+	_custom_fps_row.custom_minimum_size = Vector2(0, 42)
+	_custom_fps_row.add_theme_constant_override("separation", 8)
 	var custom_label := Label.new()
 	custom_label.text = "Custom limit"
 	custom_label.custom_minimum_size = Vector2(118, 0)
@@ -359,7 +373,7 @@ func _build_graphics_view() -> Control:
 	_custom_fps_spin.rounded = true
 	_custom_fps_spin.suffix = " FPS"
 	_custom_fps_spin.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	_custom_fps_spin.custom_minimum_size = Vector2(140, 42)
+	_custom_fps_spin.custom_minimum_size = Vector2(140, 34)
 	_custom_fps_spin.tooltip_text = ("Enter %d–%d FPS; use the arrows, keyboard, "
 		+ "mouse wheel, or controller") % [GameSettings.MIN_CUSTOM_FPS_LIMIT,
 		GameSettings.MAX_CUSTOM_FPS_LIMIT]
@@ -391,7 +405,7 @@ func _build_audio_view() -> Control:
 	scroll.follow_focus = true
 	var column := VBoxContainer.new()
 	column.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	column.add_theme_constant_override("separation", 12)
+	column.add_theme_constant_override("separation", 8)
 	scroll.add_child(column)
 
 	var intro := _section_copy("Sound levels", "Balance effects, ambience and nearby voices. Master volume adjusts everything.")
@@ -414,8 +428,8 @@ func _build_audio_view() -> Control:
 func _add_volume_row(parent: VBoxContainer, label_text: String,
 		property_name: String, channel: String) -> void:
 	var row := HBoxContainer.new()
-	row.custom_minimum_size = Vector2(0, 48)
-	row.add_theme_constant_override("separation", 12)
+	row.custom_minimum_size = Vector2(0, 40)
+	row.add_theme_constant_override("separation", 8)
 	var label := Label.new()
 	label.text = label_text
 	label.custom_minimum_size = Vector2(118, 0)
@@ -476,8 +490,8 @@ func _build_controls_view() -> Control:
 
 	column.add_child(_section_copy("Mouse & keyboard", "Choose a binding, then press its new key or mouse button. Escape cancels a change."))
 	var sensitivity_row := HBoxContainer.new()
-	sensitivity_row.custom_minimum_size = Vector2(0, 48)
-	sensitivity_row.add_theme_constant_override("separation", 12)
+	sensitivity_row.custom_minimum_size = Vector2(0, 40)
+	sensitivity_row.add_theme_constant_override("separation", 8)
 	var sensitivity_label := Label.new()
 	sensitivity_label.text = "Sensitivity"
 	sensitivity_label.custom_minimum_size = Vector2(118, 0)
@@ -506,8 +520,8 @@ func _build_controls_view() -> Control:
 		if item.has("category"):
 			column.add_child(_category_label(str(item.category)))
 		var row := HBoxContainer.new()
-		row.custom_minimum_size = Vector2(0, 38)
-		row.add_theme_constant_override("separation", 12)
+		row.custom_minimum_size = Vector2(0, 34)
+		row.add_theme_constant_override("separation", 8)
 		var action_label := Label.new()
 		action_label.text = str(item.label)
 		action_label.custom_minimum_size = Vector2(178, 0)
@@ -813,15 +827,15 @@ func _draw() -> void:
 func _action_button(text_value: String, base: Color, _hover: Color) -> Button:
 	var button := Button.new()
 	button.text = text_value
-	button.custom_minimum_size = Vector2(0, 52)
-	MenuTheme.style_button(button, base == COLOR_LEAF_BRIGHT)
+	button.custom_minimum_size = Vector2(0, 42)
+	MenuTheme.style_button(button, base == COLOR_LEAF_BRIGHT, true)
 	return button
 
 
 func _small_button(text_value: String) -> Button:
 	var button := Button.new()
 	button.text = text_value
-	MenuTheme.style_button(button)
+	MenuTheme.style_button(button, false, true)
 	return button
 
 
@@ -835,7 +849,7 @@ func _tab_button(text_value: String) -> Button:
 func _binding_button() -> Button:
 	var button := _small_button("—")
 	button.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	button.custom_minimum_size = Vector2(124, 42)
+	button.custom_minimum_size = Vector2(124, 34)
 	return button
 
 
@@ -844,7 +858,7 @@ func _section_copy(title_text: String, body: String) -> VBoxContainer:
 	box.add_theme_constant_override("separation", 4)
 	var title := Label.new()
 	title.text = title_text
-	title.add_theme_font_size_override("font_size", 20)
+	title.add_theme_font_size_override("font_size", 18)
 	title.add_theme_color_override("font_color", COLOR_LEAF_BRIGHT)
 	box.add_child(title)
 	var copy := Label.new()
@@ -867,16 +881,16 @@ func _category_label(text_value: String) -> Label:
 
 
 func _panel_style() -> StyleBoxFlat:
-	return MenuTheme.panel(MenuTheme.PANEL, MenuTheme.BORDER, 24, 14)
+	return MenuTheme.panel(MenuTheme.PANEL, MenuTheme.BORDER, 18, 14)
 
 
 func _tab_style(selected: bool) -> StyleBoxFlat:
 	return MenuTheme.panel(COLOR_LEAF_BRIGHT if selected else MenuTheme.INSET,
-		COLOR_LEAF_BRIGHT if selected else MenuTheme.BORDER, 12, 8)
+		COLOR_LEAF_BRIGHT if selected else MenuTheme.BORDER, 8, 8)
 
 
 func _binding_style(listening: bool) -> StyleBoxFlat:
-	return MenuTheme.panel(MenuTheme.INSET, COLOR_GOLD if listening else MenuTheme.BORDER, 12, 8)
+	return MenuTheme.panel(MenuTheme.INSET, COLOR_GOLD if listening else MenuTheme.BORDER, 8, 8)
 
 
 func _notice_style() -> StyleBoxFlat:

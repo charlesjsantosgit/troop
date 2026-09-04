@@ -49,12 +49,15 @@ def attempt(args, folder, mode):
                                              stdin=subprocess.DEVNULL, cwd=args.project,
                                              env=environment))
             if role == 'server':
-                ready_deadline = time.monotonic() + 5
+                # The fixture advances 450 simulated society seconds before
+                # opening ENet. Pedestrian collision now makes that deliberate
+                # model warmup CPU-bound; it is outside the timed WAN phase.
+                ready_deadline = time.monotonic() + 20
                 while 'FRONTIERMTU_READY' not in (folder / f'{mode}-server.log').read_text():
                     if children[0].poll() is not None or time.monotonic() > ready_deadline:
                         raise RuntimeError('Server fixture did not become ready')
                     time.sleep(.02)
-        deadline = time.monotonic() + 10
+        deadline = time.monotonic() + 45
         while time.monotonic() < deadline and children[1].poll() is None:
             for key, _ in selector.select(.002):
                 data, address = key.fileobj.recvfrom(65535)

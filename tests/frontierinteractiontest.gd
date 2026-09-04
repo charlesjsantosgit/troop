@@ -83,9 +83,9 @@ func run(owner: Node) -> void:
 		check(_visible_citizen_labels().is_empty(),
 			"open conversation hides nearby resident nameplates")
 		check(not _visible_button(controller.ui,"My journal")
-			and _text(controller.ui._body).contains("My trading desk")
+			and controller.ui._merchant_mode and controller.ui._trade_scrolls.size() == 2
 			and not _visible_button(controller.ui,"Use " + str(market.label)),
-			"Nana's panel exposes one trading desk without a duplicate market link or journal shortcut")
+			"Nana's panel pairs the trading desk with the backpack without duplicate market or journal links")
 		await _tap(KEY_E)
 		check(controller.ui.visible and controller.ui.context.get("id","")=="nana"
 			and controller.ui.page=="Interaction",
@@ -260,11 +260,10 @@ func _market_fallback(nana: Node3D,market: Dictionary) -> void:
 		and controller.selected_interaction.get("id")=="earth_market"
 		and controller.ui._heading.text==str(controller.simulation.state.locations.earth_market.label),
 		"Use market executes the real callback and selects the authoritative physical desk")
-	var quantity: SpinBox = controller.ui._body.find_children("*","SpinBox",true,false)[0]
+	var quantity: SpinBox = controller.ui._merchant_workspace.find_children("*","SpinBox",true,false)[0]
 	quantity.value = 1
-	var buy: Button
-	for label in controller.ui._body.find_children("*","Label",true,false):
-		if label.text == "Banana": buy = _find_button(label.get_parent(),"Buy")
+	controller.ui._select_merchant_item("banana", "market")
+	var buy: Button = controller.ui._trade_buy
 	check(buy!=null,"market reached from a nonmerchant has the real banana purchase control")
 	if buy==null: return
 	var old_bag: int = controller.simulation.stock("player_earth","banana")

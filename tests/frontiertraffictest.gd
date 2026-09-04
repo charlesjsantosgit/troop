@@ -206,6 +206,11 @@ func _test_profession_transition() -> void:
 	_fixture.add_child(traffic)
 	traffic.build()
 	var car: Vehicle=traffic.vehicles.diesel
+	var resident := FrontierCitizen.new()
+	resident.configure("diesel",model,frame,"earth")
+	frame.add_child(resident)
+	resident.build()
+	_check(resident._body_shape.disabled,"seated driver disables only its pedestrian capsule")
 	var changed: Dictionary=model.action("assign_job",{"citizen":"diesel","job":"grower"})
 	_check(loaded.ok and changed.ok and worker.job=="tanker_driver" and worker.pending_job=="grower" and not worker.carrying.is_empty(),
 		"a loaded driver defers the new profession until the committed delivery finishes",str(loaded))
@@ -216,6 +221,10 @@ func _test_profession_transition() -> void:
 	var parked_pose := car.global_transform
 	_check(traffic.drivers.diesel.mode=="walking" and worker.job=="grower" and not worker.physical_transport and worker.carrying.is_empty() and model.state.metrics.fuel_delivered==4 and car.driver==null and car.freeze and traffic.vehicle_for("diesel")==null,
 		"the delivery completes once, then its driver disembarks and parks the same supported car",str(traffic.drivers.diesel.mode))
+	resident.update_citizen(0.0,Vector3.INF)
+	_check(not resident._body_shape.disabled and resident._vehicle==null and resident.position.distance_to(Vector3(worker.position[0],Gen.FRONTIER_TOWN_HEIGHT,worker.position[1]))<0.01,
+		"disembarking enables the real capsule at the authority-cleared doorway")
+	resident.queue_free()
 	var packet: Array=FrontierNetwork.pack_traffic(traffic.snapshot())
 	var unpacked: Array=FrontierNetwork.unpack_traffic("career_test",packet)
 	_check(unpacked.size()==1 and unpacked[0].mode=="walking" and var_to_bytes(packet).size()<1100,
@@ -257,18 +266,25 @@ func _test_profession_transition() -> void:
 		"the former driver reaches a real plot and completes paid farm work on foot")
 	# No second farm task is committed between the completion tick and hiring.
 	var hired: Dictionary=model.action("assign_job",{"citizen":"diesel","job":"tanker_driver"})
+	resident=FrontierCitizen.new()
+	resident.configure("diesel",model,frame,"earth")
+	frame.add_child(resident)
+	resident.build()
 	var completed_before := int(worker.completed)
 	var wage_before := model.balance("diesel")
 	var same_car := car.get_instance_id()
 	var saw_boarding := false
 	var checked_wall := false
 	var maximum_walk_step := 0.0
+	var boarding_capsule_active := true
 	var previous := FrontierTraffic.Routes._vector(worker.position)
 	for tick in range(9000):
 		await get_tree().physics_frame
 		model.tick(1.0/60.0)
 		var mode := str(traffic.drivers.diesel.mode)
 		if mode=="boarding":
+			resident.update_citizen(1.0/60.0,Vector3(100000,0,0))
+			boarding_capsule_active=boarding_capsule_active and not resident._body_shape.disabled
 			saw_boarding=true
 			var walk_route: Array=traffic.drivers.diesel.boarding_route
 			var current := FrontierTraffic.Routes._vector(worker.position)
@@ -300,6 +316,9 @@ func _test_profession_transition() -> void:
 			if car.global_position.distance_to(parked_pose.origin)>0.01: break
 		previous=FrontierTraffic.Routes._vector(worker.position)
 		if saw_boarding and mode=="driving": break
+	resident.update_citizen(0.0,Vector3.INF)
+	_check(boarding_capsule_active and resident._body_shape.disabled and resident._vehicle==car,
+		"boarding keeps the capsule active until the worker actually occupies its seat")
 	_check(hired.ok and saw_boarding and checked_wall and traffic.drivers.diesel.mode=="driving" and worker.physical_transport and car.driver!=null and traffic.vehicle_for("diesel")==car and car.get_instance_id()==same_car and maximum_walk_step<0.12,
 		"rehiring walks the worker back to the existing car before reattaching its seated rig", "mode=%s walk_step=%.4f"%[traffic.drivers.diesel.mode,maximum_walk_step])
 	_check(int(worker.completed)==completed_before and model.balance("diesel")==wage_before and int(model.state.metrics.fuel_delivered)==4 and float(model.state.vehicle_fuel[car.vid].fuel_l)<=fuel_before+0.001,

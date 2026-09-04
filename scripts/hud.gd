@@ -7,9 +7,11 @@ enum ScopeTarget { NONE, BODY, HEAD }
 
 const SNIPER_SCOPE_RANGE := 800.0
 const FPS_REFRESH_SECONDS := 0.25
+const ConnectionQualityScript := preload("res://scripts/connection_quality.gd")
 
 var player  # MonkeyPlayer
 var fps_label: Label
+var connection_label: Label
 var score_label: Label
 var speed_label: Label
 var speed_fill: ColorRect
@@ -88,6 +90,12 @@ func _ready() -> void:
 	fps_label.text = "FPS --"
 	fps_label.add_theme_color_override("font_color", Color(0.72, 1.0, 0.58, 0.92))
 	add_child(fps_label)
+	connection_label = _label(13)
+	connection_label.name = "ConnectionQuality"
+	connection_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	connection_label.position = Vector2(margin + 84, margin)
+	connection_label.visible = false
+	add_child(connection_label)
 
 	score_label = _label(24)
 	score_label.position = Vector2(margin, margin + 24)
@@ -747,6 +755,10 @@ func _update_fps_meter(dt: float) -> void:
 	if _fps_refresh_remaining > 0.0 or fps_label == null:
 		return
 	_fps_refresh_remaining = FPS_REFRESH_SECONDS
+	var connection := ConnectionQualityScript.sample(Net)
+	connection_label.visible = bool(connection.visible)
+	connection_label.text = str(connection.text)
+	connection_label.add_theme_color_override("font_color", Color("e9bc74") if connection.warning else Color("b0b6be"))
 	var measured_fps := maxi(0, roundi(Engine.get_frames_per_second()))
 	if measured_fps == _displayed_fps:
 		return

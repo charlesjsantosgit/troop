@@ -32,13 +32,13 @@ static func label(text: String, size: int = 16, color: Color = TEXT) -> Label:
 	result.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	return result
 
-static func style_button(button: Button, primary: bool = false) -> void:
-	button.custom_minimum_size.y = maxf(button.custom_minimum_size.y, 42)
+static func style_button(button: Button, primary: bool = false, compact: bool = false) -> void:
+	button.custom_minimum_size.y = maxf(button.custom_minimum_size.y, 34 if compact else 42)
 	button.focus_mode = Control.FOCUS_ALL
 	button.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
-	var normal := panel(ACCENT if primary else INSET, ACCENT if primary else BORDER, 12, 8)
-	normal.content_margin_top = 9
-	normal.content_margin_bottom = 9
+	var normal := panel(ACCENT if primary else INSET, ACCENT if primary else BORDER, 9 if compact else 12, 8)
+	normal.content_margin_top = 6 if compact else 9
+	normal.content_margin_bottom = 6 if compact else 9
 	var hover := normal.duplicate() as StyleBoxFlat
 	hover.bg_color = ACCENT.lightened(0.1) if primary else Color("3a4551")
 	hover.border_color = ACCENT if primary else SECONDARY
@@ -54,29 +54,34 @@ static func style_button(button: Button, primary: bool = false) -> void:
 	for state in ["font_color", "font_hover_color", "font_pressed_color", "font_focus_color"]:
 		button.add_theme_color_override(state, INK if primary else TEXT)
 	button.add_theme_color_override("font_disabled_color", Color("818994"))
-	button.add_theme_font_size_override("font_size", 16)
+	button.add_theme_font_size_override("font_size", 14 if compact else 16)
 
-static func build() -> Theme:
+## In-game menus keep their panel area but use a smaller content rhythm.
+## Title navigation retains the larger default treatment.
+static func content_font_size(size: int) -> int:
+	return maxi(12, size - (6 if size >= 26 else 2))
+
+static func build(compact: bool = false) -> Theme:
 	var result := Theme.new()
-	result.default_font_size = 16
+	result.default_font_size = 14 if compact else 16
 	for type in ["Label", "Button", "CheckButton", "CheckBox", "OptionButton", "LineEdit", "TextEdit", "RichTextLabel", "SpinBox", "TabBar"]:
 		result.set_color("font_color", type, TEXT)
 		result.set_color("font_hover_color", type, TEXT)
 		result.set_color("font_focus_color", type, TEXT)
 		result.set_color("font_disabled_color", type, MUTED.darkened(0.25))
-	result.set_constant("separation", "VBoxContainer", 12)
-	result.set_constant("separation", "HBoxContainer", 12)
-	result.set_constant("h_separation", "GridContainer", 12)
-	result.set_constant("v_separation", "GridContainer", 12)
-	result.set_stylebox("panel", "PanelContainer", panel())
+	result.set_constant("separation", "VBoxContainer", 8 if compact else 12)
+	result.set_constant("separation", "HBoxContainer", 8 if compact else 12)
+	result.set_constant("h_separation", "GridContainer", 8 if compact else 12)
+	result.set_constant("v_separation", "GridContainer", 8 if compact else 12)
+	result.set_stylebox("panel", "PanelContainer", panel(PANEL, BORDER, 14 if compact else 20))
 	var sample := Button.new()
-	style_button(sample)
+	style_button(sample, false, compact)
 	for type in ["Button", "OptionButton"]:
 		for state in ["normal", "hover", "pressed", "focus", "disabled"]:
 			result.set_stylebox(state, type, sample.get_theme_stylebox(state))
 	sample.free()
 	for type in ["LineEdit", "TextEdit"]:
-		result.set_stylebox("normal", type, panel(INK, BORDER, 12, 8))
+		result.set_stylebox("normal", type, panel(INK, BORDER, 8 if compact else 12, 8))
 		result.set_stylebox("focus", type, panel(Color(0,0,0,0), SECONDARY, 0, 8))
 		result.set_color("caret_color", type, ACCENT)
 		result.set_color("font_placeholder_color", type, MUTED)
@@ -84,12 +89,12 @@ static func build() -> Theme:
 	result.set_stylebox("panel", "PopupMenu", panel(PANEL, BORDER, 8, 8))
 	result.set_stylebox("hover", "PopupMenu", panel(INSET, SECONDARY, 8, 6))
 	result.set_color("font_color", "PopupMenu", TEXT)
-	result.set_constant("v_separation", "PopupMenu", 12)
-	result.set_stylebox("panel", "TabContainer", panel(PANEL, BORDER, 16, 10))
+	result.set_constant("v_separation", "PopupMenu", 8 if compact else 12)
+	result.set_stylebox("panel", "TabContainer", panel(PANEL, BORDER, 12 if compact else 16, 10))
 	for type in ["TabBar", "TabContainer"]:
-		result.set_stylebox("tab_selected", type, panel(INSET, SECONDARY, 12, 6))
-		result.set_stylebox("tab_unselected", type, panel(INK, BORDER, 12, 6))
-		result.set_stylebox("tab_hovered", type, panel(INSET, SECONDARY, 12, 6))
+		result.set_stylebox("tab_selected", type, panel(INSET, SECONDARY, 8 if compact else 12, 6))
+		result.set_stylebox("tab_unselected", type, panel(INK, BORDER, 8 if compact else 12, 6))
+		result.set_stylebox("tab_hovered", type, panel(INSET, SECONDARY, 8 if compact else 12, 6))
 		result.set_color("font_selected_color", type, ACCENT)
 		result.set_color("font_unselected_color", type, MUTED)
 		result.set_color("font_hovered_color", type, TEXT)

@@ -26,11 +26,11 @@ the next launch. TROOP verifies the signature, exact file size, and SHA-256
 digest before it loads any downloaded code. Engine or installer-level changes
 still require the normal Windows installer or macOS disk-image flow.
 
-TROOP 0.7.0 organizes menus, adds compact in-game panels and repairs boarding. Installations
-on bootstrap 3 (0.4.10 or newer) can apply the signed content update and restart.
-Older installations need the full installer. Close every running copy before
-replacing the app. On a Mac, replace TROOP.app in Applications and launch that
-copy. Confirm 0.7.0 on the menu before joining the protocol-13 server.
+TROOP 0.7.1 improves shared action latency, menu content density and working NPCs.
+Install the full package to activate protocol 14, including when upgrading from
+0.7.0. Close every running copy before replacing the app. On a Mac, replace
+TROOP.app in Applications and launch that copy. Confirm 0.7.1 on the menu.
+Your existing local saves and server town ownership are preserved.
 
 Choose Play, then Play online for six Earth/Moon towns, claimable communities,
 finite markets, farming, job-specific workers and physical delivery vehicles.
@@ -38,7 +38,8 @@ Your accounts, bags and town claims save on the server. Follow the optional
 first-day guide; E talks or works nearby, and B opens your journal and tutorials.
 Each person and workplace has its own compact window. The market offers search
 and category filters. Your journal shows tutorials, contracts and directions.
-Your backpack lists item names, quantities and capacity. The offline career preserves
+Your backpack lists item names, quantities and capacity. Ping beside FPS and
+connection details in Pause help distinguish network delay from rendering lag. The offline career preserves
 your separate local progress. Classic combat and lunar expeditions remain.
 
 The startup changes were measured on an M4 Mac, not an M1. M1/Tahoe acceptance

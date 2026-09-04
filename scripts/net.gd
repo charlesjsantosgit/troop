@@ -18,6 +18,8 @@ signal peer_state(id: int, pos: Vector3, yaw: float, vel: Vector3, anim: int,
 	vehicle_id: String, vehicle_aux: Vector3)
 signal vehicle_claimed(vehicle_id: String, claimant_id: int)
 signal vehicle_released(vehicle_id: String, rest: Array)
+signal vehicle_request_finished(vehicle_id: String, accepted: bool,
+	reason: String, request_id: int)
 signal vehicle_spawn_registered(vehicle_id: String, vehicle_kind: int,
 	position: Vector3, yaw: float)
 signal score_changed
@@ -49,8 +51,11 @@ signal moon_colony_result(action: String, ok: bool, reason: String)
 
 const PORT := 30623
 const MAX_CLIENTS := 24
-const CHANNEL_COUNT := 2
-const PROTOCOL_VERSION := 13
+# Channel 0 carries core control and player state, 1 carries voice/traffic,
+# 2 carries latency-sensitive actions and seat ownership, and 3 carries large
+# personalized society views with application-level backpressure.
+const CHANNEL_COUNT := 4
+const PROTOCOL_VERSION := 14
 const MAX_NAME_LENGTH := 20
 const REGISTRATION_TIMEOUT_SECONDS := 5.0
 const MAX_STATE_PACKETS_PER_SECOND := 30
@@ -360,7 +365,8 @@ static func configure_transport(peer: ENetMultiplayerPeer) -> void:
 
 static func configure_server_transport(peer: ENetMultiplayerPeer) -> void:
 	# Godot 4.7 (5b4e0cb0f) passes max_channels + 2 as incoming bandwidth
-	# in create_server. Our two channels therefore advertise four bytes/second,
+	# in create_server. A small channel count therefore advertises only a few
+	# bytes per second,
 	# causing ENet to discard nearly all incoming voice/movement datagrams.
 	# Restore the requested unlimited budget before any client handshake.
 	peer.get_host().bandwidth_limit(0, 0)
@@ -2315,15 +2321,16 @@ func _canonical_vehicle_kind(vehicle_id: String) -> int:
 	_vehicle_positions[vehicle_id] = spawn_position
 	return vehicle_kind
 
-func request_vehicle(vehicle_id: String) -> bool:
-	if not _valid_vehicle_id(vehicle_id) or claimed_vehicles.has(vehicle_id):
+func request_vehicle(vehicle_id: String, request_id: int = 0) -> bool:
+	if not _valid_vehicle_id(vehicle_id) or claimed_vehicles.has(vehicle_id) \
+			or request_id < 0 or request_id > 0x7fffffff:
 		return false
 	if not active:
 		_apply_vehicle_claim(vehicle_id, local_id())
 		return true
 	if is_host:
-		return _host_claim_vehicle(vehicle_id, local_id())
-	rpc_id(1, "srv_request_vehicle", vehicle_id)
+		return _host_claim_vehicle(vehicle_id, local_id(), request_id)
+	rpc_id(1, "srv_request_vehicle", vehicle_id, request_id)
 	return true
 
 
@@ -2338,34 +2345,56 @@ func release_vehicle(vehicle_id: String, rest: Array) -> void:
 		rpc_id(1, "srv_release_vehicle", vehicle_id, rest)
 
 
-@rpc("any_peer", "call_remote", "reliable", 0)
-func srv_request_vehicle(vehicle_id: String) -> void:
+@rpc("any_peer", "call_remote", "reliable", 2)
+func srv_request_vehicle(vehicle_id: String, request_id: int) -> void:
 	var sender := multiplayer.get_remote_sender_id()
-	if _registered_peer(sender) and _allow_rate(sender, "vehicle_claim", 8):
-		_host_claim_vehicle(vehicle_id, sender)
+	if not _registered_peer(sender) or request_id < 0 or request_id > 0x7fffffff:
+		return
+	if not _allow_rate(sender, "vehicle_claim", 8):
+		_reply_vehicle_request(sender, vehicle_id, false,
+			"Please wait a moment before trying that seat again.", request_id)
+		return
+	_host_claim_vehicle(vehicle_id, sender, request_id)
 
 
-@rpc("any_peer", "call_remote", "reliable", 0)
+@rpc("any_peer", "call_remote", "reliable", 2)
 func srv_release_vehicle(vehicle_id: String, rest: Array) -> void:
 	var sender := multiplayer.get_remote_sender_id()
 	if _registered_peer(sender) and _allow_rate(sender, "vehicle_claim", 8):
 		_host_release_vehicle(vehicle_id, sender, rest)
 
 
-func _host_claim_vehicle(vehicle_id: String, claimant_id: int) -> bool:
-	if _canonical_vehicle_kind(vehicle_id) < 0 or not names.has(claimant_id) \
-			or (claimant_id != local_id() \
-			and not _vehicle_claim_in_range(claimant_id, vehicle_id)) \
-			or (not claimed_vehicles.has(vehicle_id)
-			and claimed_vehicles.size() >= MAX_VEHICLE_CLAIMS):
+func _host_claim_vehicle(vehicle_id: String, claimant_id: int,
+		request_id: int = 0) -> bool:
+	var kind := _canonical_vehicle_kind(vehicle_id)
+	if kind < 0 or not names.has(claimant_id):
+		_reply_vehicle_request(claimant_id, vehicle_id, false,
+			"This vehicle is unavailable.", request_id)
+		return false
+	if claimant_id != local_id() \
+			and not _vehicle_claim_in_range(claimant_id, vehicle_id):
+		_reply_vehicle_request(claimant_id, vehicle_id, false,
+			"Move closer to the vehicle and try again.", request_id)
+		return false
+	if not claimed_vehicles.has(vehicle_id) \
+			and claimed_vehicles.size() >= MAX_VEHICLE_CLAIMS:
+		_reply_vehicle_request(claimant_id, vehicle_id, false,
+			"This server's vehicle registry is full.", request_id)
 		return false
 	if claimed_vehicles.has(vehicle_id):
 		if claimant_id != local_id():
 			rpc_id(claimant_id, "cl_vehicle_claimed", vehicle_id,
 				int(claimed_vehicles[vehicle_id]))
+		_reply_vehicle_request(claimant_id, vehicle_id, false,
+			"That vehicle is already in use.", request_id)
 		return false
 	if is_instance_valid(frontier_network) and frontier_network.society_ready \
-			and not frontier_network.prepare_player_vehicle(vehicle_id, _canonical_vehicle_kind(vehicle_id), claimant_id):
+			and not frontier_network.prepare_player_vehicle(vehicle_id, kind, claimant_id):
+		var failure_reason := str(frontier_network.last_vehicle_error)
+		if failure_reason.is_empty():
+			failure_reason = "The shared vehicle registry is not ready."
+		_reply_vehicle_request(claimant_id, vehicle_id, false,
+			failure_reason, request_id)
 		return false
 	claimed_vehicles[vehicle_id] = claimant_id
 	# A claimed driver is no longer an on-foot proximity authority. Keeping the
@@ -2375,7 +2404,18 @@ func _host_claim_vehicle(vehicle_id: String, claimant_id: int) -> bool:
 	vehicle_rests.erase(vehicle_id)
 	vehicle_claimed.emit(vehicle_id, claimant_id)
 	rpc("cl_vehicle_claimed", vehicle_id, claimant_id)
+	_reply_vehicle_request(claimant_id, vehicle_id, true, "Seat ready.",
+		request_id)
 	return true
+
+
+func _reply_vehicle_request(peer_id: int, vehicle_id: String, accepted: bool,
+		reason: String, request_id: int) -> void:
+	if peer_id == local_id():
+		vehicle_request_finished.emit(vehicle_id, accepted, reason, request_id)
+	elif active and multiplayer.multiplayer_peer and _valid_vehicle_id(vehicle_id):
+		rpc_id(peer_id, "cl_vehicle_request_result", vehicle_id, accepted,
+			reason.left(160), request_id)
 
 
 func _host_release_vehicle(vehicle_id: String, releasing_id: int,
@@ -2481,14 +2521,24 @@ func _remember_vehicle_release_handoff(peer_id: int, vehicle_id: String,
 		_peer_on_foot_positions[peer_id] = handoff_position
 
 
-@rpc("authority", "call_remote", "reliable", 0)
+@rpc("authority", "call_remote", "reliable", 2)
 func cl_vehicle_claimed(vehicle_id: String, claimant_id: int) -> void:
 	_apply_vehicle_claim(vehicle_id, claimant_id)
 
 
-@rpc("authority", "call_remote", "reliable", 0)
+@rpc("authority", "call_remote", "reliable", 2)
 func cl_vehicle_released(vehicle_id: String, rest: Array) -> void:
 	_apply_vehicle_release(vehicle_id, rest)
+
+
+@rpc("authority", "call_remote", "reliable", 2)
+func cl_vehicle_request_result(vehicle_id: String, accepted: bool,
+		reason: String, request_id: int) -> void:
+	if not active or is_host or multiplayer.get_remote_sender_id() != 1 \
+			or not _valid_vehicle_id(vehicle_id) or reason.length() > 160 \
+			or request_id < 0 or request_id > 0x7fffffff:
+		return
+	vehicle_request_finished.emit(vehicle_id, accepted, reason, request_id)
 
 
 func _apply_vehicle_claim(vehicle_id: String, claimant_id: int) -> void:

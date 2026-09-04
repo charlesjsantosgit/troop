@@ -53,7 +53,7 @@ func close() -> void:
 
 
 func _ready() -> void:
-	theme = MenuTheme.build()
+	theme = MenuTheme.build(true)
 	set_anchors_preset(Control.PRESET_FULL_RECT)
 	mouse_filter = Control.MOUSE_FILTER_STOP
 	visible = false
@@ -63,25 +63,25 @@ func _ready() -> void:
 	add_child(scrim)
 	_panel = PanelContainer.new()
 	_panel.minimum_size_changed.connect(_resize_panel, CONNECT_DEFERRED)
-	_panel.add_theme_stylebox_override("panel", MenuTheme.panel())
+	_panel.add_theme_stylebox_override("panel", MenuTheme.panel(MenuTheme.PANEL, MenuTheme.BORDER, 16))
 	add_child(_panel)
 	var column := VBoxContainer.new()
-	column.add_theme_constant_override("separation", 14)
+	column.add_theme_constant_override("separation", 10)
 	_panel.add_child(column)
 	var header := HBoxContainer.new()
 	column.add_child(header)
 	var portrait := VillagerPortrait.new()
-	portrait.custom_minimum_size = Vector2(64, 64)
+	portrait.custom_minimum_size = Vector2(48, 48)
 	header.add_child(portrait)
 	var titles := VBoxContainer.new()
 	titles.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	titles.add_theme_constant_override("separation", 4)
 	header.add_child(titles)
 	titles.add_child(MenuTheme.label("OOKBAR / PROVISIONER", 12, MenuTheme.ACCENT))
-	titles.add_child(MenuTheme.label("Field supplies", 28))
+	titles.add_child(MenuTheme.label("Field supplies", 22))
 	_patter_label = MenuTheme.label("", 14, MenuTheme.MUTED)
 	titles.add_child(_patter_label)
-	_balance_label = MenuTheme.label("", 20, MenuTheme.ACCENT)
+	_balance_label = MenuTheme.label("", 18, MenuTheme.ACCENT)
 	_balance_label.autowrap_mode = TextServer.AUTOWRAP_OFF
 	_balance_label.size_flags_horizontal = Control.SIZE_SHRINK_END
 	_balance_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
@@ -97,19 +97,19 @@ func _ready() -> void:
 	for index in range(OFFERS.size()):
 		var offer: Dictionary = OFFERS[index]
 		var row := HBoxContainer.new()
-		row.add_theme_constant_override("separation", 16)
+		row.add_theme_constant_override("separation", 10)
 		offers.add_child(row)
 		var description := VBoxContainer.new()
 		description.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 		description.add_theme_constant_override("separation", 2)
 		row.add_child(description)
-		description.add_child(MenuTheme.label(str(offer.label), 17))
+		description.add_child(MenuTheme.label(str(offer.label), 15))
 		var detail := "Random ammunition, with a chance of a bandage." if int(offer.kind) == -2 else "Added to your carried bandages." if int(offer.kind) == -1 else "Added to your weapon's reserve ammunition."
 		description.add_child(MenuTheme.label(detail, 13, MenuTheme.MUTED))
 		var button := Button.new()
 		button.text = "Buy · %d bananas" % int(offer.cost)
-		button.custom_minimum_size = Vector2(170, 46)
-		MenuTheme.style_button(button)
+		button.custom_minimum_size = Vector2(142, 36)
+		MenuTheme.style_button(button, false, true)
 		button.pressed.connect(func() -> void: _buy(index))
 		row.add_child(button)
 		_offer_buttons.append(button)
@@ -117,7 +117,7 @@ func _ready() -> void:
 	column.add_child(_receipt)
 	var leave := Button.new()
 	leave.text = "Done trading · Esc"
-	MenuTheme.style_button(leave)
+	MenuTheme.style_button(leave, false, true)
 	leave.pressed.connect(close)
 	column.add_child(leave)
 	get_viewport().size_changed.connect(_resize_panel)

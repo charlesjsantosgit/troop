@@ -45,7 +45,7 @@ func ragdoll_bounds(doll) -> Vector2:
 	return Vector2(sole,crown)
 
 func _rope_contacts(player, rig_script) -> void:
-	for stature: float in [1.7018,1.778,1.8796]:
+	for stature: float in [1.7018,1.8288,1.8796]:
 		var rig = player.rig
 		rig.reset_pose_state()
 		rig.set_standing_height(stature)
@@ -89,11 +89,11 @@ func _run() -> void:
 	player.world = site
 	site.add_child(player)
 	var player_bounds := bounds(player.rig)
-	check(absf(player_bounds.x)<0.00001 and absf(player_bounds.y-1.778)<0.00001,
+	check(absf(player_bounds.x)<0.00001 and absf(player_bounds.y-1.8288)<0.00001,
 		"player actual straight-standing vertices: sole=%.6f crown=%.6f m" % [player_bounds.x,player_bounds.y])
-	check(absf(player._collision_shape.shape.height-1.778)<0.00001 \
-		and absf(player._collision_shape.position.y-0.889)<0.00001 \
-		and player.scale.is_equal_approx(Vector3.ONE),"upright capsule is1.778 m with grounded bottom and unscaled physics root")
+	check(absf(player._collision_shape.shape.height-1.8288)<0.00001 \
+		and absf(player._collision_shape.position.y-0.9144)<0.00001 \
+		and player.scale.is_equal_approx(Vector3.ONE),"upright capsule is1.8288 m with grounded bottom and unscaled physics root")
 	check(player.head_hitbox.global_position.distance_to(player.rig.head_p.to_global(Vector3(0,0,-0.015)))<0.00001,
 		"projectile head hit zone follows the scaled anatomical head")
 	var camera_script = load("res://scripts/camera_rig.gd")
@@ -107,14 +107,14 @@ func _run() -> void:
 		var b := bounds(player.rig)
 		idle_min = minf(idle_min,b.y-b.x)
 		idle_max = maxf(idle_max,b.y-b.x)
-	check(idle_min>1.74 and idle_max<1.80,
+	check(idle_min>1.79 and idle_max<1.852,
 		"12 seconds of relaxed idle retain natural posture within %.4f–%.4f m" % [idle_min,idle_max])
 	player.rig.reset_pose_state()
-	check(absf(bounds(player.rig).y-1.778)<0.00001,"pose reset retains exact player stature")
+	check(absf(bounds(player.rig).y-1.8288)<0.00001,"pose reset retains exact player stature")
 	var puppet = load("res://scripts/puppet.gd").new()
 	puppet.setup(27,"Other player")
 	site.add_child(puppet)
-	check(absf(bounds(puppet.rig).y-1.778)<0.00001,"remote player has identical1.778 m rendered stature")
+	check(absf(bounds(puppet.rig).y-1.8288)<0.00001,"remote player has identical1.8288 m rendered stature")
 	var sim = load("res://scripts/frontier_sim.gd").new()
 	sim.new_game(2026)
 	var minimum := INF
@@ -145,7 +145,7 @@ func _run() -> void:
 	check(absf(minimum-1.7018)<0.00001 and absf(maximum-1.8796)<0.00001,
 		"resident distribution spans both requested adult endpoints")
 	check(stable_jobs,"job changes, rebuilt workwear and lunar helmets preserve anatomical height")
-	check(rig_script.npc_height("nana")<1.778,"Nana stands slightly shorter than the player")
+	check(rig_script.npc_height("nana")<1.8288,"Nana stands slightly shorter than the player")
 	# A real analytic world-space solve must reach a reachable control without
 	# shrinking the upper arm back to its old authored metre length.
 	var rig = player.rig
@@ -165,9 +165,9 @@ func _run() -> void:
 		check(rig.to_local(rig.hips.global_position).distance_to(rig.yaw_node.transform*rig.hips.position)<0.00001,
 			"seated mode%d preserves the full authored pelvis position through running sway" % seated)
 	rig.reset_pose_state()
-	check(absf(bounds(rig).y-1.778)<0.00001,"leaving the seated pose restores1.778 m standing anatomy")
+	check(absf(bounds(rig).y-1.8288)<0.00001,"leaving the seated pose restores1.8288 m standing anatomy")
 	var doll_script = load("res://scripts/monkey_ragdoll.gd")
-	for stature: float in [1.7018,1.778,1.8796]:
+	for stature: float in [1.7018,1.8288,1.8796]:
 		var doll = doll_script.new()
 		# Rigid bodies must join their actual physics space before PinJoint3D
 		# connects them; the presentation-only parent deliberately has no process.

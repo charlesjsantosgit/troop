@@ -1,8 +1,8 @@
 class_name FrontierCitizen
-extends Node3D
+extends CharacterBody3D
 ## Peaceful, economical presentation of one authoritative simulation worker.
 ## The simulation owns movement, cargo and arrival-gated work; this rig only
-## interpolates those positions and displays actual tasks and carried goods.
+## follows those positions through a physical capsule and displays actual work.
 
 var citizen_id := ""
 var rig: MonkeyRig
@@ -23,6 +23,16 @@ var _sampled_up := Vector3.UP
 var _work_tool: Node3D
 var _work_active := false
 var _interaction_focused := false
+const BODY_RADIUS := 0.34
+const WALK_SPEED := 2.0
+var _body_shape: CollisionShape3D
+var _walking_velocity := Vector3.ZERO
+var _pose_kind := "idle"
+var _watering_can: Node3D
+var _inspection_board: Node3D
+var _plant_bend := 0.0
+var _neighbor_clock := 0.0
+var _neighbors: Array[Node3D] = []
 
 
 func configure(id: String, simulation: RefCounted, host: Node3D, planet: String) -> void:
@@ -36,11 +46,24 @@ func build() -> void:
 	var data := _data()
 	_job = str(data.get("job", "citizen"))
 	name = "Citizen_%s" % citizen_id
+	add_to_group("frontier_pedestrian_bodies")
+	collision_layer = 1
+	collision_mask = 1
+	safe_margin = 0.005
+	_body_shape = CollisionShape3D.new()
+	_body_shape.name = "PedestrianCapsule"
+	var capsule := CapsuleShape3D.new()
+	capsule.radius = BODY_RADIUS
+	capsule.height = MonkeyRig.npc_height(citizen_id)
+	_body_shape.shape = capsule
+	_body_shape.position.y = capsule.height * 0.5
+	add_child(_body_shape)
 	rig = MonkeyRig.new()
 	rig.name = "PeacefulMonkeyRig"
 	add_child(rig)
 	rig.setup(str(data.get("name", citizen_id)), true)
 	rig._t = float(absi(citizen_id.hash()) % 173)*0.137
+	_time = rig._t
 	rig.set_melee_pose(false, false, 0.0, 0)
 	rig.set_standing_height(MonkeyRig.npc_height(citizen_id))
 	_clean_render(rig)
@@ -92,6 +115,7 @@ func update_citizen(dt: float, camera_position: Vector3) -> void:
 	if str(data.get("job", "citizen")) != _job:
 		# Reassignment changes the visible uniform, tools and vehicle together
 		# with the authoritative profession; stale livery never survives a job.
+		var was_seated := is_instance_valid(_vehicle)
 		for child in get_children():
 			remove_child(child)
 			child.queue_free()
@@ -99,10 +123,11 @@ func update_citizen(dt: float, camera_position: Vector3) -> void:
 		_vehicle = null
 		_fuel_label = null
 		_last_task = ""
-		_initialized = false
+		_initialized = _initialized and not was_seated
 		build()
 		return
 	_bind_vehicle()
+	_body_shape.disabled = is_instance_valid(_vehicle)
 	if is_instance_valid(_vehicle):
 		_update_driver(dt, camera_position, data)
 		return
@@ -123,12 +148,25 @@ func update_citizen(dt: float, camera_position: Vector3) -> void:
 		# Model updates are one second apart. Traverse each authoritative
 		# segment at its real speed, instead of racing to each sample in a
 		# tenth of a second and visibly stopping between every model tick.
-		var speed := 6.0 if _vehicle != null else 2.6
-		position = position.move_toward(at, speed * dt)
+		var target_global := get_parent_node_3d().to_global(at)
+		var motion := (target_global - global_position).limit_length(WALK_SPEED * maxf(dt, 0.0))
+		motion = _separated_motion(motion,dt)
+		# Test the complete capsule, including the player and other residents.
+		# Sliding preserves progress around a shoulder without ever teleporting
+		# through a physical body to catch a newer authority sample.
+		for attempt in range(3):
+			if motion.length_squared() < 0.00000001:
+				break
+			var hit := move_and_collide(motion)
+			if hit == null:
+				break
+			motion = hit.get_remainder().slide(hit.get_normal())
 	if _planet == "moon" and _host.has_method("surface_normal"):
 		basis = Basis(Quaternion(Vector3.UP, _sampled_up.normalized()))
 	var vel := (position - previous) / maxf(dt, 0.001)
 	vel.y = 0.0
+	_walking_velocity = vel
+	up_direction = global_basis.y.normalized()
 	var distant := camera_position != Vector3.INF and camera_position.distance_squared_to(global_position) > 130.0 * 130.0
 	rig.visible = not distant
 	if distant:
@@ -138,8 +176,22 @@ func update_citizen(dt: float, camera_position: Vector3) -> void:
 	if moving:
 		var heading := atan2(-vel.x, -vel.z)
 		rig.set_yaw(lerp_angle(rig.yaw_node.rotation.y, heading, minf(dt * 8.0, 1.0)))
+	elif not data.get("_job", {}).is_empty():
+		var job: Dictionary = data._job
+		var payload: Dictionary = job.get("payload", {})
+		var target: Array = data.get("destination", data.position)
+		if payload.has("plot"):
+			var plot: Dictionary = _simulation.state.plots.get(payload.plot, {})
+			target = plot.get("position", target)
+		elif _simulation.state.locations.has(str(data.get("target", ""))):
+			target = _simulation.state.locations[data.target].position
+		var facing := Vector2(float(target[0])-position.x, float(target[1])-position.z)
+		if facing.length_squared() > 0.04:
+			rig.set_yaw(lerp_angle(rig.yaw_node.rotation.y, atan2(-facing.x, -facing.y), minf(dt*5.0,1.0)))
 	var carried: Dictionary = data.get("carrying", {})
 	_cargo.visible = not carried.is_empty()
+	for foot: MeshInstance3D in [rig.foot_l,rig.foot_r]:
+		foot.position = Vector3(0,-MonkeyRig.LEG_B,-0.035)
 	rig.update_motion(dt, MonkeyRig.Anim.RUN if moving else MonkeyRig.Anim.IDLE,
 		vel, true, Vector3.ZERO)
 	_apply_work_pose(dt, data, moving)
@@ -151,6 +203,40 @@ func update_citizen(dt: float, camera_position: Vector3) -> void:
 		_name_label.text = "%s · %s" % [str(data.get("name", citizen_id)),
 			_job.replace("_", " ").capitalize()]
 		_name_label.modulate = Color(1.0, 0.83, 0.45) if not str(data.get("blocker", "")).is_empty() else Color(0.83, 0.96, 0.84)
+
+
+## Physics queries can expose the previous transform of another kinematic body
+## until the tick flushes. Also sweep against this tick's presented positions,
+## then let the real capsule handle walls/player/terrain. This never writes the
+## authoritative model and only checks neighboring people in the same town.
+func _separated_motion(motion: Vector3, dt: float) -> Vector3:
+	_neighbor_clock -= dt
+	if _neighbor_clock <= 0.0:
+		_neighbor_clock = 0.5
+		_neighbors.clear()
+		for other in get_tree().get_nodes_in_group("frontier_pedestrian_bodies"):
+			if other != self and other._host == _host: _neighbors.append(other)
+	if motion.length_squared()<0.0000001: return motion
+	if _presentation_clear(motion): return motion
+	var up := global_basis.y.normalized()
+	for angle in [0.52,-0.52,1.05,-1.05,1.57,-1.57]:
+		var alternative := motion.rotated(up,angle)
+		if _presentation_clear(alternative): return alternative
+	return Vector3.ZERO
+
+
+func _presentation_clear(motion: Vector3) -> bool:
+	var x := global_basis.x.normalized()
+	var z := global_basis.z.normalized()
+	var up := global_basis.y.normalized()
+	var step := Vector2(motion.dot(x),motion.dot(z))
+	for other in _neighbors:
+		if not is_instance_valid(other) or other._body_shape.disabled: continue
+		var delta := other.global_position-global_position
+		if delta.length_squared()>9.0 or absf(delta.dot(up))>0.7: continue
+		var point := Vector2(delta.dot(x),delta.dot(z))
+		if not FrontierSim._clear_person_segment(Vector2.ZERO,step,point,BODY_RADIUS*2.0+0.015): return false
+	return true
 
 
 func set_interaction_focus(focused: bool) -> void:
@@ -200,6 +286,7 @@ func _build_workwear() -> void:
 func _bind_vehicle() -> void:
 	var traffic: Node = _host.get_meta("frontier_traffic") if _host.has_meta("frontier_traffic") else null
 	var vehicle: Vehicle = traffic.vehicle_for(citizen_id) if is_instance_valid(traffic) else null
+	var was_seated := is_instance_valid(_vehicle)
 	if vehicle == _vehicle:
 		return
 	_vehicle = vehicle
@@ -207,6 +294,9 @@ func _bind_vehicle() -> void:
 		_fuel_label = _vehicle.get("cargo_label")
 	else:
 		_fuel_label = null
+		# Authority chooses a clear capsule-sized doorway before disembarking.
+		# Initialize there once, never sweep an enabled body out of a chassis.
+		if was_seated: _initialized = false
 		if rig != null:
 			rig.reset_pose_state()
 			_name_label.position.y = rig.standing_height + 0.32
@@ -215,6 +305,12 @@ func _bind_vehicle() -> void:
 func _update_driver(dt: float, camera_position: Vector3, data: Dictionary) -> void:
 	_fuel_label = _vehicle.get("cargo_label")
 	# The rigid body owns its pose. Citizens never rotate or move the vehicle.
+	_pose_kind = "driving"
+	_work_active = false
+	_plant_bend = 0.0
+	_work_tool.visible = false
+	if _watering_can: _watering_can.visible = false
+	if _inspection_board: _inspection_board.visible = false
 	global_position = _vehicle.get_global_transform_interpolated().origin
 	_initialized = true
 	var distant := camera_position != Vector3.INF and camera_position.distance_squared_to(global_position) > 130.0 * 130.0
@@ -256,6 +352,18 @@ func _build_tool() -> void:
 		_part(_work_tool,"box",Vector3(-0.043,-0.24,0),Vector3(0.035,0.075,0.035),steel)
 		_part(_work_tool,"box",Vector3(0.043,-0.24,0),Vector3(0.035,0.075,0.035),steel)
 
+	_watering_can = Node3D.new()
+	rig.paw_r.add_child(_watering_can)
+	_part(_watering_can,"cylinder",Vector3(0,-0.15,0),Vector3(0.2,0.22,0.2),Color(0.3,0.54,0.61))
+	_part(_watering_can,"box",Vector3(0,-0.08,-0.15),Vector3(0.045,0.06,0.3),Color(0.4,0.65,0.68))
+	_part(_watering_can,"box",Vector3(0.12,-0.07,0),Vector3(0.04,0.17,0.17),steel)
+	_watering_can.visible = false
+	_inspection_board = Node3D.new()
+	rig.paw_l.add_child(_inspection_board)
+	_part(_inspection_board,"box",Vector3(0,-0.08,0),Vector3(0.2,0.025,0.29),wood)
+	_part(_inspection_board,"box",Vector3(0,-0.06,0),Vector3(0.17,0.006,0.24),Color(0.88,0.87,0.77))
+	_inspection_board.visible = false
+
 
 func _apply_work_pose(dt: float, data: Dictionary, moving: bool) -> void:
 	var job: Dictionary = data.get("_job",{})
@@ -264,9 +372,15 @@ func _apply_work_pose(dt: float, data: Dictionary, moving: bool) -> void:
 	# while blocked used to repeatedly ADD torso pitch after the rig's blend,
 	# accumulating a backwards lean. Work now requires actual active task state;
 	# every pose writes an absolute bounded joint angle.
-	_work_active = not moving and not job.is_empty() and str(data.get("activity","")) == str(job.get("label","")) and float(data.get("work_remaining",0.0))>0.0 and op not in ["rest","eat","leisure"]
-	_work_tool.visible = _work_active and op not in ["load_move","load_trade","unload","inspect"]
+	var sample: Array = data.get("position", [position.x,position.z])
+	var at_workplace := Vector2(position.x,position.z).distance_to(Vector2(float(sample[0]),float(sample[1]))) < 0.45
+	_work_active = at_workplace and not moving and not job.is_empty() and str(data.get("activity","")) == str(job.get("label","")) and float(data.get("work_remaining",0.0))>0.0 and op not in ["rest","eat","leisure"]
+	_pose_kind = "walking" if moving else op if _work_active else "idle"
+	_work_tool.visible = _work_active and op not in ["load_move","load_trade","unload","inspect","manage","water"]
+	_watering_can.visible = _work_active and op == "water"
+	_inspection_board.visible = _work_active and op in ["inspect","manage"]
 	if moving and not _cargo.visible:
+		_plant_bend = 0.0
 		return
 	var blend := 1.0-exp(-14.0*dt)
 	var torso := Vector3(0.04+sin(_time*1.6)*0.008,0,0)
@@ -313,6 +427,22 @@ func _apply_work_pose(dt: float, data: Dictionary, moving: bool) -> void:
 			_:
 				right=Vector3(-0.65,stroke*0.10,-0.12)
 				elbow_right=-0.45+stroke*0.12
+		# Operation-specific gestures differ even within the same profession.
+		if op == "water":
+			torso.x = 0.22
+			right = Vector3(-0.6,0.0,-0.25-reach*0.18)
+			elbow_right = -0.5
+		elif op in ["inspect","manage"]:
+			torso.x = 0.08
+			left = Vector3(-0.85,0.0,0.2)
+			right = Vector3(-0.7,0.08+stroke*0.08,-0.08)
+			elbow_left = -0.95
+			elbow_right = -0.85
+		elif op == "fish":
+			torso.x = 0.12
+			right = Vector3(-0.7-reach*0.35,0.0,-0.12)
+			left = Vector3(-0.62,0.0,0.12)
+			elbow_right = -0.55
 	if _work_active or _cargo.visible:
 		# This rig faces local -Z: positive arm X reaches forward, while a
 		# forward-leaning torso uses negative X. Keep tools in front of the
@@ -322,6 +452,26 @@ func _apply_work_pose(dt: float, data: Dictionary, moving: bool) -> void:
 		right.x=-right.x
 		elbow_left=-elbow_left
 		elbow_right=-elbow_right
+	var gardening := _work_active and op in ["plant","harvest","fertilize","treat_crop","clear_crop"]
+	_plant_bend = lerpf(_plant_bend, 0.20 if gardening else 0.0, blend)
+	if _plant_bend > 0.0001:
+		# Fixed stance targets in the surface-aligned yaw frame avoid feeding
+		# last frame's bent joints back into the next frame's ankle targets.
+		var ankle_y := MonkeyRig.HIP_Y-MonkeyRig.LEG_A-MonkeyRig.LEG_B
+		var left_ankle := rig.yaw_node.to_global(Vector3(-0.115,ankle_y,0.0))
+		var right_ankle := rig.yaw_node.to_global(Vector3(0.115,ankle_y,0.0))
+		rig.hips.position.y = MonkeyRig.HIP_Y - _plant_bend
+		var forward := -rig.yaw_node.global_basis.z.normalized()
+		rig._ik_limb(rig.hip_l,rig.kn_l,MonkeyRig.LEG_A,MonkeyRig.LEG_B,left_ankle,forward)
+		rig._ik_limb(rig.hip_r,rig.kn_r,MonkeyRig.LEG_A,MonkeyRig.LEG_B,right_ankle,forward)
+		for foot: MeshInstance3D in [rig.foot_l,rig.foot_r]:
+			foot.global_basis = rig.yaw_node.global_basis * Basis.from_scale(Vector3(0.9,0.55,1.35))
+		# Foot centers are slightly ahead of their ankle joints. Keep that
+		# offset parallel to the ground even while the lower leg bends.
+		rig.foot_l.global_position = left_ankle + forward*0.035*rig.stature_frame.scale.x
+		rig.foot_r.global_position = right_ankle + forward*0.035*rig.stature_frame.scale.x
+		if gardening:
+			torso.x = -0.36 - sin(_time*2.3)*0.06
 	# Calm, planted waiting replaces generic rapid scratching while blocked.
 	# Keep locomotion/foot placement from MonkeyRig; only upper joints change.
 	rig.torso_p.rotation=rig.torso_p.rotation.lerp(torso,blend)

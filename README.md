@@ -110,12 +110,21 @@ textures for readable globe and voyage views.
 
 ## What's new in 0.6 — SHARED SOCIETIES
 
-Current source version: **0.6.2**, using **multiplayer protocol 13**.
+Current source version: **0.7.1**, using **multiplayer protocol 14**.
 Clients and server must use the same game version and multiplayer protocol.
-The 0.6.2 update gives the player a standing height of 5 feet 10 inches, with
-adult NPCs ranging from 5 feet 7 inches to 6 feet 2 inches. E beside Nana opens
-their conversation and trading desk; compact labels keep nearby text readable.
-The previous town-pavement and public-network fixes are included.
+The 0.7.1 update separates interactive network replies from large town updates,
+removes duplicate snapshots and keeps slow-link queues bounded. In-game menus
+keep useful panel space with smaller controls and padding. Town NPCs have
+physical body collisions and job-specific work poses; players stand exactly
+6 feet tall, with adult NPCs ranging from 5 feet 7 inches to 6 feet 2 inches.
+Ping beside FPS and connection details in Pause help diagnose delays.
+
+Every player starts with a visible articulated field backpack. Press **I** to
+inspect finite town goods or personal expedition pockets. At a merchant, press
+**E** to see your backpack beside the shop stock, select an opaque item tile,
+choose a quantity, and **Buy** or **Sell**. Animated focus, selection and panel
+transitions use the game's charcoal and amber theme. Earth and Moon town supplies
+retain their existing cargo-terminal shipping rules; saved stock is preserved.
 
 Roots & Rockets is now shared online: six claimable towns, private player bags,
 one wallet across societies, finite markets, funded requests and persistent
@@ -213,13 +222,13 @@ public economy. Read the [shared society guide](docs/SHARED_SOCIETIES.md).
   coherent without double-rendering the third-person shell.
   Oxygen lasts 12 minutes of vacuum exposure and E at the Moon rocket refills
   it. I opens the compact inventory; it has no slots without a backpack, while a
-  normal pack has 12 and a space pack has 18. One normal pack is guaranteed in
-  the northwest origin supply hut and more can appear in wilderness huts. The
+  normal pack has 12 and a space pack has 18. Every game starts with an equipped
+  field backpack; supply huts can also provide gear. The
   Crater & Curd villager sells stackable Moon Cheese for three authoritative
   bananas each, only when it fits in the pack.
 - **Planet and expedition state are multiplayer-authoritative.** The server owns
   the four-seat manifest, exact voyage clock, realm changes, banana spending,
-  and late-join state under **network protocol 13**. Local and remote monkeys also
+  and late-join state under **network protocol 14**. Local and remote monkeys also
   reset every authored joint and transient look, recoil, hand, and vehicle solver
   after vehicle exit, defeat, and revive, so a seated or death pose cannot leak
   into ordinary movement on another peer. Admins can use `/moon [player]` or
@@ -277,7 +286,7 @@ while solo play is paused, while you are away from the Moon, or while the game i
 closed. Test/capture modes use fresh state without reading or writing your colony.
 Network colonies are personal, host-owned session ledgers: harvests, spending,
 range checks, and one-time rewards are validated by the host. This source build
-uses network protocol 13; the public server and every client must run the same
+uses network protocol 14; the public server and every client must run the same
 game version and protocol.
 
 ```bash
@@ -535,8 +544,8 @@ Bananas float along swing arcs; collect them for score (synced).
 
 For download and connection instructions, see
 [Playing with classmates](docs/PLAY_WITH_CLASSMATES.md). Every player and the
-public server must run **0.6.2 / protocol 13**. On bootstrap 3 (0.4.10 or newer),
-apply the signed in-game update and restart, or install the full 0.6.2 package.
+public server must run **0.7.1 / protocol 14**. Install the full 0.7.1 package, including when upgrading from 0.7.0,
+to activate the changed multiplayer channel configuration.
 Older installations need the full installer. Close TROOP before replacing an
 installation; on a Mac, launch the replacement in Applications.
 
@@ -557,9 +566,9 @@ stutter on quick repeated presses. Voice volume and the PTT binding are configur
 
 ## Player installers & updates
 
-Download [TROOP 0.6.2](https://github.com/charlesjsantosgit/troop/releases/tag/v0.6.2):
-[Windows Setup](https://github.com/charlesjsantosgit/troop/releases/download/v0.6.2/TROOP-0.6.2-Windows-x86_64-Setup.exe)
-or [macOS universal DMG](https://github.com/charlesjsantosgit/troop/releases/download/v0.6.2/TROOP-0.6.2-macOS-universal.dmg).
+Download [TROOP 0.7.1](https://github.com/charlesjsantosgit/troop/releases/tag/v0.7.1):
+[Windows Setup](https://github.com/charlesjsantosgit/troop/releases/download/v0.7.1/TROOP-0.7.1-Windows-x86_64-Setup.exe)
+or [macOS universal DMG](https://github.com/charlesjsantosgit/troop/releases/download/v0.7.1/TROOP-0.7.1-macOS-universal.dmg).
 The [latest release page](https://github.com/charlesjsantosgit/troop/releases/latest)
 always lists the current packages. The content PCK is used by the updater.
 
@@ -605,9 +614,9 @@ resource pack, are re-verified on every boot, and take effect on the next
 launch. Updates that change Godot itself, the updater bootstrap, native code, or
 non-version project settings instead offer the full Windows installer or macOS disk image.
 The game remains fully playable when GitHub is offline.
-Version 0.6.2 retains bootstrap **3**, introduced by the 0.4.10 full installer.
-Installations older than 0.4.10 must replace the app to obtain that bootstrap;
-compatible content updates on bootstrap 3 can apply automatically.
+Version 0.7.1 retains bootstrap **3** and requires the full installer for its
+new protocol-14 channel configuration. Future compatible content updates on
+bootstrap 3 can apply automatically.
 
 <details>
 <summary><b>🍃 Day, night, seasons, and weather</b></summary>

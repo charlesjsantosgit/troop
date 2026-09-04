@@ -13,6 +13,7 @@ const ROCKET_REBOARD_COOLDOWN_SECONDS := 0.45
 const ROCKET_DISEMBARK_REQUEST_TIMEOUT_SECONDS := 2.0
 const INVENTORY_KEY_NAME := "I"
 const LAUNCH_KEY_NAME := "L"
+const FieldPack := preload("res://scripts/field_backpack.gd")
 const PENDING_CHEESE_ITEM := &"_pending_moon_cheese"
 
 var main: Node
@@ -365,7 +366,7 @@ func _process(delta: float) -> void:
 	_astronomy_credit.visible = (Net.player_realm() == Net.PlayerRealm.TRANSIT \
 		 or (Net.player_realm() == Net.PlayerRealm.EARTH and world._space_sky_weight > 0.01) \
 		 or (Net.player_realm() == Net.PlayerRealm.MOON \
-		 and not is_instance_valid(world.get("frontier")))) and not is_ui_open()
+		 and not is_instance_valid(world.get("frontier")))) and not is_ui_open() and not _other_modal_open()
 	_local_reboard_cooldown_remaining = maxf(
 		_local_reboard_cooldown_remaining - delta, 0.0)
 	_local_disembark_request_remaining = maxf(
@@ -967,58 +968,26 @@ func _ensure_suit_for_peer(peer_id: int) -> SpaceSuitSystem:
 		local_suit = suit
 		local_inventory = inventory
 		inventory_ui.bind_inventory(local_inventory)
-		if _normal_backpack_visual and is_instance_valid(_normal_backpack_visual):
-			_normal_backpack_visual.queue_free()
-		_normal_backpack_visual = null
+		if is_instance_valid(_normal_backpack_visual):
+			_normal_backpack_visual.visible = false
 		_wire_local_suit()
 	return suit
 
 
 func _build_normal_backpack_visual() -> void:
-	if _normal_backpack_visual and is_instance_valid(_normal_backpack_visual) \
-			or not world or not world.local_player:
-		return
-	var pack := Node3D.new()
-	pack.name = "NormalBackpack"
-	world.local_player.add_child(pack)
-	_normal_backpack_visual = pack
-	var canvas := StandardMaterial3D.new()
-	canvas.albedo_color = Color(0.34, 0.20, 0.095)
-	canvas.roughness = 0.94
-	var leather := StandardMaterial3D.new()
-	leather.albedo_color = Color(0.16, 0.075, 0.035)
-	leather.roughness = 0.88
-	_add_backpack_box(pack, "CanvasPack", Vector3(0.50, 0.58, 0.24),
-		Vector3(0.0, 0.72, 0.25), canvas)
-	_add_backpack_box(pack, "Flap", Vector3(0.48, 0.19, 0.05),
-		Vector3(0.0, 0.91, 0.39), leather)
-	for side in [-1.0, 1.0]:
-		_add_backpack_box(pack, "ShoulderStrap", Vector3(0.075, 0.58, 0.055),
-			Vector3(side * 0.19, 0.73, 0.095), leather)
-	var roll := CylinderMesh.new()
-	roll.top_radius = 0.105
-	roll.bottom_radius = 0.105
-	roll.height = 0.46
-	roll.radial_segments = 12
-	var bedroll := MeshInstance3D.new()
-	bedroll.name = "Bedroll"
-	bedroll.mesh = roll
-	bedroll.material_override = canvas
-	bedroll.position = Vector3(0.0, 0.39, 0.29)
-	bedroll.rotation.z = PI * 0.5
-	pack.add_child(bedroll)
+	if world and world.local_player:
+		_normal_backpack_visual = FieldPack.fit_to(world.local_player, true)
 
 
-static func _add_backpack_box(parent: Node3D, part_name: String,
-		size: Vector3, position: Vector3, material: Material) -> void:
-	var mesh := BoxMesh.new()
-	mesh.size = size
-	var instance := MeshInstance3D.new()
-	instance.name = part_name
-	instance.mesh = mesh
-	instance.position = position
-	instance.material_override = material
-	parent.add_child(instance)
+func _sync_field_backpacks() -> void:
+	# Field gear is standard equipment in every game. The space suit replaces
+	# its presentation on the Moon while retaining the personal pocket items.
+	if local_inventory.backpack_kind == LunarInventory.Backpack.NONE:
+		local_inventory.equip_backpack(LunarInventory.Backpack.NORMAL)
+	_build_normal_backpack_visual()
+	if world:
+		for actor: Node3D in world.puppets.values():
+			FieldPack.fit_to(actor, false)
 
 
 func _sync_realm_suits() -> void:
@@ -1029,6 +998,7 @@ func _sync_realm_suits() -> void:
 		var peer_id := int(peer_value)
 		if Net.player_realm(peer_id) == Net.PlayerRealm.MOON:
 			_ensure_suit_for_peer(peer_id)
+	_sync_field_backpacks()
 
 
 func _wire_local_suit() -> void:

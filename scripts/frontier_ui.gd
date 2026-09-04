@@ -4,8 +4,8 @@ extends Control
 ## The pocket journal provides information and waypoints, never remote orders.
 
 const MenuTheme = preload("res://scripts/menu_theme.gd")
+const InventoryTile = preload("res://scripts/inventory_tile.gd")
 const PAGES := ["Journal", "Tutorial", "Places", "Contracts", "Sky"]
-const MARKET_PAGE_SIZE := 10
 const INK := MenuTheme.TEXT
 const MUTED := MenuTheme.MUTED
 const GOLD := MenuTheme.ACCENT
@@ -29,6 +29,7 @@ var _main_stack: VBoxContainer
 var _workspace: HBoxContainer
 var _context_line: Label
 var _live_labels: Array = []
+var _live_trade_buttons: Array = []
 var _refresh := 0.0
 var _quantity := 5
 var _selected_crop: Dictionary = {}
@@ -36,9 +37,25 @@ var _freight_item := "tomato"
 var _structure := ""
 var _market_search := ""
 var _market_category := "All"
-var _market_page := 0
 var _market_id := ""
 var _details_open: Dictionary = {}
+var _merchant_workspace: VBoxContainer
+var _merchant_mode := false
+var _trade_selected_item := ""
+var _trade_selected_side := "market"
+var _trade_tiles: Dictionary = {}
+var _trade_grids: Array[GridContainer] = []
+var _trade_scrolls: Array[ScrollContainer] = []
+var _trade_footer: PanelContainer
+var _trade_title: Label
+var _trade_detail: Label
+var _trade_buy: Button
+var _trade_sell: Button
+var _trade_capacity: Label
+var _trade_search: LineEdit
+var _trade_category: OptionButton
+var _panel_motion: Tween
+var _closing := false
 
 
 func configure(owner_controller: Node) -> void:
@@ -46,7 +63,7 @@ func configure(owner_controller: Node) -> void:
 
 
 func _ready() -> void:
-	theme = MenuTheme.build()
+	theme = MenuTheme.build(true)
 	set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	visible = false
 	mouse_filter = Control.MOUSE_FILTER_STOP
@@ -59,16 +76,16 @@ func _ready() -> void:
 	add_child(_panel)
 	var margin := MarginContainer.new()
 	for side in ["left", "right", "top", "bottom"]:
-		margin.add_theme_constant_override("margin_" + side, 22)
+		margin.add_theme_constant_override("margin_" + side, 0)
 	_panel.add_child(margin)
 	_main_stack = VBoxContainer.new()
-	_main_stack.add_theme_constant_override("separation", 12)
+	_main_stack.add_theme_constant_override("separation", 8)
 	margin.add_child(_main_stack)
 	var top := _row(_main_stack)
 	_heading = _line(top, "TRAVEL JOURNAL", 26, GOLD)
 	_heading.custom_minimum_size.x = 300
 	_journal_button = _button(top, "My journal", func(): open({}))
-	_button(top, "Close · B / Esc", close)
+	_button(top, "Close · B / Esc", _dismiss)
 	_balance = _line(_main_stack, "", 15, GREEN)
 	_context_line = _line(_main_stack, "", 14, MUTED)
 	_journal_nav = _row(_main_stack)
@@ -78,19 +95,26 @@ func _ready() -> void:
 	_workspace = HBoxContainer.new()
 	_workspace.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	_workspace.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	_workspace.add_theme_constant_override("separation", 16)
+	_workspace.add_theme_constant_override("separation", 12)
 	_main_stack.add_child(_workspace)
 	_scroll = ScrollContainer.new()
 	_scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+	_scroll.follow_focus = true
 	_scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	_scroll.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	_workspace.add_child(_scroll)
 	_body = VBoxContainer.new()
 	_body.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	_body.add_theme_constant_override("separation", 12)
+	_body.add_theme_constant_override("separation", 8)
 	_scroll.add_child(_body)
+	_merchant_workspace = VBoxContainer.new()
+	_merchant_workspace.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_merchant_workspace.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	_merchant_workspace.add_theme_constant_override("separation", 8)
+	_merchant_workspace.visible = false
+	_workspace.add_child(_merchant_workspace)
 	_notice = _line(_main_stack, "", 15, GOLD)
-	_notice.custom_minimum_size.y = 38
+	_notice.custom_minimum_size.y = 22
 	get_viewport().size_changed.connect(_resize)
 	_resize()
 
@@ -99,8 +123,8 @@ func _resize() -> void:
 	if _panel == null:
 		return
 	var window := get_viewport_rect().size
-	var desired := Vector2(760,600) if context.is_empty() else Vector2(620,560)
-	var margin := Vector2(80,80) if window.x>=580 and window.y>=500 else Vector2(16,16)
+	var desired := Vector2(920,640) if _merchant_mode else Vector2(760,600) if context.is_empty() else Vector2(620,560)
+	var margin := Vector2(40,40) if window.x>=580 and window.y>=500 else Vector2(16,16)
 	var available := window-margin*2.0
 	var dimensions := Vector2(minf(desired.x,available.x),minf(desired.y,available.y))
 	var max_size := Vector2(maxf(160,window.x-16),maxf(160,window.y-16))
@@ -112,6 +136,9 @@ func _resize() -> void:
 	# the cap once more afterward so the ScrollContainer absorbs that height.
 	_panel.set_deferred("size",dimensions)
 	_set_navigation_layout(_sidebar_navigation(dimensions.x))
+	for grid in _trade_grids:
+		if is_instance_valid(grid):
+			grid.columns = 3 if dimensions.x >= 800 else 2
 
 
 static func _sidebar_navigation(panel_width: float) -> bool:
@@ -145,18 +172,53 @@ func open(subject: Variant = {}) -> void:
 			and controller.world.local_player.cam:
 		controller.world.local_player.cam.set_aiming(false)
 	_rebuild()
+	_animate_open.call_deferred()
 
 
 func close() -> void:
+	if _panel_motion and _panel_motion.is_valid():
+		_panel_motion.kill()
+	_closing = false
+	_panel.scale = Vector2.ONE
 	visible = false
 	if DisplayServer.get_name() != "headless":
 		Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
 
 
+func _animate_open() -> void:
+	_closing = false
+	if _panel_motion and _panel_motion.is_valid():
+		_panel_motion.kill()
+	_resize()
+	if DisplayServer.get_name() == "headless":
+		return
+	var target := _panel.position
+	_panel.pivot_offset = _panel.size * 0.5
+	_panel.scale = Vector2.ONE * 0.98
+	_panel.position = target + Vector2(0, 10)
+	_panel_motion = create_tween().set_parallel(true).set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_OUT)
+	_panel_motion.tween_property(_panel, "scale", Vector2.ONE, 0.18)
+	_panel_motion.tween_property(_panel, "position", target, 0.18)
+
+
+func _dismiss() -> void:
+	if _closing:
+		return
+	if DisplayServer.get_name() == "headless":
+		close()
+		return
+	_closing = true
+	if _panel_motion and _panel_motion.is_valid():
+		_panel_motion.kill()
+	_panel_motion = create_tween().set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_IN)
+	_panel_motion.tween_property(_panel, "scale", Vector2.ONE * 0.985, 0.09)
+	_panel_motion.tween_callback(close)
+
+
 func _input(event: InputEvent) -> void:
 	if visible and event is InputEventKey and event.pressed and not event.echo \
 			and event.physical_keycode in [KEY_ESCAPE, KEY_B]:
-		close()
+		_dismiss()
 		get_viewport().set_input_as_handled()
 
 
@@ -167,6 +229,13 @@ func _process(delta: float) -> void:
 	if _refresh > 0:
 		return
 	_refresh = 0.5
+	refresh_from_state()
+
+
+## Apply received authority state immediately; the periodic refresh is only a fallback.
+func refresh_from_state() -> void:
+	if not visible or _body == null:
+		return
 	var town_id := str(_town().get("id", ""))
 	if not context.is_empty() and not str(context.get("town_id", "")).is_empty() \
 			and not town_id.is_empty() and str(context.town_id) != town_id:
@@ -219,6 +288,14 @@ func _refresh_live() -> void:
 	else:
 		_context_line.text = "%s  ·  %s" % [role, permission]
 	_notice.text = str(controller.last_message) if not str(controller.last_message).is_empty() else "Actions and prices update from this town in real time."
+	if controller.has_method("action_pending") and bool(controller.action_pending()):
+		var elapsed: int = int(controller.action_elapsed_ms()) if controller.has_method("action_elapsed_ms") else 0
+		_notice.text = "Sending request…" if elapsed < 1000 else "Waiting for server · %.1f s" % (float(elapsed) / 1000.0)
+	if _merchant_mode:
+		_refresh_merchant()
+	for entry: Dictionary in _live_trade_buttons:
+		if is_instance_valid(entry.button):
+			_refresh_trade_button(entry.button, str(entry.market), str(entry.item), bool(entry.buying))
 	for item: Dictionary in _live_labels:
 		if is_instance_valid(item.label):
 			item.label.text = str(item.read.call())
@@ -234,6 +311,14 @@ func _structure_key() -> String:
 		result.append(_inventory(str(context.get("id", ""))).keys())
 	for quest: Dictionary in _state().get("quests", {}).values():
 		result.append([quest.get("id", ""), quest.get("status", "")])
+	if _merchant_mode:
+		for location: String in [_market_id, _pack()]:
+			var nonempty: Array[String] = []
+			for item: String in _inventory(location):
+				if int(_inventory(location)[item]) > 0:
+					nonempty.append(item)
+			nonempty.sort()
+			result.append(nonempty)
 	if page=="Tutorial" and "tutorial" in controller and is_instance_valid(controller.tutorial):
 		result.append(controller.tutorial.summary())
 	return JSON.stringify(result)
@@ -247,10 +332,22 @@ func select_page(next_page: String) -> void:
 
 func _rebuild(preserve_scroll := false) -> void:
 	var old_scroll := _scroll.scroll_vertical if preserve_scroll else 0
+	var focused := _focus_key() if preserve_scroll else {}
+	var trade_scrolls: Array[int] = []
+	for scroll in _trade_scrolls:
+		trade_scrolls.append(scroll.scroll_vertical if preserve_scroll else 0)
+	for child in _merchant_workspace.get_children():
+		_merchant_workspace.remove_child(child)
+		child.queue_free()
+	_merchant_mode = false
+	_trade_tiles.clear()
+	_trade_grids.clear()
+	_trade_scrolls.clear()
 	for child in _body.get_children():
 		_body.remove_child(child)
 		child.queue_free()
 	_live_labels.clear()
+	_live_trade_buttons.clear()
 	_journal_nav.visible = context.is_empty()
 	_journal_button.visible = context.is_empty()
 	for key in _nav:
@@ -272,10 +369,53 @@ func _rebuild(preserve_scroll := false) -> void:
 			"board", "quest_board", "quest": _board()
 			"market", "shop": _market(id)
 			_: _facility(id)
+	_scroll.visible = not _merchant_mode
+	_merchant_workspace.visible = _merchant_mode
+	_context_line.visible = not _merchant_mode
+	for index in range(mini(trade_scrolls.size(), _trade_scrolls.size())):
+		_trade_scrolls[index].set_deferred("scroll_vertical", trade_scrolls[index])
 	_structure = _structure_key()
 	_refresh_live()
 	_scroll.set_deferred("scroll_vertical", old_scroll)
+	if not focused.is_empty():
+		_restore_focus.call_deferred(focused, old_scroll)
 	_resize.call_deferred()
+
+
+func _focus_key() -> Dictionary:
+	var focused := get_viewport().gui_get_focus_owner()
+	if focused == null or (not _body.is_ancestor_of(focused) and not _merchant_workspace.is_ancestor_of(focused)):
+		return {}
+	if focused.has_meta("merchant_side"):
+		return {"item": focused.item_id, "side": focused.get_meta("merchant_side")}
+	if focused is Button:
+		return {"button": focused.text, "action": focused.get_meta("frontier_action", ""),
+			"payload": focused.get_meta("frontier_payload", {})}
+	if focused is LineEdit:
+		return {"input": focused.placeholder_text, "quantity": focused.get_parent() is SpinBox}
+	return {}
+
+
+func _restore_focus(key: Dictionary, old_scroll: int) -> void:
+	if not visible:
+		return
+	var pending: Array[Node] = [_body, _merchant_workspace]
+	while not pending.is_empty():
+		var node: Node = pending.pop_back()
+		var matches := false
+		if key.has("item") and node.has_meta("merchant_side"):
+			matches = node.get_meta("inventory_item", "") == key.item and node.get_meta("merchant_side") == key.side
+		elif node is Button and key.has("button"):
+			matches = (not str(key.action).is_empty() or node.text == key.button) \
+				and node.get_meta("frontier_action", "") == key.action \
+				and node.get_meta("frontier_payload", {}) == key.payload
+		elif node is LineEdit and key.has("input"):
+			matches = node.placeholder_text == key.input and (node.get_parent() is SpinBox) == bool(key.quantity)
+		if matches:
+			node.grab_focus()
+			_scroll.set_deferred("scroll_vertical", old_scroll)
+			return
+		pending.append_array(node.get_children())
 
 
 func _journal() -> void:
@@ -377,27 +517,28 @@ func _citizen(id: String) -> void:
 		_line(_body, "Your neighbor has moved on. Close this conversation and meet them again.")
 		return
 	_heading.text = str(citizen.get("name", id))
-	_line(_body, str(citizen.get("job", "citizen")).replace("_", " ").capitalize()+" · "+str(citizen.get("activity", "Around town")), 17, GREEN)
-	var card := _card(_body, true)
-	_live(card, func():
-		var person: Dictionary = _state().get("citizens", {}).get(id, {})
-		var needs: Dictionary = person.get("needs", {})
-		return "Right now: %s%s\nHunger %d%%" % [person.get("activity", "Resting"),
-			"\nI need help: " + str(person.blocker) if not str(person.get("blocker", "")).is_empty() else "",
-			roundi(float(needs.get("hunger", 0)) * 100)])
-	if _has_quest(id):
-		_section("A request for you", "Accept it here; deliver at the named workplace.")
-		_contracts(id, true)
 	var trade := str(citizen.get("trade_location", ""))
 	if trade.is_empty() and not _state().has("permissions"):
 		trade = ("moon_market" if controller.current_planet() == "moon" else "earth_market") if citizen.get("job") == "merchant" else "refinery" if citizen.get("job") == "refinery_operator" else ""
+	var about := bool(_details_open.get("about:" + id, false))
+	if not trade.is_empty() and _near(trade) and not about:
+		_market(trade, false, true)
+		return
+	_live(_body, func():
+		var person: Dictionary = _state().get("citizens", {}).get(id, {})
+		return "%s · %s%s" % [str(person.get("job", "citizen")).replace("_", " ").capitalize(),
+			person.get("activity", "Resting"),
+			"\nI need help: " + str(person.blocker) if not str(person.get("blocker", "")).is_empty() else ""])
 	if not trade.is_empty():
-		_section("My trading desk", "Prices and stock come from this physical desk.")
 		if _near(trade):
-			_market(trade, false, true)
+			_button(_body, "Back to trading", func(): _details_open["about:" + id] = false; _rebuild(), true)
 		else:
+			_section("My trading desk")
 			_line(_body, "Meet me at the trading desk to exchange goods.", 15, MUTED)
 			_button(_body, "Locate trading desk", func(): controller.locate(trade))
+	if _has_quest(id):
+		_section("A request for you", "Accept it here; deliver at the named workplace.")
+		_contracts(id, true)
 	# Workplaces have machinery, fuel service and maintenance beyond a person's
 	# trading inventory. Keep these reachable when the resident shares its desk.
 	var person_position: Vector3 = controller._interaction_position(id)
@@ -410,7 +551,7 @@ func _citizen(id: String) -> void:
 			continue
 		if person_position.distance_to(workplace.position) <= 2.0 and _near(id) and _near(str(workplace.id)):
 			_button(_body, "Use " + str(workplace.get("label", "workplace")),
-				func(): controller.open_workplace(str(workplace.id)), true)
+				func(): _open_workplace_details(str(workplace.id)), true)
 	if bool(citizen.get("can_manage", _manage())):
 		_section("Work together", "Choose a real job. Pay is charged after completed work.")
 		_line(_body, "Current wage: %d credits per completed task" % int(citizen.get("wage", 0)), 14, MUTED)
@@ -435,8 +576,14 @@ func _citizen(id: String) -> void:
 			var person: Dictionary = _state().get("citizens", {}).get(id, {})
 			var needs: Dictionary = person.get("needs", {})
 			var observations: Array = person.get("observations", [])
-			return "Skill %.1f · %d jobs completed · Fatigue %d%%%s" % [float(person.get("skill", 1)), int(person.get("completed", 0)),
-				roundi(float(needs.get("fatigue", 0)) * 100), "\nLast observation: "+str(observations.back().get("fact", "")) if not observations.is_empty() else ""])
+			return "Skill %.1f · %d jobs completed · Hunger %d%% · Fatigue %d%%%s" % [float(person.get("skill", 1)), int(person.get("completed", 0)),
+				roundi(float(needs.get("hunger", 0)) * 100), roundi(float(needs.get("fatigue", 0)) * 100), "\nLast observation: "+str(observations.back().get("fact", "")) if not observations.is_empty() else ""])
+
+
+func _open_workplace_details(id: String) -> void:
+	if controller.open_workplace(id) and id == "refinery":
+		_details_open["about:" + id] = true
+		_rebuild()
 
 
 func _plot(id: String) -> void:
@@ -479,113 +626,240 @@ func _market(id: String, heading := true, compact := false) -> void:
 		_market_id = id
 		_market_search = ""
 		_market_category = "All"
-		_market_page = 0
-	var compact_key := "market:"+id
-	var expanded := not compact or bool(_details_open.get(compact_key, false))
-	_section("Browse goods" if expanded else "Quick trade",
-		"Search or choose a category. Prices respond to local stock and funded demand." if expanded else "The most useful local good is ready here; open the full desk for everything else.")
-	var can_trade := bool(_state().get("permissions", {}).get("trade", true))
-	if not can_trade: _line(_body, "Trading is unavailable for your current role in this town.", 15, MenuTheme.DANGER)
-	var browse := _card(_body)
-	if expanded:
-		var filters := _row(browse)
-		var search := LineEdit.new()
-		search.placeholder_text = "Search goods"
-		search.text = _market_search
-		search.clear_button_enabled = true
-		search.custom_minimum_size = Vector2(250, 42)
-		search.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-		search.text_changed.connect(func(value: String): _market_search = value)
-		search.text_submitted.connect(func(_value: String): _market_page = 0; _rebuild.call_deferred())
-		filters.add_child(search)
-		var category := OptionButton.new()
-		var categories := ["All", "Crops", "Planting", "Food", "Fuel", "Materials"]
-		for label: String in categories: category.add_item(label)
-		category.select(maxi(0, categories.find(_market_category)))
-		category.custom_minimum_size.x = 170
-		category.item_selected.connect(func(index: int):
-			_market_category = categories[index]
-			_market_page = 0
-			_rebuild.call_deferred(true))
-		filters.add_child(category)
-		_button(filters, "Search", func(): _market_search = search.text; _market_page = 0; _rebuild())
-	var quantity_row := _row(browse)
-	_line(quantity_row, "Quantity", 15, MUTED)
-	_quantity_control(quantity_row)
-	_line(quantity_row, "Quotes update before every order.", 14, MUTED)
-	var stock := _inventory(id)
-	var ids: Array = _items().keys()
-	ids.sort()
-	var available: Array[String] = []
-	for item: String in ids:
-		if id == "refinery" and item not in ["crude_oil", "gasoline", "diesel", "jet_fuel", "bitumen", "water", "spare_parts"]:
-			continue
-		if int(stock.get(item, 0)) <= 0 and int(_inventory(_pack()).get(item, 0)) <= 0:
-			continue
-		if expanded and _market_category != "All" and _item_category(item) != _market_category:
-			continue
-		if expanded and not _market_search.strip_edges().is_empty() and not _title(item).to_lower().contains(_market_search.strip_edges().to_lower()):
-			continue
-		available.append(item)
-	if not expanded and available.size()>1:
-		var preferred := "crude_oil" if id=="refinery" else "lettuce" if id=="moon_market" else "banana"
-		var choice := preferred if preferred in available else available[0]
-		available.clear()
-		available.append(choice)
-	var last_page := maxi(0, int(floor(float(maxi(0, available.size()-1)) / float(MARKET_PAGE_SIZE))))
-	_market_page = clampi(_market_page, 0, last_page)
-	_line(_body, "%d good%s · page %d of %d" % [available.size(), "" if available.size() == 1 else "s", _market_page+1, last_page+1] if expanded else "Suggested from live stock", 14, MUTED)
-	var begin := _market_page*MARKET_PAGE_SIZE
-	var finish := mini(available.size(), begin+MARKET_PAGE_SIZE)
-	for index in range(begin, finish):
-		var item: String = available[index]
-		var card := _card(_body)
-		_line(card, _title(item), 18, GOLD)
-		_line(card, _item_category(item).to_upper(), 12, GREEN)
-		_live(card, func(): return "In stock %d · In your cargo %d\nBuy %d: %d cr · Sell %d: %d cr" % [int(_inventory(id).get(item, 0)), int(_inventory(_pack()).get(item, 0)),
-			_quantity, controller.simulation.quote(id, item, _quantity, true), _quantity, controller.simulation.quote(id, item, _quantity, false)])
-		var row := _row(card)
-		var buy_price: int = int(controller.simulation.quote(id, item, _quantity, true))
-		var sell_price: int = int(controller.simulation.quote(id, item, _quantity, false))
-		var buy := _button(row, "Buy", func(): _act("buy", {"market": id, "item": item, "quantity": _quantity}), true)
-		buy.set_meta("frontier_action", "buy")
-		buy.set_meta("frontier_payload", {"market":id, "item":item})
-		buy.disabled = not can_trade or int(stock.get(item, 0)) < _quantity or int(_state().get("accounts", {}).get("player", 0)) < buy_price
-		buy.tooltip_text = "Trading is unavailable for your current role." if not can_trade else "Market stock or your credits are too low." if buy.disabled else "Buy %d for %d credits." % [_quantity, buy_price]
-		var sell := _button(row, "Sell", func(): _act("sell", {"market": id, "item": item, "quantity": _quantity}))
-		sell.set_meta("frontier_action", "sell")
-		sell.set_meta("frontier_payload", {"market":id, "item":item})
-		var market_owner: String = str(_state().get("locations", {}).get(id, {}).get("owner", id))
-		var accounts: Dictionary = _state().get("accounts", {})
-		sell.disabled = not can_trade or int(_inventory(_pack()).get(item, 0)) < _quantity or (accounts.has(market_owner) and int(accounts.get(market_owner, 0)) < sell_price)
-		sell.tooltip_text = "Trading is unavailable for your current role." if not can_trade else "Your cargo or the buyer's funds are too low." if sell.disabled else "Sell %d for %d credits." % [_quantity, sell_price]
-	if available.is_empty():
-		var empty := _card(_body)
-		_line(empty, "No matching goods", 18, GOLD)
-		_line(empty, "Try another category or clear the search.", 15, MUTED)
-		if not _market_search.is_empty() or _market_category != "All":
-			_button(empty, "Clear filters", func():
-				_market_search = ""
-				_market_category = "All"
-				_market_page = 0
-				_rebuild())
-	elif expanded and last_page > 0:
-		var pages := _row(_body)
-		var previous := _button(pages, "Previous page", func(): _market_page -= 1; _rebuild(true))
-		previous.disabled = _market_page == 0
-		_line(pages, "%d / %d" % [_market_page+1, last_page+1], 15, MUTED)
-		var next := _button(pages, "Next page", func(): _market_page += 1; _rebuild(true))
-		next.disabled = _market_page == last_page
-	if compact:
-		_button(_body, "Show quick trade" if expanded else "Browse all goods", func():
-			_details_open[compact_key] = not bool(_details_open.get(compact_key, false))
-			_market_page = 0
-			_rebuild(true))
-	if heading:
+		_trade_selected_item = ""
+		_trade_selected_side = "market"
+	if heading and bool(_details_open.get("about:" + str(context.get("id", id)), false)):
+		_button(_body, "Back to trading", func(): _details_open["about:" + str(context.get("id", id))] = false; _rebuild(), true)
 		_contracts("", true, id)
+		return
+	_merchant_mode = true
+	var toolbar := HBoxContainer.new()
+	_merchant_workspace.add_child(toolbar)
+	_trade_search = LineEdit.new()
+	_trade_search.placeholder_text = "Find an item"
+	_trade_search.text = _market_search
+	_trade_search.clear_button_enabled = true
+	_trade_search.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_trade_search.custom_minimum_size = Vector2(180, 34)
+	_trade_search.text_changed.connect(func(value: String): _market_search = value; _filter_merchant_tiles())
+	toolbar.add_child(_trade_search)
+	_trade_category = OptionButton.new()
+	var categories := ["All", "Crops", "Planting", "Food", "Fuel", "Materials"]
+	for group: String in categories: _trade_category.add_item(group)
+	_trade_category.select(maxi(0, categories.find(_market_category)))
+	_trade_category.custom_minimum_size = Vector2(118, 34)
+	_trade_category.item_selected.connect(func(index: int): _market_category = categories[index]; _filter_merchant_tiles())
+	toolbar.add_child(_trade_category)
+	_button(toolbar, "About " + _heading.text if compact else "Requests & details", func():
+		_details_open["about:" + str(context.get("id", id))] = true
+		_rebuild())
+	var panes := HBoxContainer.new()
+	panes.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	panes.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	panes.add_theme_constant_override("separation", 12)
+	_merchant_workspace.add_child(panes)
+	_build_inventory_pane(panes, "market", "Merchant stock", _inventory(id))
+	_build_inventory_pane(panes, "backpack", "Your backpack", _inventory(_pack()))
+	_trade_footer = PanelContainer.new()
+	_trade_footer.add_theme_stylebox_override("panel", MenuTheme.panel(MenuTheme.INK, BORDER, 10, 10))
+	_merchant_workspace.add_child(_trade_footer)
+	var footer := VBoxContainer.new()
+	footer.add_theme_constant_override("separation", 6)
+	_trade_footer.add_child(footer)
+	var description := HBoxContainer.new()
+	footer.add_child(description)
+	_trade_title = MenuTheme.label("Select an item", 17, GOLD)
+	_trade_title.custom_minimum_size.x = 180
+	description.add_child(_trade_title)
+	_trade_detail = MenuTheme.label("Choose a tile to buy or sell.", 13, MUTED)
+	_trade_detail.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+	description.add_child(_trade_detail)
+	var actions := HBoxContainer.new()
+	footer.add_child(actions)
+	var amount_label := MenuTheme.label("Quantity", 13, MUTED)
+	amount_label.size_flags_horizontal = Control.SIZE_SHRINK_BEGIN
+	amount_label.autowrap_mode = TextServer.AUTOWRAP_OFF
+	actions.add_child(amount_label)
+	var quantity := SpinBox.new()
+	quantity.min_value = 1
+	quantity.max_value = 100
+	quantity.step = 1
+	quantity.value = _quantity
+	quantity.custom_minimum_size = Vector2(88, 36)
+	quantity.value_changed.connect(func(value: float): _quantity = int(value); _refresh_merchant())
+	actions.add_child(quantity)
+	var spring := Control.new()
+	spring.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	actions.add_child(spring)
+	_trade_buy = _button(actions, "Buy", func(): _act("buy", {"market":id, "item":_trade_selected_item, "quantity":_quantity}), true)
+	_trade_buy.custom_minimum_size = Vector2(146, 36)
+	_trade_buy.set_meta("frontier_action", "buy")
+	_trade_sell = _button(actions, "Sell", func(): _act("sell", {"market":id, "item":_trade_selected_item, "quantity":_quantity}))
+	_trade_sell.custom_minimum_size = Vector2(146, 36)
+	_trade_sell.set_meta("frontier_action", "sell")
+	if _trade_selected_item.is_empty():
+		var preferred := "crude_oil" if id == "refinery" else "lettuce" if id == "moon_market" else "banana"
+		if _trade_tiles.has("market:" + preferred):
+			_trade_selected_item = preferred
+	_filter_merchant_tiles()
+
+
+func _build_inventory_pane(parent: Node, side: String, title: String, inventory: Dictionary) -> void:
+	var pane := PanelContainer.new()
+	pane.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	pane.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	pane.add_theme_stylebox_override("panel", MenuTheme.panel(MenuTheme.INK, BORDER, 10, 10))
+	parent.add_child(pane)
+	var column := VBoxContainer.new()
+	column.add_theme_constant_override("separation", 6)
+	pane.add_child(column)
+	var top := HBoxContainer.new()
+	column.add_child(top)
+	top.add_child(MenuTheme.label(title, 15, GOLD if side == "market" else GREEN))
+	if side == "backpack":
+		_trade_capacity = MenuTheme.label("", 12, MUTED)
+		_trade_capacity.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+		top.add_child(_trade_capacity)
+	var scroll := ScrollContainer.new()
+	scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+	scroll.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	scroll.follow_focus = true
+	column.add_child(scroll)
+	_trade_scrolls.append(scroll)
+	var grid := GridContainer.new()
+	grid.columns = 3
+	grid.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	grid.add_theme_constant_override("h_separation", 6)
+	grid.add_theme_constant_override("v_separation", 6)
+	scroll.add_child(grid)
+	_trade_grids.append(grid)
+	var items: Array = inventory.keys()
+	items.sort()
+	for item: String in items:
+		if int(inventory[item]) <= 0 or not _items().has(item):
+			continue
+		if side == "market" and not _merchant_accepts(item):
+			continue
+		var tile := InventoryTile.new()
+		tile.configure(item, _title(item), int(inventory[item]), _item_category(item))
+		tile.set_meta("merchant_side", side)
+		tile.pressed.connect(func(): _select_merchant_item(item, side))
+		grid.add_child(tile)
+		_trade_tiles[side + ":" + item] = tile
+	var empty := MenuTheme.label("No goods here yet.", 13, MUTED)
+	empty.name = "EmptyInventory"
+	empty.visible = grid.get_child_count() == 0
+	column.add_child(empty)
+
+
+func _merchant_accepts(item: String) -> bool:
+	return _market_id != "refinery" or item in ["crude_oil", "gasoline", "diesel", "jet_fuel", "bitumen", "water", "spare_parts"]
+
+
+func _filter_merchant_tiles() -> void:
+	if not _merchant_mode:
+		return
+	var first: String = ""
+	var first_side := "market"
+	var selection_visible := false
+	var counterpart_side := ""
+	for key: String in _trade_tiles:
+		var tile: Button = _trade_tiles[key]
+		var item: String = tile.get_meta("inventory_item")
+		var show := (_market_category == "All" or _item_category(item) == _market_category) \
+			and (_market_search.strip_edges().is_empty() or _title(item).to_lower().contains(_market_search.strip_edges().to_lower()))
+		tile.visible = show
+		if show:
+			if first.is_empty():
+				first = item
+				first_side = str(tile.get_meta("merchant_side"))
+			if item == _trade_selected_item:
+				counterpart_side = str(tile.get_meta("merchant_side"))
+				selection_visible = selection_visible or counterpart_side == _trade_selected_side
+	if not selection_visible:
+		if not counterpart_side.is_empty():
+			_trade_selected_side = counterpart_side
+		else:
+			_trade_selected_item = first
+			_trade_selected_side = first_side
+	for index in range(_trade_grids.size()):
+		var any_visible := false
+		for tile in _trade_grids[index].get_children():
+			any_visible = any_visible or tile.visible
+		var empty: Label = _trade_scrolls[index].get_parent().get_node("EmptyInventory")
+		empty.text = "No matching items. Clear the search or choose All." if not _market_search.is_empty() or _market_category != "All" else "No goods here yet."
+		empty.visible = not any_visible
+	_refresh_merchant()
+
+
+func _select_merchant_item(item: String, side: String) -> void:
+	_trade_selected_item = item
+	_trade_selected_side = side
+	_refresh_merchant()
+	if DisplayServer.get_name() != "headless":
+		var motion := create_tween().set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_OUT)
+		_trade_title.modulate = Color(1.2, 1.1, 0.9)
+		motion.tween_property(_trade_title, "modulate", Color.WHITE, 0.18)
+
+
+func _refresh_merchant() -> void:
+	if not _merchant_mode or not is_instance_valid(_trade_buy):
+		return
+	var carried := 0
+	for count in _inventory(_pack()).values():
+		carried += int(count)
+	var capacity := int(controller.backpack_capacity()) if controller.has_method("backpack_capacity") else 0
+	if controller.has_method("backpack_used"):
+		carried = int(controller.backpack_used())
+	_trade_capacity.text = "%d / %d" % [carried, capacity] if capacity > 0 else "%d items" % carried
+	for key: String in _trade_tiles:
+		var tile = _trade_tiles[key]
+		var inventory := _inventory(_market_id if tile.get_meta("merchant_side") == "market" else _pack())
+		tile.set_item_count(int(inventory.get(tile.item_id, 0)))
+		tile.set_selected(tile.item_id == _trade_selected_item and tile.get_meta("merchant_side") == _trade_selected_side)
+	if _trade_selected_item.is_empty():
+		_trade_title.text = "Select an item"
+		_trade_detail.text = "Choose a tile to buy or sell."
+		_trade_buy.text = "Buy"
+		_trade_sell.text = "Sell"
+		_trade_buy.disabled = true
+		_trade_sell.disabled = true
+		return
+	_trade_title.text = _title(_trade_selected_item)
+	_trade_detail.text = "%s · %d in stock · %d in your backpack" % [_item_category(_trade_selected_item),
+		int(_inventory(_market_id).get(_trade_selected_item, 0)), int(_inventory(_pack()).get(_trade_selected_item, 0))]
+	for button in [_trade_buy, _trade_sell]:
+		button.set_meta("frontier_payload", {"market":_market_id, "item":_trade_selected_item})
+	var buy_price: int = controller.simulation.quote(_market_id, _trade_selected_item, _quantity, true)
+	var sell_price: int = controller.simulation.quote(_market_id, _trade_selected_item, _quantity, false)
+	_trade_buy.text = "Buy · %d cr" % buy_price
+	_trade_sell.text = "Sell · %d cr" % sell_price
+	_refresh_trade_button(_trade_buy, _market_id, _trade_selected_item, true)
+	_refresh_trade_button(_trade_sell, _market_id, _trade_selected_item, false)
+	if not _merchant_accepts(_trade_selected_item):
+		_trade_buy.disabled = true
+		_trade_sell.disabled = true
+		_trade_buy.tooltip_text = "This workplace does not trade that item."
+		_trade_sell.tooltip_text = _trade_buy.tooltip_text
+	elif capacity > 0 and carried + _quantity > capacity:
+		_trade_buy.disabled = true
+		_trade_buy.tooltip_text = "Your backpack needs %d more spaces." % (carried + _quantity - capacity)
+	if not bool(_state().get("permissions", {}).get("trade", true)):
+		_trade_detail.text = "Trading is unavailable for your current role."
+	if controller.has_method("action_pending") and bool(controller.action_pending()):
+		_trade_buy.disabled = true
+		_trade_sell.disabled = true
+		_trade_buy.tooltip_text = "Waiting for the town to finish your request."
+		_trade_sell.tooltip_text = _trade_buy.tooltip_text
 
 
 func _facility(id: String) -> void:
+	if id == "refinery":
+		if not bool(_details_open.get("about:" + str(context.get("id", id)), false)):
+			_market(id, true)
+			return
+		_button(_body, "Back to trading", func(): _details_open["about:" + str(context.get("id", id))] = false; _rebuild(), true)
 	var facility: Dictionary = _state().get("facilities", {}).get(id, {})
 	_heading.text = str(_state().get("locations", {}).get(id, {}).get("label", context.get("label", "Workplace")))
 	_live(_body, func():
@@ -604,7 +878,7 @@ func _facility(id: String) -> void:
 		if id == "lunar_greenhouse":
 			_action(_body, "Refill reservoir · 20 L", "refill_habitat", {"quantity": 20})
 	if id == "refinery":
-		_market(id, false)
+		_line(_body, "Refinery services", 18, GOLD)
 	if id in ["gas_station", "airfield", "refinery"]:
 		_line(_body, "Parked vehicle fuel service", 20, GOLD)
 		for vehicle: Vehicle in controller.nearby_fuel_vehicles():
@@ -725,13 +999,29 @@ func _act(kind: String, payload: Dictionary) -> void:
 	_rebuild(true)
 
 
+func _refresh_trade_button(button: Button, market: String, item: String, buying: bool) -> void:
+	var can_trade := bool(_state().get("permissions", {}).get("trade", true))
+	var price: int = int(controller.simulation.quote(market, item, _quantity, buying))
+	var accounts: Dictionary = _state().get("accounts", {})
+	if buying:
+		button.disabled = not can_trade or int(_inventory(market).get(item, 0)) < _quantity \
+			or int(accounts.get("player", 0)) < price
+	else:
+		var owner := str(_state().get("locations", {}).get(market, {}).get("owner", market))
+		button.disabled = not can_trade or int(_inventory(_pack()).get(item, 0)) < _quantity \
+			or (accounts.has(owner) and int(accounts.get(owner, 0)) < price)
+	button.tooltip_text = "Trading is unavailable for your current role." if not can_trade \
+		else ("Market stock or your credits are too low." if buying else "Your cargo or the buyer's funds are too low.") if button.disabled \
+		else "%s %d for %d credits." % ["Buy" if buying else "Sell", _quantity, price]
+
+
 func _quantity_control(parent: Node) -> void:
 	var quantity := SpinBox.new()
 	quantity.min_value = 1
 	quantity.max_value = 100
 	quantity.step = 1
 	quantity.value = _quantity
-	quantity.custom_minimum_size = Vector2(100, 38)
+	quantity.custom_minimum_size = Vector2(84, 34)
 	quantity.value_changed.connect(func(value: float):
 		_quantity = int(value)
 		_rebuild.call_deferred(true))
@@ -740,7 +1030,7 @@ func _quantity_control(parent: Node) -> void:
 
 func _options(parent: Node, ids: Array, selected: String) -> OptionButton:
 	var select := OptionButton.new()
-	select.custom_minimum_size = Vector2(220, 38)
+	select.custom_minimum_size = Vector2(190, 34)
 	for id in ids:
 		select.add_item(_title(str(id)))
 	select.select(maxi(0, ids.find(selected)))
@@ -797,24 +1087,24 @@ func _item_category(id: String) -> String:
 func _row(parent: Node) -> HFlowContainer:
 	var row := HFlowContainer.new()
 	row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	row.add_theme_constant_override("h_separation", 8)
-	row.add_theme_constant_override("v_separation", 8)
+	row.add_theme_constant_override("h_separation", 6)
+	row.add_theme_constant_override("v_separation", 6)
 	parent.add_child(row)
 	return row
 
 
 func _card(parent: Node, featured := false) -> VBoxContainer:
 	var panel := PanelContainer.new()
-	panel.add_theme_stylebox_override("panel", MenuTheme.panel(INSET, GOLD if featured else BORDER, 12, 10))
+	panel.add_theme_stylebox_override("panel", MenuTheme.panel(INSET, GOLD if featured else BORDER, 10, 8))
 	parent.add_child(panel)
 	var column := VBoxContainer.new()
-	column.add_theme_constant_override("separation", 8)
+	column.add_theme_constant_override("separation", 6)
 	panel.add_child(column)
 	return column
 
 
 func _line(parent: Node, text: String, size := 16, color := INK) -> Label:
-	var label := MenuTheme.label(text, size, color)
+	var label := MenuTheme.label(text, MenuTheme.content_font_size(size), color)
 	parent.add_child(label)
 	return label
 
@@ -828,7 +1118,7 @@ func _live(parent: Node, read: Callable) -> Label:
 func _button(parent: Node, text: String, action: Callable, primary := false) -> Button:
 	var button := Button.new()
 	button.text = text
-	MenuTheme.style_button(button, primary)
+	MenuTheme.style_button(button, primary, true)
 	button.pressed.connect(action)
 	parent.add_child(button)
 	return button

@@ -244,15 +244,16 @@ func _run() -> void:
 	net._peer_on_foot_positions.erase(5)
 	_check(hatch_authority_matches,
 		"Earth and Moon authority accept every hatch prompt and reject out-of-range boarding")
-	_check(not manager.local_inventory.has_backpack() \
-			and not manager.inventory_ui.open_inventory(),
-		"integrated inventory remains inaccessible before backpack equipment")
-	_check(manager.grant_normal_backpack() \
+	_check(manager.local_inventory.has_backpack() \
+			and manager.inventory_ui.open_inventory(),
+		"every game starts with an equipped backpack and accessible inventory")
+	manager.inventory_ui.close_inventory()
+	_check(not manager.grant_normal_backpack() \
 			and manager.local_inventory.backpack_kind \
 				== inventory_script.Backpack.NORMAL \
 			and manager.local_inventory.slot_count() == inventory_script.NORMAL_SLOTS \
 			and manager._normal_backpack_visual != null,
-		"an Earth supply backpack enables twelve slots and a visible worn pack")
+		"initial Earth backpack has twelve pockets and a visible worn pack; repeated grants do not reset storage")
 
 	# --- authority validation envelope ------------------------------------
 	var valid_outbound := {"phase": net.RocketMissionPhase.OUTBOUND,

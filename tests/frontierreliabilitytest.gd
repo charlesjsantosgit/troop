@@ -65,8 +65,8 @@ func _run() -> void:
 	check(not service.prepare_player_vehicle("capacity-overflow", 1, local_id), "full registry rejects a new seat preparation")
 	check(service.societies.export_state() == checkpoint and not service._vehicle_motion.has("capacity-overflow"),
 		"capacity failure grants neither a tank nor motion authority and preserves ledgers")
-	check(messages.size() == 1 and not messages[0][2].ok and "full" in str(messages[0][2].message),
-		"capacity rejection gives the local player a concrete explanation")
+	check(messages.is_empty() and "full" in service.last_vehicle_error,
+		"capacity rejection supplies a concrete vehicle reason without emitting an unrelated town action")
 	var retained_id := "meter-1-20-1"
 	var retained: Dictionary = service.societies.state.vehicle_fuel[retained_id].duplicate(true)
 	check(service.prepare_player_vehicle(retained_id, 1, local_id)
