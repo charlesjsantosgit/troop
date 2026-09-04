@@ -51,11 +51,14 @@ func run(main: Node) -> void:
 		var old_cargo: Dictionary = record.carrying.duplicate(true)
 		record.job = "tanker_driver"
 		record.carrying = {"from": "refinery", "to": "airfield", "item": "jet_fuel", "quantity": 12, "packaging": 0}
-		citizen.update_citizen(0.1, Vector3.INF)
-		citizen.update_citizen(0.1, Vector3.INF)
-		_check(citizen.get("_vehicle") != null, "reassigning a mechanic to driving creates the physical tanker")
+		for frame in range(4):
+			await get_tree().physics_frame
+			citizen.update_citizen(0.1, Vector3.INF)
+		var vehicle: Vehicle = citizen.get("_vehicle")
+		_check(vehicle is RigidBody3D and vehicle.npc_controlled, "reassigning a mechanic retains its real authoritative vehicle")
 		var label: Label3D = citizen.get("_fuel_label")
-		_check(label != null and label.text == "Jet Fuel · 12 L", "the tanker reads its real item/quantity manifest in litres")
+		var manifest := str(vehicle.get("manifest_text")) if vehicle != null else ""
+		_check(manifest == "Jet Fuel · 12 L" and (DisplayServer.get_name()=="headless" or (label!=null and label.text==manifest)), "the vehicle reads its real item/quantity manifest in litres")
 		record.job = old_job
 		record.carrying = old_cargo
 		citizen.update_citizen(0.1, Vector3.INF)

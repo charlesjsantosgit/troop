@@ -1,8 +1,8 @@
 {
   "godot_compatibility": "4.7",
   "minimum_bootstrap": 3,
-  "network_protocol": 11,
-  "release_title": "TROOP 0.5.0 \u2014 ROOTS & ROCKETS",
-  "notes": "TROOP 0.5.0 adds Roots & Rockets: a saved offline Earth-and-Moon career with 24 crops, 24 working citizens, 19 occupations, finite markets, delivery quests, oil refining, vehicle fuel, lunar solar panels and battery storage. Choose ROOTS & ROCKETS or MOON EXPEDITION from the menu. Photographic lunar skies, distant crater relief, and fixes for overlapping Earth terrain and debug-world ground are shared improvements. Public multiplayer retains the classic combat and lunar expedition modes; local society wallets and farms are not imported online. Updater bootstrap 3 and protocol 11 are retained. Apply the offered signed update or install the full 0.5.0 package; versions older than 0.4.10 need the full installer. The server and every player must show 0.5.0 before joining together.",
+  "network_protocol": 12,
+  "release_title": "TROOP 0.6.0 — SHARED SOCIETIES",
+  "notes": "Roots & Rockets now runs on the public multiplayer server. Explore three Earth towns and three Moon towns; claim one town, grow detailed crops, trade real goods and meet working neighbors. Each person or workplace has its own menu. Follow the optional First day, Grow food, Make & deliver and Moon life tutorials from B → Tutorial. Delivery crews use physical vehicles with braking, turning and arrival-gated unloading. Tree-lined roads link Earth towns. Moon settlements have repaired roofs and compact service paths; real terrain casts crater shadows and the photographic sky continues through space travel. Shared accounts, private bags and town claims persist on the server. Offline careers stay separate. Apply the signed update and restart: the server and every player must use 0.6.0 / protocol 12. Bootstrap 3 is retained; installations older than 0.4.10 require the full installer.",
   "requires_installer": false
 }

@@ -153,6 +153,7 @@ var earth_visual: MeshInstance3D
 var earth_atmosphere_visual: MeshInstance3D
 var moon_visual: MeshInstance3D
 var sun_visual: MeshInstance3D
+var photographic_background := false
 var star_field: MultiMeshInstance3D
 var constellation_lines: MeshInstance3D
 var galaxy_visual: MeshInstance3D
@@ -349,7 +350,9 @@ func update_voyage(progress: float, phase: int, outbound: bool) -> void:
 		earth_globe_weight = 1.0
 		earth_surface_weight = 1.0
 		shell_opacity = 1.0 - atmosphere_density
-	_set_proxy_opacity(space_shell, shell_opacity)
+	# A camera-owned photographic sky is already at optical infinity. The old
+	# finite black shell would occlude it, even when the camera uses the right sky.
+	_set_proxy_opacity(space_shell, 0.0 if photographic_background else shell_opacity)
 	_set_proxy_opacity(earth_visual, earth_opacity)
 	# The sky extinction already supplies the atmospheric climb. A second
 	# transparent globe intersects the aggressive scaled-space zoom and can sort
@@ -360,7 +363,7 @@ func update_voyage(progress: float, phase: int, outbound: bool) -> void:
 	# Moon vacuum sky takes over. This prevents a translucent shell from revealing
 	# the green terrestrial sky during the map-to-Moon pan.
 	vacuum_backstop.visible = false
-	var celestial_opacity := shell_opacity \
+	var celestial_opacity := 0.0 if photographic_background else shell_opacity \
 		* star_opacity_for_progress(outbound_progress, outbound)
 	_set_proxy_opacity(star_field, celestial_opacity)
 	_set_proxy_opacity(constellation_lines, celestial_opacity)
@@ -1044,3 +1047,16 @@ static func _procedural_spiral_galaxy_texture() -> ImageTexture:
 				clampf(core * 1.7, 0.0, 1.0))
 			image.set_pixel(x, y, Color(color.r, color.g, color.b, alpha))
 	return ImageTexture.create_from_image(image)
+
+
+func set_photographic_background(enabled: bool) -> void:
+	# Standalone rocket diagnostics retain their fallback until a camera actually
+	# supplies the real sky. Earth/Moon globe geometry remains independently owned.
+	photographic_background = enabled
+	if enabled and space_shell:
+		_set_proxy_opacity(space_shell, 0.0)
+		vacuum_backstop.visible = false
+		for object in [star_field, constellation_lines, sun_visual, galaxy_visual]:
+			_set_proxy_opacity(object, 0.0)
+		for object in nebulae + planets:
+			_set_proxy_opacity(object, 0.0)

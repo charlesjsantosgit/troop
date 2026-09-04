@@ -76,21 +76,24 @@ either one.
 
 ## Publishing a release
 
-Version **0.5.0 — Roots & Rockets** retains bootstrap **3**, protocol **11**,
-`minimum_bootstrap=3`, and `requires_installer=false`. An isolated copy of the
-actual **0.4.10** installed app verified the signed candidate, staged and mounted
-it, confirmed a stable boot, and retained it on restart. New global classes,
-the normal menu, astronomy resources, and the live offline career loaded from
-the pack; its effective network version became 0.5.0. No new engine, native
-library, updater bootstrap, wire schema, or non-version project setting is
-required. Repeat this native update gate for later releases.
+Version **0.6.0 — Shared Societies** uses protocol **12**, retains bootstrap
+**3** and Godot **4.7**, and declares `minimum_bootstrap=3` with
+`requires_installer=false`. The updater mounts the verified pack before Gen/Net
+load, so the new society RPCs and protocol constant ship together. Run the
+native signed-update gate against the previous installed app before publishing.
+Installations older than 0.4.10 still require the full installer.
 
-Installations older than 0.4.10 need the full 0.5.0 installer because the
-renderer and updater startup migration requires bootstrap 3. The server and
-every client must activate **0.5.0** before connecting, even with protocol 11
-unchanged. The society career is offline; public multiplayer retains classic
-combat and lunar expeditions. Publishing the pack does not add a networked
-society or import local saved wallets into the public server.
+The public server now owns the six-town society save. Its Fly volume
+`troop_society_state` mounts at `/data`; `TROOP_STATE_DIR=/data` holds the atomic
+main and backup checkpoints as well as admin grants and bans. The entrypoint
+prepares only the mount point, then drops to UID10001. The first volume must be
+provisioned in the deployment region before deployment; automatic snapshots
+retain five days. Never replace a corrupt save with a fresh economy: startup
+must recover the backup or fail while preserving both files.
+
+The server and every client must activate **0.6.0 / protocol 12** together.
+Source/editor launches remain isolated from installed updater state. Local
+career saves are never imported into the public wallet/ownership registry.
 
 1. Set `application/config/version` in `project.godot` to the new numeric
    version (`major.minor.patch`, with an optional fourth numeric component).
@@ -155,7 +158,7 @@ Run the preflight and one actual-export postflight manually with:
 ```bash
 python3 packaging/bake_metal_cache.py --verify packaging/metal_cache
 python3 packaging/verify_packed_metal_cache.py --godot godot \
-  --pack build/release-0.5.0/windows/TROOP.pck
+  --pack build/release-0.6.0/windows/TROOP.pck
 python3 -m unittest discover -s tests -p 'test_*metal*cache.py'
 ```
 
@@ -196,7 +199,7 @@ exist:
 
 ```bash
 python3 packaging/make_update_manifest.py \
-  --version 0.5.0 \
+  --version 0.6.0 \
   --repository OWNER/REPOSITORY \
   --private-key /Users/charlessantos/.config/troop/update-signing-private.pem
 

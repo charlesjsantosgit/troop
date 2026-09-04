@@ -187,13 +187,27 @@ jobs:
           # Main initializes autoloads and disposable careers for the gameplay
           # fixtures. Require their completion sentinels: --quit-after alone
           # exits successfully even if a broken fixture never reaches its end.
-          for MODE in frontiertest frontierplaytest frontierroutetest lunarskytest; do
+          for MODE in frontiertest frontierplaytest frontierroutetest frontiertraffictest lunarskytest; do
             TEST_LOG="$RUNNER_TEMP/troop-$MODE.log"
             TEST_PREFIX="$(printf '%s' "$MODE" | tr '[:lower:]' '[:upper:]')"
             "$GODOT_BIN" --headless --path . --fixed-fps 60 \
               --quit-after 30000 -- "$MODE" 2>&1 | tee "$TEST_LOG"
             grep -Eq "^${TEST_PREFIX} (result=)?[0-9]+/[0-9]+ PASS$" "$TEST_LOG"
+            ! grep -q 'SCRIPT ERROR:' "$TEST_LOG"
           done
+          for MODE in frontiersocietiestest frontiervisualtest frontiertowngeographytest frontierreliabilitytest spacephototest; do
+            TEST_LOG="$RUNNER_TEMP/troop-$MODE.log"
+            TEST_PREFIX="$(printf '%s' "$MODE" | tr '[:lower:]' '[:upper:]')"
+            "$GODOT_BIN" --headless --path . --quit-after 30000 \
+              --script "res://tests/$MODE.gd" 2>&1 | tee "$TEST_LOG"
+            grep -Eq "^${TEST_PREFIX} [0-9]+/[0-9]+ PASS$" "$TEST_LOG"
+            ! grep -q 'SCRIPT ERROR:' "$TEST_LOG"
+          done
+          "$GODOT_BIN" --headless --path . --script res://tests/frontiertutorialtest.gd \
+            2>&1 | tee "$RUNNER_TEMP/troop-tutorial.log"
+          grep -Eq '^FRONTIERTUTORIAL [0-9]+/[0-9]+ PASS$' "$RUNNER_TEMP/troop-tutorial.log"
+          ! grep -q 'SCRIPT ERROR:' "$RUNNER_TEMP/troop-tutorial.log"
+          python3 tests/run_frontier_network.py --godot "$GODOT_BIN" --project .
           for MODE in terraincoveragetest terrainmorphtest; do
             TEST_LOG="$RUNNER_TEMP/troop-$MODE.log"
             TEST_PREFIX="$(printf '%s' "$MODE" | tr '[:lower:]' '[:upper:]')"

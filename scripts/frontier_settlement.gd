@@ -31,6 +31,14 @@ const MOON_LOCATIONS := {
 }
 
 var planet := "earth"
+var town_info: Dictionary = {}
+var tree_positions: Array[Vector2] = []
+var _collision_only := false
+var _building := false
+var _build_jobs: Array[Callable] = []
+var _crop_jobs: Array[String] = []
+var _surface_batches: Dictionary = {}
+const ServicePoints = preload("res://scripts/frontier_service_points.gd")
 var citizens: Dictionary = {}
 var plot_roots: Dictionary = {}
 var _host: Node3D
@@ -48,27 +56,89 @@ var _time := 0.0
 var _built := false
 
 
-func configure(host: Node3D, simulation: RefCounted, realm: String) -> void:
+func configure(host: Node3D, simulation: RefCounted, realm: String,
+		metadata: Dictionary = {}) -> void:
 	_host = host
 	_simulation = simulation
 	planet = realm
+	town_info = metadata.duplicate(true)
 
 
 func build() -> void:
-	if _built or _host == null or _simulation == null:
+	while not build_step(1000.0):
+		pass
+
+
+func build_collision_only() -> void:
+	if _built or _building:
 		return
+	_collision_only = true
+	build()
+	set_process(false)
+
+
+func is_build_complete() -> bool:
+	return _built
+
+
+## Each job is one small authored worksite, bed, or citizen. Mesh submissions
+## flush four materials at a time so several towns can stream over many frames.
+func build_step(budget_ms := 2.0) -> bool:
+	if _built:
+		return true
+	if _host == null or _simulation == null:
+		return true
+	if not _building:
+		_begin_build()
+	var deadline := Time.get_ticks_usec() + int(maxf(0.1, budget_ms) * 1000.0)
+	while not _build_jobs.is_empty():
+		var job: Callable = _build_jobs.pop_front()
+		job.call()
+		if Time.get_ticks_usec() >= deadline:
+			return false
+	if not _surface_batches.is_empty():
+		_flush_surface_step()
+		return false
+	if not _props.flush_step(4):
+		return false
 	_built = true
-	name = "RootsAndRockets_%s" % planet.capitalize()
-	_props = FrontierProps.new(self)
+	_building = false
+	if not _collision_only:
+		_refresh_state()
+	return true
+
+
+func _begin_build() -> void:
+	_building = true
+	name = "RootsAndRockets_%s" % str(town_info.get("id", planet)).validate_node_name()
+	_props = FrontierProps.new(self, not _collision_only)
 	if planet == "moon":
-		_build_moon()
+		_build_jobs.assign([_build_moon_paths, _build_greenhouse, _build_solar,
+			_build_habitat, _build_lunar_market, _build_lunar_cargo, _build_ice_plant, _build_moon_square])
 	else:
-		_build_earth()
-	_build_plots()
-	_props.frame = Transform3D.IDENTITY
-	_props.flush()
-	_build_citizens()
-	_refresh_state()
+		_build_jobs.assign([_build_square, _build_market, _build_housing,
+			_build_well, _build_service_hut.bind("kitchen", "CANOPY KITCHEN", Color(0.72,0.31,0.18)),
+			_build_service_hut.bind("warehouse", "COOPERATIVE STORE", TEAL),
+			_build_service_hut.bind("workshop", "BAMBOO WORKS", Color(0.32,0.46,0.6)),
+			_build_farmyard, _build_oil_rig, _build_refinery, _build_gas_station,
+			_build_airfield, _build_port, _build_earth_details])
+	for id in _state().get("plots", {}):
+		if str(_state().plots[id].get("planet", "earth")) == planet:
+			_build_jobs.append(_build_plot.bind(str(id)))
+	if planet == "earth":
+		_build_jobs.append(_build_roads)
+		if not _collision_only:
+			for segment: Dictionary in FrontierRoutes.road_segments():
+				_build_jobs.append(_build_street.bind(segment["from"], segment.to, float(segment.width)))
+		if not _collision_only:
+			for bay_id: String in FrontierRoutes.loading_bays():
+				_build_jobs.append(_build_loading_bay.bind(bay_id))
+		for row in range(-7,8):
+			_build_jobs.append(_build_forest_row.bind(row))
+	if not _collision_only:
+		for id in _state().get("citizens", {}):
+			if str(_state().citizens[id].get("planet", "earth")) == planet:
+				_build_jobs.append(_build_citizen.bind(str(id)))
 
 
 func _state() -> Dictionary:
@@ -100,26 +170,40 @@ func _location(id: String) -> Vector2:
 	return defaults.get(id, Vector2.ZERO)
 
 
+static func service_position(realm: String, id: String) -> Vector2:
+	return ServicePoints.service_position(realm,id)
+
+
 func get_interactions() -> Array[Dictionary]:
 	var result: Array[Dictionary] = []
 	for entry in _interactions:
 		var current := entry.duplicate()
 		current.position = to_global(entry.position)
+		current.town_id = str(town_info.get("id", ""))
 		result.append(current)
 	for citizen in citizens.values():
 		if is_instance_valid(citizen):
-			result.append(citizen.interaction())
+			var current: Dictionary = citizen.interaction()
+			current.town_id = str(town_info.get("id", ""))
+			result.append(current)
 	return result
 
 
 func _interact(id: String, kind: String, label: String, xz: Vector2, height := 0.9) -> void:
+	var service := service_position(planet,id)
+	if kind in ["facility","board","market"] and service.is_finite():
+		xz = service
 	_interactions.append({"id": id, "kind": kind, "label": label,
 		"position": _point(xz, height)})
 
 
 func _process(dt: float) -> void:
-	if not _built or not is_visible_in_tree():
+	if not _built or _collision_only or not is_visible_in_tree():
 		return
+	if not _crop_jobs.is_empty():
+		var crop_id: String = _crop_jobs.pop_front()
+		var crop_data: Dictionary = _state().plots.get(crop_id, {})
+		_rebuild_crop(_plots[crop_id].root, str(crop_data.get("crop", "")), float(crop_data.get("growth", 0.0)), float(crop_data.get("health", 1.0)))
 	_time += dt
 	_timer += dt
 	var camera := get_viewport().get_camera_3d()
@@ -133,38 +217,21 @@ func _process(dt: float) -> void:
 		_oil_arm.rotation.z = sin(_time * 0.65) * 0.21 if _oil_working else 0.0
 
 
-func _build_earth() -> void:
-	# Broad shared footpaths give the village a legible center and keep homes,
-	# kitchens and work yards off circulation corridors.
-	_path([Vector2(-58, -15), Vector2(0, -15), Vector2(40, -15), Vector2(40, 4), Vector2(0, 4), Vector2(-32, 4), Vector2(-32, 25)], 4.5)
-	_path([Vector2(-35, -44), Vector2(-35, -15)], 3.4)
-	_path([Vector2(0, -15), Vector2(0, 36)], 6.0)
-	_path([Vector2(0, 4), Vector2(40, 4), Vector2(60, 4), Vector2(60, 35), Vector2(95, 35), Vector2(100, 65)], 6.0)
-	_path([Vector2(40, 4), Vector2(40, 15)], 3.2)
-	_path([Vector2(95, 35), Vector2(95, 10), Vector2(120, 10), Vector2(120, -35), Vector2(135, -35), Vector2(145, -80)], 5.8)
-	_path([Vector2(18, -15), Vector2(18, -18), Vector2(30, -18), Vector2(30, -35)], 3.5)
-	_build_square()
-	_build_market()
-	_build_housing()
-	_build_well()
-	_build_service_hut("kitchen", "CANOPY KITCHEN", Color(0.72, 0.31, 0.18))
-	_build_service_hut("warehouse", "COOPERATIVE STORE", TEAL)
-	_build_service_hut("workshop", "BAMBOO WORKS", Color(0.32, 0.46, 0.6))
-	_build_farmyard()
-	_build_oil_rig()
-	_build_refinery()
-	_build_gas_station()
-	_build_airfield()
-	_build_port()
-	# Breadfruit-like shade trees, baskets, benches and pennants make the
-	# authored clearing feel lived in without repopulating its walkable lanes.
-	for location in [Vector2(-16, 31), Vector2(20, 22), Vector2(-59, 17), Vector2(-56, -9), Vector2(37, -47)]:
-		_tree(location)
+func _build_earth_details() -> void:
 	for x in [-10.0, 10.0]:
 		_set_frame(Vector2(x, 9))
 		_bench(Vector3.ZERO)
 	for z in [-8.0, 7.0, 23.0]:
 		_pennant_span(Vector2(-5, z), Vector2(5, z))
+
+
+func _build_roads() -> void:
+	if _collision_only:
+		return
+	# Crop aisles are visibly narrower, without traffic lane markings.
+	for route in [[Vector2(-35,-15),Vector2(-35,-23),Vector2(-39,-23),Vector2(-39,-38)],
+			[Vector2(-58,-15),Vector2(-58,-38)]]:
+		_path(route, 1.9)
 
 
 func _build_square() -> void:
@@ -178,14 +245,14 @@ func _build_square() -> void:
 	for index in range(5):
 		var angle := float(index) * TAU / 5.0
 		_props.piece("sphere", Vector3(cos(angle) * 1.8, 6.6, 4.8 + sin(angle) * 1.8), Vector3(4.7, 2.5, 4.3), LEAF)
-	_props.text(Vector3(0, 4.5, -0.5), "CANOPY COMMONS", Color(1.0, 0.92, 0.67), 47, 76.0)
+	_props.text(Vector3(0, 4.5, -0.5), str(town_info.get("name", "CANOPY COMMONS")).to_upper(), Color(1.0, 0.92, 0.67), 47, 76.0)
 	_set_frame(Vector2(3.8, 1.1))
 	_props.box(Vector3(0, 1.2, 0), Vector3(2.8, 1.7, 0.18), WOOD, true)
 	for x in [-1.23, 1.23]:
 		_props.cylinder(Vector3(x, 0.9, 0), 0.09, 1.8, BAMBOO)
 	for x in [-0.8, 0.0, 0.8]:
 		_props.box(Vector3(x, 1.25, -0.11), Vector3(0.57, 0.75, 0.025), CREAM)
-	_props.text(Vector3(0, 2.6, 0), "COMMUNITY JOBS\nContracts · Crew · Town ledger", Color(0.96, 0.86, 0.57), 27)
+	_props.text(Vector3(0, 2.6, 0), "TOWN NOTICEBOARD\nClaim · Contracts · Neighbours", Color(0.96, 0.86, 0.57), 27)
 	_interact("town_square", "board", "Community jobs & society", Vector2(3.8, -0.3))
 
 
@@ -207,6 +274,7 @@ func _build_housing() -> void:
 
 
 func _hut(width: float, depth: float, accent: Color) -> void:
+	accent = _town_accent(accent)
 	_props.box(Vector3(0, 0.08, 0), Vector3(width + 0.4, 0.16, depth + 0.3), WOOD, true)
 	# Front is a real open doorway; three waist-high walls and four corner
 	# posts give visible interiors and shelter without a solid collision cube.
@@ -248,7 +316,7 @@ func _build_market() -> void:
 
 
 func _build_service_hut(id: String, title: String, accent: Color) -> void:
-	var offset := Vector2(-5.3, 0) if id == "workshop" else Vector2(0, -7.0 if id == "warehouse" else -5.3)
+	var offset := Vector2(-8.5, 0) if id == "workshop" else Vector2(0, -7.0 if id == "warehouse" else -5.3)
 	_set_frame(_location(id) + offset)
 	_props.frame.basis = _props.frame.basis * Basis(Vector3.UP, -PI * 0.5 if id == "workshop" else PI)
 	_hut(8.0, 7.3, accent)
@@ -335,11 +403,12 @@ func _build_oil_rig() -> void:
 	# A moving pumpjack beside the derrick signals extraction, and stops when
 	# the authoritative facility is disabled or broken.
 	_props.cylinder(Vector3(7.7, 2.0, 5.4), 0.28, 3.5, STEEL)
-	_oil_arm = Node3D.new()
-	_oil_arm.transform = _props.frame * Transform3D(Basis.IDENTITY, Vector3(7.7, 3.7, 5.4))
-	add_child(_oil_arm)
-	_props.dynamic_piece("box", Vector3.ZERO, Vector3(5.5, 0.36, 0.48), SAFETY, _oil_arm)
-	_props.dynamic_piece("box", Vector3(2.45, -0.55, 0), Vector3(0.65, 1.3, 0.6), NAVY, _oil_arm)
+	if not _collision_only:
+		_oil_arm = Node3D.new()
+		_oil_arm.transform = _props.frame * Transform3D(Basis.IDENTITY, Vector3(7.7, 3.7, 5.4))
+		add_child(_oil_arm)
+		_props.dynamic_piece("box", Vector3.ZERO, Vector3(5.5, 0.36, 0.48), SAFETY, _oil_arm)
+		_props.dynamic_piece("box", Vector3(2.45, -0.55, 0), Vector3(0.65, 1.3, 0.6), NAVY, _oil_arm)
 	_props.text(Vector3(0, 5.8, 7), "CANOPY ENERGY\nDrilling crew · Crude dispatch", CREAM, 34, 85.0)
 	_interact("oil_rig", "facility", "Oil rig · extraction and crew", _location("oil_rig"))
 
@@ -414,20 +483,18 @@ func _build_port() -> void:
 	_interact("carrier", "facility", "Marine depot · carrier deliveries", _location("carrier"))
 
 
-func _build_moon() -> void:
+func _build_moon_paths() -> void:
 	_path([Vector2(-55, -35), Vector2(-40, -35), Vector2(-40, -10), Vector2(-23, -10), Vector2(0, -12), Vector2(28, -12), Vector2(28, -20)], 3.6)
 	_path([Vector2(-15, 15), Vector2(0, 4), Vector2(0, -12)], 4.5)
 	_path([Vector2(0, 4), Vector2(28, 20)], 4.0)
-	_build_greenhouse()
-	_build_solar()
-	_build_habitat()
-	_build_lunar_market()
-	_build_lunar_cargo()
-	_build_ice_plant()
+
+
+func _build_moon_square() -> void:
+	_build_surface_pad(Vector2(0,4),6.0)
 	_set_frame(Vector2(4, 4))
 	_props.box(Vector3(0, 1.0, 0), Vector3(1.4, 1.7, 0.65), CREAM, true)
 	_props.box(Vector3(0, 1.4, -0.34), Vector3(1.2, 0.7, 0.05), NAVY)
-	_props.text(Vector3(0, 2.7, 0), "ROOTS & ROCKETS\nColony contracts · Standing orders", Color(0.57, 0.93, 0.89), 29, 60.0)
+	_props.text(Vector3(0, 2.7, 0), str(town_info.get("name", "ROOTS & ROCKETS")).to_upper() + "\nGardens ← · Trade ↑ · Power →", Color(0.57, 0.93, 0.89), 29, 60.0)
 	_interact("town_square", "board", "Lunar society · contracts & jobs", Vector2(4, 2.5))
 	# Closed coolant and power lines visibly connect real facilities. They sit
 	# near the ground rather than creating barriers across the EVA paths.
@@ -442,16 +509,20 @@ func _build_greenhouse() -> void:
 	for x in [-12.0, 12.0]:
 		_props.box(Vector3(x, 1.0, 0), Vector3(0.6, 2.0, 18), CREAM, true)
 		for z in [-8.5, -4.0, 0.5, 5.0, 8.5]:
-			_props.beam(Vector3(x, 1.9, z), Vector3(x * 0.66, 5.9, z), 0.19, CREAM)
-			_props.beam(Vector3(x * 0.66, 5.9, z), Vector3(0, 6.8, z), 0.17, CREAM)
-	_props.box(Vector3(0, 2.2, -8.8), Vector3(24, 4.3, 0.3), CREAM, true)
-	# Shielded roof panels leave observation strips and an open inspection
-	# entrance. Interior grow lights illuminate the visible hydroponic beds.
-	for x in [-7.6, 7.6]:
-		_props.box(Vector3(x, 5.7, 0), Vector3(8.8, 0.28, 17.8), CREAM, false, Vector3(0, 0, 0.37 * signf(x)))
-	_props.box(Vector3(0, 6.85, 0), Vector3(6.8, 0.22, 17.8), CREAM)
-	for x in [-5.5, 5.5]:
-		_props.piece("box", Vector3(x, 5.3, 0), Vector3(0.22, 0.1, 16), Color(0.86, 0.6, 0.85), Vector3.ZERO, 0, 0.35)
+			_props.beam(Vector3(x, 1.9, z), Vector3(x, 3.3, z), 0.19, CREAM)
+			_props.beam(Vector3(x, 3.3, z), Vector3(0, 5.9, z), 0.17, CREAM)
+	_props.box(Vector3(0, 1.6, -8.8), Vector3(24, 3.1, 0.3), CREAM, true)
+	# Both roof halves meet at one ridge. The prior positive slopes lifted the
+	# outside edges away from their supports and looked like broken wings.
+	var pitch := atan2(2.6,12.0)
+	for side in [-1.0,1.0]:
+		_props.box(Vector3(side*6.0,4.6,0),Vector3(sqrt(150.76)+0.15,0.18,18.0),
+			CREAM,false,Vector3(0,0,-pitch*side))
+		for z in [-8.5,-4.0,0.5,5.0,8.5]:
+			_props.beam(Vector3(side*12.0,3.35,z),Vector3(0,5.95,z),0.12,STEEL)
+	_props.box(Vector3(0,5.95,0),Vector3(0.28,0.18,18.0),STEEL)
+	for x in [-5.5,5.5]:
+		_props.piece("box",Vector3(x,4.5,0),Vector3(0.22,0.1,16),Color(0.86,0.6,0.85),Vector3.ZERO,0,0.35)
 	_props.box(Vector3(0, 2.4, 8.8), Vector3(7.5, 0.3, 0.5), SAFETY)
 	_props.text(Vector3(0, 4.2, 8.7), "CRATER GARDENS\nSealed grow cells · Exterior service aisles", CREAM, 32, 70.0)
 	_utility_label = _props.text(Vector3(0, 2.9, 8.7), "", Color(0.51, 0.89, 0.84), 24, 40.0)
@@ -464,6 +535,8 @@ func _build_solar() -> void:
 		for col in range(4):
 			var at := Vector3((col - 1.5) * 4.5, 0, -3.5 - row * 5.0)
 			_props.cylinder(at + Vector3(0, 1.1, 0), 0.09, 2.0, STEEL)
+			if _collision_only:
+				continue
 			var panel := Node3D.new()
 			panel.transform = _props.frame * Transform3D(Basis.from_euler(Vector3(-0.32, 0, 0)), at + Vector3.UP * 2.0)
 			add_child(panel)
@@ -534,50 +607,47 @@ func _build_ice_plant() -> void:
 	_interact("ice_mine", "facility", "Lunar water recovery", _location("ice_mine"))
 
 
-func _build_plots() -> void:
-	var all_plots: Dictionary = _state().get("plots", {})
-	for id in all_plots:
-		var data: Dictionary = all_plots[id]
-		if str(data.get("planet", "earth")) != planet:
-			continue
-		var xz := _plot_coordinates(str(id), data)
-		_set_frame(xz)
-		var soil := Color(0.24, 0.15, 0.085)
-		var border := CREAM if planet == "moon" else BAMBOO
-		_props.box(Vector3(0, 0.12, 0), Vector3(4.7, 0.24, 4.1), soil)
-		for x in [-2.35, 2.35]:
-			_props.box(Vector3(x, 0.21, 0), Vector3(0.1, 0.35, 4.3), border)
-		for z in [-2.1, 2.1]:
-			_props.box(Vector3(0, 0.21, z), Vector3(4.8, 0.35, 0.1), border)
-		for x in [-1.5, 0.0, 1.5]:
-			_props.box(Vector3(x, 0.255, 0), Vector3(0.08, 0.06, 4.0), Color(0.26, 0.31, 0.3))
-		if planet == "moon":
-			# Each pressure-rated grow cell is closed independently. External
-			# glove/service hatches let EVA workers tend and harvest from the
-			# real aisle without ever opening the growing atmosphere to vacuum.
-			var glass := Color(0.26, 0.59, 0.66, 0.19)
-			for x in [-2.32, 2.32]:
-				_props.box(Vector3(x, 1.3, 0), Vector3(0.055, 2.3, 4.1), glass, true)
-				for z in [-2.0, 2.0]:
-					_props.box(Vector3(x, 1.3, z), Vector3(0.09, 2.4, 0.09), CREAM)
-			for z in [-2.04, 2.04]:
-				_props.box(Vector3(0, 1.3, z), Vector3(4.7, 2.3, 0.055), glass, true)
-			_props.box(Vector3(0, 2.5, 0), Vector3(4.8, 0.13, 4.25), CREAM, true)
-			_props.box(Vector3(0, 0.73, 2.085), Vector3(1.45, 0.9, 0.08), NAVY)
-			_props.box(Vector3(0, 0.73, 2.14), Vector3(1.15, 0.62, 0.06), CREAM)
-			_props.box(Vector3(0.43, 0.73, 2.18), Vector3(0.065, 0.25, 0.04), SAFETY)
-			for x in [-0.4, 0.4]:
-				_props.cylinder(Vector3(x, 1.55, 2.09), 0.16, 0.09, NAVY, false, Vector3(PI * 0.5, 0, 0))
-			_props.piece("box", Vector3(0, 2.36, 0), Vector3(0.18, 0.055, 3.7), Color(0.85, 0.55, 0.8), Vector3.ZERO, 0.0, 0.4)
-		var root := Node3D.new()
-		root.name = "Crop_%s" % id
-		root.transform = _props.frame
-		add_child(root)
-		plot_roots[id] = root
-		var label := _props.text(Vector3(0, 1.0, 2.5), "", CREAM, 23, 19.0)
-		_plots[id] = {"root": root, "label": label, "crop": "", "stage": -1, "health": -1}
-		_interact(str(id), "plot", "%s crop bed" % ("Cooperative" if bool(data.get("automatic", false)) else "Your"), xz + Vector2(0, 2.5))
-
+func _build_plot(id: String) -> void:
+	var data: Dictionary = _state().get("plots", {}).get(id, {})
+	var xz := _plot_coordinates(str(id), data)
+	_set_frame(xz)
+	var soil := Color(0.24, 0.15, 0.085)
+	var border := CREAM if planet == "moon" else BAMBOO
+	_props.box(Vector3(0, 0.12, 0), Vector3(4.7, 0.24, 4.1), soil)
+	for x in [-2.35, 2.35]:
+		_props.box(Vector3(x, 0.21, 0), Vector3(0.1, 0.35, 4.3), border)
+	for z in [-2.1, 2.1]:
+		_props.box(Vector3(0, 0.21, z), Vector3(4.8, 0.35, 0.1), border)
+	for x in [-1.5, 0.0, 1.5]:
+		_props.box(Vector3(x, 0.255, 0), Vector3(0.08, 0.06, 4.0), Color(0.26, 0.31, 0.3))
+	if planet == "moon":
+		# Each pressure-rated grow cell is closed independently. External
+		# glove/service hatches let EVA workers tend and harvest from the
+		# real aisle without ever opening the growing atmosphere to vacuum.
+		var glass := Color(0.26, 0.59, 0.66, 0.19)
+		for x in [-2.32, 2.32]:
+			_props.box(Vector3(x, 1.3, 0), Vector3(0.055, 2.3, 4.1), glass, true)
+			for z in [-2.0, 2.0]:
+				_props.box(Vector3(x, 1.3, z), Vector3(0.09, 2.4, 0.09), CREAM)
+		for z in [-2.04, 2.04]:
+			_props.box(Vector3(0, 1.3, z), Vector3(4.7, 2.3, 0.055), glass, true)
+		_props.box(Vector3(0, 2.5, 0), Vector3(4.8, 0.13, 4.25), CREAM, true)
+		_props.box(Vector3(0, 0.73, 2.085), Vector3(1.45, 0.9, 0.08), NAVY)
+		_props.box(Vector3(0, 0.73, 2.14), Vector3(1.15, 0.62, 0.06), CREAM)
+		_props.box(Vector3(0.43, 0.73, 2.18), Vector3(0.065, 0.25, 0.04), SAFETY)
+		for x in [-0.4, 0.4]:
+			_props.cylinder(Vector3(x, 1.55, 2.09), 0.16, 0.09, NAVY, false, Vector3(PI * 0.5, 0, 0))
+		_props.piece("box", Vector3(0, 2.36, 0), Vector3(0.18, 0.055, 3.7), Color(0.85, 0.55, 0.8), Vector3.ZERO, 0.0, 0.4)
+	if _collision_only:
+		return
+	var root := Node3D.new()
+	root.name = "Crop_%s" % id
+	root.transform = _props.frame
+	add_child(root)
+	plot_roots[id] = root
+	var label := _props.text(Vector3(0, 1.0, 2.5), "", CREAM, 23, 19.0)
+	_plots[id] = {"root": root, "label": label, "crop": "", "stage": -1, "health": -1}
+	_interact(str(id), "plot", "%s crop bed" % ("Cooperative" if bool(data.get("automatic", false)) else "Your"), xz + Vector2(0, 2.5))
 
 func _plot_coordinates(id: String, data: Dictionary) -> Vector2:
 	var coordinates: Variant = data.get("position", null)
@@ -602,9 +672,11 @@ func _refresh_state() -> void:
 			view.crop = crop
 			view.stage = stage
 			view.health = health
-			_rebuild_crop(view.root, crop, growth, float(data.get("health", 1.0)))
+			if str(id) not in _crop_jobs:
+				_crop_jobs.append(str(id))
 		var moisture := float(data.get("moisture", 0.0))
-		var status := "Ready to harvest" if growth >= 1.0 else "%d%% grown" % roundi(growth * 100)
+		var phase: String = FrontierCropMeshes.phase_label(crop,stage)
+		var status := "Ready to harvest" if growth >= 1.0 else "%s · %d%%" % [phase, roundi(growth * 100)]
 		if crop.is_empty():
 			status = "Empty bed · choose a crop"
 		elif moisture < 25.0:
@@ -639,70 +711,27 @@ func _rebuild_crop(root: Node3D, crop: String, growth: float, health: float) -> 
 	for child in root.get_children():
 		root.remove_child(child)
 		child.queue_free()
-	if crop.is_empty():
-		return
-	var foliage := FrontierProps.new(root)
-	var green := Color(0.42, 0.39, 0.16).lerp(LEAF, clampf(health, 0.0, 1.0))
-	var size := lerpf(0.17, 1.0, growth)
-	var is_banana := crop in ["banana", "plantain"]
-	for index in range(6 if is_banana else 12):
-		var p := Vector3(-1.6 + (index % 3) * 1.6, 0.27, -1.45 + floorf(index / 3.0) * (2.8 if is_banana else 0.93))
-		if is_banana:
-			foliage.cylinder(p + Vector3(0, size * 0.9, 0), size * 0.11, size * 1.8, Color(0.48, 0.57, 0.2))
-			for leaf in range(5):
-				var angle := TAU * leaf / 5.0
-				foliage.piece("sphere", p + Vector3(cos(angle) * 0.48, 1.75, sin(angle) * 0.48) * size, Vector3(0.4, 0.09, 1.4) * size, green, Vector3(0.15, -angle + PI * 0.5, 0))
-			if growth >= 0.75:
-				foliage.piece("sphere", p + Vector3(0.18, size * 1.2, 0.25), Vector3(0.25, 0.48, 0.2), Color(0.9, 0.76, 0.13))
-		elif crop in ["tomato", "pepper", "bean", "maize", "rice", "bamboo", "cotton"]:
-			foliage.cylinder(p + Vector3(0, size * 0.5, 0), 0.035, size, green)
-			for branch in range(3):
-				foliage.piece("sphere", p + Vector3(0.12 * (1 if branch % 2 == 0 else -1), size * (0.32 + branch * 0.25), 0), Vector3(0.47, 0.12, 0.27) * size, green, Vector3(0, branch * 1.7, 0.25))
-			if growth >= 0.75:
-				var fruit := Color(0.79, 0.15, 0.06) if crop in ["tomato", "pepper"] else Color(0.86, 0.76, 0.3)
-				foliage.piece("sphere", p + Vector3(0.13, size * 0.72, 0.04), Vector3(0.19, 0.2, 0.19), fruit)
-		else:
-			for leaf in range(4):
-				var angle := leaf * TAU / 4.0
-				foliage.piece("sphere", p + Vector3(cos(angle) * 0.13, 0.13, sin(angle) * 0.13) * size, Vector3(0.57, 0.25, 0.4) * size, green, Vector3(0, angle, 0.1))
-	foliage.flush()
+	if not crop.is_empty():
+		FrontierCropMeshes.populate(root, crop, growth, health)
 
 
-func _build_citizens() -> void:
-	for id in _state().get("citizens", {}):
-		var data: Dictionary = _state().citizens[id]
-		if str(data.get("planet", "earth")) != planet:
-			continue
-		var citizen := FrontierCitizen.new()
-		citizen.configure(str(id), _simulation, _host, planet)
-		add_child(citizen)
-		citizen.build()
-		citizens[id] = citizen
+func _build_citizen(id: String) -> void:
+	var citizen := FrontierCitizen.new()
+	citizen.configure(id, _simulation, _host, planet)
+	add_child(citizen)
+	citizen.build()
+	citizens[id] = citizen
 
 
 func _path(points: Array, width: float) -> void:
-	_props.frame = Transform3D.IDENTITY
-	var road := Color(0.52, 0.43, 0.28) if planet == "earth" else Color(0.33, 0.35, 0.37)
-	if planet == "moon":
-		_build_surface_path(points, width, road)
+	if _collision_only:
 		return
-	for index in range(points.size() - 1):
-		var start: Vector2 = points[index]
-		var finish: Vector2 = points[index + 1]
-		var length := start.distance_to(finish)
-		var steps := maxi(ceili(length / 3.0), 1)
-		var angle := atan2(finish.x - start.x, finish.y - start.y)
-		for step in range(steps):
-			var xz := start.lerp(finish, (step + 0.5) / float(steps))
-			_set_frame(xz)
-			_props.box(Vector3(0, 0.025, 0), Vector3(width, 0.05, length / steps + 0.1), road, false, Vector3(0, angle, 0))
-			if planet == "moon" and step % 4 == 0:
-				var edge := Vector2(cos(angle), -sin(angle)) * (width * 0.5 + 0.2)
-				_props.frame = Transform3D.IDENTITY
-				_props.piece("sphere", _point(xz + edge, 0.3), Vector3(0.17, 0.25, 0.17), Color(0.45, 0.85, 0.84), Vector3.ZERO, 0, 0.25)
+	_props.frame = Transform3D.IDENTITY
+	var road := Color(0.52, 0.43, 0.28) if planet == "earth" else Color(0.14, 0.18, 0.21)
+	_build_surface_path(points, width, road, planet=="earth")
 
 
-func _build_surface_path(points: Array, width: float, color: Color) -> void:
+func _build_surface_path(points: Array, width: float, color: Color, clip_roads := false) -> void:
 	var vertices := PackedVector3Array()
 	var indices := PackedInt32Array()
 	for segment in range(points.size() - 1):
@@ -717,14 +746,22 @@ func _build_surface_path(points: Array, width: float, color: Color) -> void:
 			vertices.append(_point(xz - side, 0.075))
 			vertices.append(_point(xz + side, 0.075))
 			if step < steps:
-				var index := offset + step * 2
-				indices.append_array(PackedInt32Array([index, index + 2, index + 1, index + 1, index + 2, index + 3]))
-			if step % 14 == 0:
+				var end_xz := start.lerp(finish,(step+1)/float(steps))
+				var clear := true
+				if clip_roads:
+					for corner: Vector2 in [xz-side,xz+side,end_xz-side,end_xz+side]:
+						if _road_distance(corner)<4.02: clear = false
+				if clear:
+					var index := offset + step * 2
+					indices.append_array(PackedInt32Array([index, index + 2, index + 1, index + 1, index + 2, index + 3]))
+			if planet == "moon" and step % 14 == 0:
 				_props.piece("sphere", _point(xz + side, 0.22), Vector3(0.17, 0.25, 0.17), Color(0.45, 0.85, 0.84), Vector3.ZERO, 0, 0.25)
-	_surface_mesh("LunarServiceWalkway", vertices, indices, color)
+	_surface_mesh("ConformingServiceWalkway", vertices, indices, color)
 
 
-func _build_surface_pad(center: Vector2, radius: float) -> void:
+func _build_surface_pad(center: Vector2, radius: float, color := NAVY) -> void:
+	if _collision_only:
+		return
 	var vertices := PackedVector3Array()
 	var indices := PackedInt32Array()
 	var sectors := 48
@@ -737,29 +774,44 @@ func _build_surface_pad(center: Vector2, radius: float) -> void:
 				var current := ring * sectors + sector
 				var next := ring * sectors + (sector + 1) % sectors
 				indices.append_array(PackedInt32Array([current, next, current + sectors, current + sectors, next, next + sectors]))
-	_surface_mesh("ConformingCargoApron", vertices, indices, NAVY)
+	_surface_mesh("ConformingCargoApron", vertices, indices, color)
 
 
 func _surface_mesh(node_name: String, vertices: PackedVector3Array,
 		indices: PackedInt32Array, color: Color) -> void:
+	if _collision_only or indices.is_empty():
+		return
+	var key := color.to_html()
+	if not _surface_batches.has(key):
+		_surface_batches[key] = {"name":node_name,"color":color,
+			"vertices":PackedVector3Array(),"indices":PackedInt32Array()}
+	var batch: Dictionary = _surface_batches[key]
+	var offset: int = batch.vertices.size()
+	batch.vertices.append_array(vertices)
+	for index in indices:
+		batch.indices.append(index+offset)
+
+
+func _flush_surface_step() -> void:
+	var key: String = _surface_batches.keys()[0]
+	var batch: Dictionary = _surface_batches[key]
 	var surface := SurfaceTool.new()
 	surface.begin(Mesh.PRIMITIVE_TRIANGLES)
-	for vertex in vertices:
+	for vertex in batch.vertices:
 		surface.add_vertex(vertex)
-	# Godot's front faces use clockwise winding; reverse the geometric
-	# upward-cross-product order so walking surfaces face the sky.
-	for index in range(0, indices.size(), 3):
-		surface.add_index(indices[index])
-		surface.add_index(indices[index + 2])
-		surface.add_index(indices[index + 1])
+	for index in range(0,batch.indices.size(),3):
+		surface.add_index(batch.indices[index])
+		surface.add_index(batch.indices[index+2])
+		surface.add_index(batch.indices[index+1])
 	surface.generate_normals()
 	var node := MeshInstance3D.new()
-	node.name = node_name
+	node.name = str(batch.name)
 	node.mesh = surface.commit()
-	node.material_override = FrontierProps.material(color)
+	node.material_override = FrontierProps.material(batch.color)
 	node.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-	node.visibility_range_end = 300.0
+	node.visibility_range_end = 520.0
 	add_child(node)
+	_surface_batches.erase(key)
 
 
 func _tree(xz: Vector2) -> void:
@@ -805,3 +857,96 @@ func _pennant_span(start: Vector2, finish: Vector2) -> void:
 		var to := a.lerp(b, next_fraction) - Vector3.UP * sin(next_fraction * PI) * 0.8
 		_props.beam(from, to, 0.025, BAMBOO)
 		_props.piece("cone", from - Vector3.UP * 0.24, Vector3(0.33, 0.5, 0.04), [TEAL, SAFETY, Color(0.7, 0.26, 0.16)][index % 3], Vector3(0, 0, PI))
+
+
+func _build_street(start: Vector2, finish: Vector2, width: float) -> void:
+	_props.frame = Transform3D.IDENTITY
+	_build_surface_path([start, finish], width, Color(0.28,0.31,0.29))
+	var direction := (finish-start).normalized()
+	var side := Vector2(direction.y,-direction.x)
+	var length := start.distance_to(finish)
+	# Broken center lines stop before every graph junction and loading bay.
+	var distance := 5.0
+	while distance < length-5.0:
+		var end := minf(distance+2.1,length-5.0)
+		var a := start+direction*distance
+		var b := start+direction*end
+		_street_strip(a,b,0.13,Color(0.88,0.78,0.48),0.105)
+		distance += 5.2
+	# Sidewalks are interrupted around the well, homes and community tree.
+	for sign_value: float in [-1.0,1.0]:
+		var steps := maxi(ceili(length/1.5),1)
+		for step in range(steps):
+			var a := start.lerp(finish,float(step)/steps)+side*sign_value*(width*0.5+0.65)
+			var b := start.lerp(finish,float(step+1)/steps)+side*sign_value*(width*0.5+0.65)
+			if _props.has_ground_clearance((a+b)*0.5,0.75) and _road_distance((a+b)*0.5)>width*0.5+0.05:
+				_street_strip(a,b,1.1,Color(0.59,0.55,0.43),0.13)
+
+
+func _street_strip(start: Vector2, finish: Vector2, width: float, color: Color, lift: float) -> void:
+	var direction := (finish-start).normalized()
+	var side := Vector2(direction.y,-direction.x)*width*0.5
+	var points := PackedVector3Array([_point(start-side,lift),_point(start+side,lift),
+		_point(finish-side,lift),_point(finish+side,lift)])
+	_surface_mesh("StreetMarking",points,PackedInt32Array([0,2,1,1,2,3]),color)
+
+
+func _road_distance(point: Vector2) -> float:
+	var nearest := INF
+	for segment: Dictionary in FrontierRoutes.road_segments():
+		var close := Geometry2D.get_closest_point_to_segment(point,segment["from"],segment.to)
+		nearest = minf(nearest,point.distance_to(close))
+	return nearest
+
+
+func _build_forest_row(row: int) -> void:
+	# Deterministic placement shares exactly the same trunk colliders on server
+	# and clients. Roads, service aisles and interactables stay clear.
+	for column in range(-8,9):
+		var x := column*10.5 + sin(float(row*17+column*11))*2.5
+		var z := row*10.5 + cos(float(row*23-column*7))*2.5
+		var xz := Vector2(x,z)
+		if xz.length()<12 or (xz.x>-63 and xz.x<-17 and xz.y>-49 and xz.y<-19):
+			continue
+		if _road_distance(xz)<7.2 or not _props.has_ground_clearance(xz,4.0):
+			continue
+		var blocked := false
+		for bay: Vector2 in FrontierRoutes.loading_bays().values():
+			if xz.distance_to(bay)<9.0:
+				blocked = true
+		for bay: Vector2 in FrontierRoutes.service_parking_bays().values():
+			if xz.distance_to(bay)<5.0:
+				blocked = true
+		for entry in _interactions:
+			if Vector2(entry.position.x,entry.position.z).distance_to(xz)<5.0:
+				blocked = true
+				break
+		for point in tree_positions:
+			if point.distance_to(xz)<7.0:
+				blocked = true
+		if not blocked:
+			tree_positions.append(xz)
+			_tree(xz)
+
+
+func _build_loading_bay(id: String) -> void:
+	if id in ["town_square","player_earth","cooperative","water","kitchen","earth_market"]:
+		return
+	var center: Vector2 = FrontierRoutes.loading_bays()[id]
+	if _props.has_ground_clearance(center,7.3):
+		_build_surface_pad(center,7.3,Color(0.28,0.31,0.29))
+	# Actual driver's stopping area, shared with the vehicle graph. Insets
+	# are painted on the graded collider instead of adding raised blockers.
+	for side in [-1.6,1.6]:
+		_street_strip(center+Vector2(side,-3.1),center+Vector2(side,3.1),0.1,SAFETY,0.115)
+	_street_strip(center+Vector2(-1.6,-3.1),center+Vector2(1.6,-3.1),0.1,SAFETY,0.115)
+
+
+func _town_accent(fallback: Color) -> Color:
+	var tint: Variant = town_info.get("color",null)
+	if tint is Color: return fallback.lerp(tint,0.5)
+	if tint is String and Color.html_is_valid(tint): return fallback.lerp(Color(tint),0.5)
+	var society := str(town_info.get("society_id",""))
+	if society=="harbor": return fallback.lerp(Color(0.17,0.44,0.65),0.5)
+	if society=="ridge": return fallback.lerp(Color(0.68,0.34,0.17),0.5)
+	return fallback

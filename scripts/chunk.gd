@@ -723,6 +723,10 @@ func _build_rocks() -> void:
 
 
 func _build_grass() -> void:
+	# Towns supply their own planted detail; wilderness tufts otherwise pierce
+	# authored streets, greenhouse beds and service floors independently of layout.
+	if Gen.frontier_world and FrontierTownLayout.touches_town(key.x, key.y, Gen.CHUNK):
+		return
 	var rng := RandomNumberGenerator.new()
 	rng.seed = key.x * 917 + key.y * 3181 + Gen.world_seed
 	var x0 := key.x * Gen.CHUNK

@@ -4,12 +4,12 @@ config_version=5
 [application]
 
 config/name="TROOP"
-config/version="0.5.0"
+config/version="0.6.0"
 config/update_repository="charlesjsantosgit/troop"
 config/update_channel="stable"
 config/update_auto_check=true
 config/update_auto_download=true
-config/network_protocol=11
+config/network_protocol=12
 run/main_scene="res://scenes/main.tscn"
 run/max_fps=160
 config/icon="res://icon.svg"

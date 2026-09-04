@@ -24,6 +24,7 @@ var inventory_ui: BackpackInventoryUI
 var local_suit: SpaceSuitSystem
 var voyage_camera: Camera3D
 var _voyage_environment: Environment
+var _voyage_sky: LunarSky
 
 var _ui_layer: CanvasLayer
 var _mission_panel: PanelContainer
@@ -239,6 +240,14 @@ func _create_voyage_camera() -> void:
 	var source_environment := world._environment if world._environment \
 		else moon_world.lunar_environment
 	_voyage_environment = source_environment.duplicate()
+	_voyage_sky = LunarSky.new()
+	_voyage_sky.material.set_shader_parameter("earth_visibility", 0.0)
+	var transition_sky := Sky.new()
+	transition_sky.sky_material = _voyage_sky.material
+	transition_sky.radiance_size = Sky.RADIANCE_SIZE_32
+	_voyage_environment.background_mode = Environment.BG_SKY
+	_voyage_environment.sky = transition_sky
+	rocket.voyage_visuals.set_photographic_background(true)
 
 
 func _connect_network() -> void:
@@ -354,8 +363,10 @@ static func _panel_style(fill: Color, border: Color,
 func _process(delta: float) -> void:
 	if not world or not world.local_player:
 		return
-	_astronomy_credit.visible = Net.player_realm() == Net.PlayerRealm.MOON \
-		and not is_instance_valid(world.get("frontier")) and not is_ui_open()
+	_astronomy_credit.visible = (Net.player_realm() == Net.PlayerRealm.TRANSIT \
+		 or (Net.player_realm() == Net.PlayerRealm.EARTH and world._space_sky_weight > 0.01) \
+		 or (Net.player_realm() == Net.PlayerRealm.MOON \
+		 and not is_instance_valid(world.get("frontier")))) and not is_ui_open()
 	_local_reboard_cooldown_remaining = maxf(
 		_local_reboard_cooldown_remaining - delta, 0.0)
 	_local_disembark_request_remaining = maxf(
@@ -1255,6 +1266,18 @@ func _update_voyage_environment(elapsed: float, travel_outbound: bool) -> void:
 		# Standalone expedition scenes may deliberately omit the Earth sky.
 		voyage_camera.environment = lunar
 		return
+	# Blend optical extinction in the sky itself; a finite black sphere hides
+	# genuine stars and can cut through scaled planets at a different depth.
+	_voyage_sky.set_sun_direction(moon_world.lunar_sun_direction())
+	_voyage_sky.set_observation_mode(moon_world.lunar_sky.observation_mode)
+	_voyage_sky.material.set_shader_parameter("atmosphere_strength", 1.0 - vacuum_weight)
+	var earth_material := earth.sky.sky_material as ShaderMaterial if earth.sky else null
+	if earth_material:
+		for pair in [["atmosphere_top", "sky_top_color"], ["atmosphere_horizon", "sky_horizon_color"],
+				["atmosphere_bottom", "ground_bottom_color"],
+				["atmosphere_energy", "sky_energy"]]:
+			var value: Variant = earth_material.get_shader_parameter(pair[1])
+			if value != null: _voyage_sky.material.set_shader_parameter(pair[0], value)
 	_voyage_environment.ambient_light_color = lunar.ambient_light_color
 	_voyage_environment.ambient_light_energy = lerpf(earth.ambient_light_energy,
 		lunar.ambient_light_energy, vacuum_weight)

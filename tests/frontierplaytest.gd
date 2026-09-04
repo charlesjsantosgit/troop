@@ -83,6 +83,7 @@ func run(main: Node) -> void:
 		and interaction_ids.has("refinery") and interaction_ids.has("gas_station") \
 		and interaction_ids.has("airfield") and interaction_ids.has("carrier"),
 		"finite trading, oil production and three fuel customers have physical interaction points")
+	await _verify_tutorial(player)
 	await _verify_earth_grounding()
 	await _verify_pages("earth")
 	await _verify_refinery_market(player)
@@ -162,6 +163,12 @@ func _citizens_match(planet: String) -> bool:
 
 
 func _verify_earth_grounding() -> void:
+	# Terrain collision intentionally sleeps outside the actor's3x3 safety
+	# window. Visit the whole farm instead of demanding distant sleeping bodies.
+	var player: MonkeyPlayer = _main.world.local_player
+	var previous := player.global_position
+	player.admin_teleport(Vector3(-39,Gen.height(-39,-30)+0.2,-30))
+	await _physics_frames(20)
 	var max_error := 0.0
 	var hits := 0
 	var count := 0
@@ -177,20 +184,41 @@ func _verify_earth_grounding() -> void:
 		if not hit.is_empty() and absf((hit.position as Vector3).y - point.y) < 0.08:
 			hits += 1
 	_check(count > 0 and max_error < 0.03 and hits == count,
-		"all Earth crop beds sit on the rendered-and-collidable town terrain",
+		"visiting the farm activates exact rendered-and-collidable ground beneath all Earth beds",
 		"grounded=%d/%d max_height_error=%.4f" % [hits, count, max_error])
+	player.admin_teleport(previous)
+	await _physics_frames(3)
+
+
+func _verify_tutorial(player: MonkeyPlayer) -> void:
+	var guide: Node = _controller.tutorial
+	_check(is_instance_valid(guide) and bool(guide.active) and guide.chapter=="basics" \
+		and int(guide.step)==0 and _controller.waypoint.get("id")=="nana" \
+		and _controller._waypoint_marker.is_visible_in_tree() and guide._panel.is_visible_in_tree(),
+		"the optional first-day guide and its real Nana marker survive initial realm setup")
+	if not is_instance_valid(guide): return
+	player.admin_teleport(_controller._interaction_position("nana"))
+	var opened := _controller.try_interact(player)
+	await get_tree().process_frame
+	_check(opened and _controller.ui.context.get("id")=="nana" \
+		and _controller.ui._heading.text=="Nana" and int(guide.step)==1,
+		"meeting the real market keeper through E advances the first tutorial lesson")
+	guide.pause()
+	_controller.ui.close()
+	await get_tree().process_frame
 
 
 func _verify_pages(planet: String) -> void:
 	for page: String in FrontierUI.PAGES:
 		var errors_before := _recorder.messages().size()
-		_controller.ui.open(page)
+		_controller.ui.open({})
+		_controller.ui.select_page(page)
 		await get_tree().process_frame
 		await get_tree().process_frame
 		var ui := _controller.ui as FrontierUI
 		var panel := ui._panel.get_global_rect()
 		var viewport := get_viewport().get_visible_rect()
-		_check(ui.visible and ui.page == page and ui._heading.text == page \
+		_check(ui.visible and ui.page == page and ui.context.is_empty() and ui._heading.text == ("TRAVEL JOURNAL" if page == "Journal" else page.to_upper()) \
 			and ui._body.get_child_count() > 0 and ui._nav[page].disabled \
 			and viewport.grow(1.0).encloses(panel) \
 			and _recorder.messages().size() == errors_before,
@@ -205,21 +233,23 @@ func _verify_citizen_conversation(player: MonkeyPlayer) -> void:
 	var opened := _controller.try_interact(player)
 	await get_tree().process_frame
 	var conversation_text := _control_text(_controller.ui._body)
-	_check(opened and _controller.ui.page == "Crew" \
+	_check(opened and _controller.ui.page == "Interaction" \
 		and str(_controller.selected_interaction.get("id", "")) == "ookbar" \
-		and conversation_text.contains("Talking with Ookbar") \
+		and _controller.ui._heading.text == "Ookbar" \
+		and not conversation_text.contains("Petra") \
 		and conversation_text.contains("Right now:") \
 		and conversation_text.contains("Hunger") \
-		and conversation_text.contains("Could you help?"),
+		and conversation_text.contains("A welcome for the neighborhood"),
 		"E at Ookbar opens his live work, needs and personal quest conversation")
 	var accept := _button_with_text(_controller.ui._body, "Accept request")
 	var state: Dictionary = _controller.simulation.state
 	var treasury_before := int(state.accounts.treasury)
 	var reward := int(state.quests.first_harvest.reward)
+	var had_accept := accept != null
 	if accept:
 		accept.pressed.emit()
 	await get_tree().process_frame
-	_check(accept != null and str(state.quests.first_harvest.status) == "active" \
+	_check(had_accept and str(state.quests.first_harvest.status) == "active" \
 		and int(state.accounts.treasury) == treasury_before - reward \
 		and int(state.accounts.escrow_first_harvest) == reward,
 		"Ookbar's actual Accept request button funds the correct contract escrow")
@@ -228,13 +258,10 @@ func _verify_citizen_conversation(player: MonkeyPlayer) -> void:
 
 func _verify_refinery_market(player: MonkeyPlayer) -> void:
 	player.admin_teleport(_controller._interaction_position("refinery"))
-	_controller.ui.open("Market")
+	var opened := _controller.try_interact(player)
 	await get_tree().process_frame
-	var desk := _button_with_text(_controller.ui._body, "Refinery fuel desk")
-	var found_desk := desk != null
-	if desk: desk.pressed.emit()
-	await get_tree().process_frame
-	_check(found_desk and _controller.ui._market_location == "refinery" \
+	_check(opened and _controller.ui.context.get("id") == "refinery" \
+		and _controller.ui.page == "Interaction" \
 		and _control_text(_controller.ui._body).contains("Crude Oil"),
 		"the refinery desk exposes real petroleum stock needed for fuel contracts")
 	var simulation = _controller.simulation
@@ -244,7 +271,7 @@ func _verify_refinery_market(player: MonkeyPlayer) -> void:
 	var pack_before := int(simulation.state.inventories.player_earth.get("crude_oil", 0))
 	var cash_before := int(simulation.state.accounts.player)
 	var quote: int = simulation.quote("refinery", "crude_oil", amount, true)
-	var buy := _button_with_text(_controller.ui._body, "Buy")
+	var buy := _button_for_label(_controller.ui._body, "Crude Oil", "Buy")
 	if buy: buy.pressed.emit()
 	_check(buy != null and int(simulation.state.inventories.refinery.crude_oil) == source_before - amount \
 		and int(simulation.state.inventories.player_earth.get("crude_oil", 0)) == pack_before + amount \
@@ -268,6 +295,24 @@ func _button_with_text(node: Node, caption: String) -> Button:
 		if found:
 			return found
 	return null
+
+
+func _button_for_label(node: Node, label: String, caption: String) -> Button:
+	# Find the item's own panel, so alphabetic stock changes never buy a
+	# different commodity while accidentally preserving total cash assertions.
+	for child: Node in node.get_children():
+		var found := _button_for_label(child, label, caption)
+		if found: return found
+	if node is PanelContainer and _has_label(node,label):
+		return _button_with_text(node,caption)
+	return null
+
+
+func _has_label(node: Node, caption: String) -> bool:
+	if node is Label and node.text == caption: return true
+	for child: Node in node.get_children():
+		if _has_label(child,caption): return true
+	return false
 
 
 func _verify_harvest(player: MonkeyPlayer) -> void:
@@ -294,13 +339,18 @@ func _verify_harvest(player: MonkeyPlayer) -> void:
 		return
 	player.admin_teleport(interaction.position)
 	var opened := _controller.try_interact(player)
-	_check(opened and _controller.ui.visible and _controller.ui.page == "Farms" \
+	_check(opened and _controller.ui.visible and _controller.ui.page == "Interaction" \
+		and _controller.ui.context.get("id") == plot_id \
 		and str(_controller.selected_interaction.get("id", "")) == plot_id,
 		"E at an actual crop bed opens its farming controls")
-	var harvested: Dictionary = _controller.request_action("harvest", {"plot": plot_id})
+	var harvest_button := _button_with_text(_controller.ui._body, "Harvest")
+	var had_harvest := harvest_button != null
+	if harvest_button: harvest_button.pressed.emit()
 	var stock_after := int(simulation.state.inventories.player_earth.get("banana", 0))
 	_controller.earth_settlement._refresh_state()
-	_check(bool(harvested.get("ok", false)) and stock_after > stock_before \
+	await get_tree().process_frame
+	await get_tree().process_frame
+	_check(had_harvest and stock_after > stock_before \
 		and str(simulation.state.plots[plot_id].crop).is_empty() \
 		and (_controller.earth_settlement.plot_roots[plot_id] as Node3D).get_child_count() == 0,
 		"nearby harvesting transfers produce to the ledger and visibly empties the crop bed")
@@ -467,84 +517,100 @@ func _verify_constructed_obstruction() -> void:
 	var simulation = _controller.simulation
 	var original: Dictionary = simulation.state.duplicate(true)
 	var accumulator := float(simulation._accumulator)
-	# Isolate a finite delivery from other workers' scheduling; the snapshot is
-	# restored after the physical obstruction exercise, including wages and cargo.
+	var site: FrontierSite = _controller.earth_site
+	var traffic: FrontierTraffic = site.get_meta("frontier_traffic") if site.has_meta("frontier_traffic") else null
+	_check(is_instance_valid(traffic) and traffic.authority and traffic.vehicle_for("diesel") != null,
+		"the offline town owns a real authoritative delivery vehicle")
+	if not is_instance_valid(traffic) or traffic.vehicle_for("diesel") == null:
+		return
+	var contexts: Dictionary = traffic.drivers.duplicate(true)
+	var obstacles: Array = traffic._external_obstacles.duplicate(true)
+	var saved := {}
+	for id in traffic.vehicles:
+		var body: Vehicle = traffic.vehicles[id]
+		saved[id] = {"transform":body.global_transform,"velocity":body.linear_velocity,
+			"angular":body.angular_velocity,"freeze":body.freeze,"layer":body.collision_layer,
+			"mask":body.collision_mask,"gear":body.engine.gear}
+		if id != "diesel":
+			body.freeze=true
+			body.collision_layer=0
+			body.collision_mask=0
 	for citizen: Dictionary in simulation.state.citizens.values():
-		citizen.enabled = false
-		citizen._job = {}
+		citizen.enabled=false
+		citizen._job={}
 	var worker: Dictionary = simulation.state.citizens.diesel
-	var refinery: Array = simulation.state.locations.refinery.position
-	worker.enabled = true
-	worker.position = [float(refinery[0]) + 10.0, float(refinery[1])]
-	worker.cooldown = 0.0
-	var loaded: Dictionary = simulation._load_worker(worker, {
-		"from":"gas_station", "to":"refinery", "item":"gasoline", "quantity":3}, false)
-	simulation._set_job(worker, "unload", "refinery", "Unloading a finite test delivery", {}, 2.0)
-	# This is the last straight edge of the authored industrial service road.
-	worker.route = [refinery.duplicate()]
-	_controller._sync_obstructions()
-	_check(bool(loaded.get("ok", false)) and str(worker.route_blocked).is_empty(),
-		"a loaded tanker begins on an unobstructed real refinery approach")
+	worker.enabled=true
+	worker.cooldown=0.0
+	worker.carrying={}
+	var loaded: Dictionary = simulation._load_worker(worker,{
+		"from":"gas_station","to":"refinery","item":"gasoline","quantity":3},false)
+	simulation._set_job(worker,"unload","refinery","Unloading a finite physical delivery",{},2.0)
+	var car: Vehicle = traffic.vehicle_for("diesel")
+	car.freeze=false
+	car.settle_at(site.surface_point(60,41),PI*0.5)
+	car.engine.gear=1
+	traffic.drivers.diesel.epoch=-1
+	traffic.drivers.diesel.stopped=0.0
+	traffic.drivers.diesel.fuel_stop=false
+	traffic.drivers.diesel.previous=car.global_position
+	traffic._obstacle_cache.clear()
+	traffic.set_obstacles([])
 	var obstacle := StaticBody3D.new()
-	obstacle.name = "ConstructedRoadBarrierTest"
+	obstacle.name="ConstructedRoadBarrierTest"
 	var shape := CollisionShape3D.new()
 	var box := BoxShape3D.new()
-	box.size = Vector3(0.6, 2.4, 4.0)
-	shape.shape = box
+	box.size=Vector3(0.7,3.0,14.0)
+	shape.shape=box
 	obstacle.add_child(shape)
-	obstacle.collision_layer = 1
-	obstacle.collision_mask = 1
 	_main.world.add_child(obstacle)
-	obstacle.global_position = _controller.earth_site.surface_point(float(refinery[0]) + 7.0, float(refinery[1]), 1.2)
-	await _physics_frames(2)
-	var position_before: Array = worker.position.duplicate()
+	obstacle.global_position=site.surface_point(78,35,1.5)
 	var cargo_before: Dictionary = worker.carrying.duplicate(true)
 	var work_before := float(worker.work_remaining)
-	var stock_before := int(simulation.stock("refinery", "gasoline"))
+	var stock_before: int = simulation.stock("refinery","gasoline")
 	var completed_before := int(worker.completed)
-	# A positive starting timer catches a refresh-order regression where probes
-	# run on startup but never again after the refresh timer is decremented/reset.
-	_controller._refresh = 0.2
-	_controller.simulation_enabled = true
-	await get_tree().create_timer(0.6, true, false, true).timeout
-	_controller.simulation_enabled = false
-	var detected_automatically := not str(worker.route_blocked).is_empty()
-	for second in range(5):
-		_controller._sync_obstructions()
-		simulation.tick(1.0)
-	_check(detected_automatically and not str(worker.route_blocked).is_empty() \
-		and str(worker.activity) == "Waiting for a clear route" \
-		and worker.position == position_before and worker.carrying == cargo_before \
-		and float(worker.work_remaining) == work_before \
-		and int(worker.completed) == completed_before \
-		and int(simulation.stock("refinery", "gasoline")) == stock_before,
-		"a constructed physical wall stops the tanker, its task timer and delivery without losing cargo")
+	for frame in range(600):
+		await get_tree().physics_frame
+		simulation.tick(1.0/float(Engine.physics_ticks_per_second))
+	var held := car.global_position
+	for frame in range(120):
+		await get_tree().physics_frame
+		simulation.tick(1.0/float(Engine.physics_ticks_per_second))
+	_check(bool(loaded.get("ok",false)) and car.speed()<0.5 and car.global_position.distance_to(held)<0.15 \
+		and worker.carrying==cargo_before and float(worker.work_remaining)==work_before \
+		and int(worker.completed)==completed_before and simulation.stock("refinery","gasoline")==stock_before,
+		"a real constructed wall stops the physical tanker and preserves its cargo, work timer and delivery ledger",
+		"position=%s speed=%.3f blocker=%s"%[site.to_local(car.global_position),car.speed(),traffic.drivers.diesel.blocker])
 	obstacle.queue_free()
 	await _physics_frames(2)
-	_controller._refresh = 0.2
-	_controller.simulation_enabled = true
-	await get_tree().create_timer(0.6, true, false, true).timeout
-	_controller.simulation_enabled = false
-	simulation.tick(1.0)
-	var resumed: bool = str(worker.route_blocked).is_empty() and worker.position != position_before
-	for second in range(7):
-		if int(worker.completed) > completed_before:
-			break
-		_controller._sync_obstructions()
-		simulation.tick(1.0)
-	_check(resumed and int(worker.completed) == completed_before + 1 \
-		and worker.carrying.is_empty() \
-		and int(simulation.stock("refinery", "gasoline")) == stock_before + 3,
-		"removing the real wall resumes travel and completes the same finite delivery",
-		"resumed=%s position=%s destination=%s remaining=%.2f blocker=%s stock=%d" % [
-			resumed,worker.position,worker.destination,float(worker.work_remaining),
-			str(worker.route_blocked),int(simulation.stock("refinery", "gasoline"))])
-	simulation.state = original
-	simulation._accumulator = accumulator
+	traffic._obstacle_cache.clear()
+	var resumed := false
+	for frame in range(3000):
+		await get_tree().physics_frame
+		simulation.tick(1.0/float(Engine.physics_ticks_per_second))
+		resumed=resumed or car.global_position.distance_to(held)>1.0
+		if int(worker.completed)>completed_before: break
+	_check(resumed and int(worker.completed)==completed_before+1 and worker.carrying.is_empty() \
+		and simulation.stock("refinery","gasoline")==stock_before+3 and car.speed()<0.5,
+		"removing the wall lets the same vehicle drive, stop and complete its finite delivery",
+		"position=%s speed=%.3f remaining=%.2f blocker=%s"%[site.to_local(car.global_position),car.speed(),worker.work_remaining,traffic.drivers.diesel.blocker])
+	simulation.state=original
+	simulation._accumulator=accumulator
+	traffic.drivers=contexts
+	traffic.set_obstacles(obstacles)
+	traffic._obstacle_cache.clear()
+	for id in saved:
+		var body: Vehicle=traffic.vehicles[id]
+		body.global_transform=saved[id].transform
+		body.linear_velocity=saved[id].velocity
+		body.angular_velocity=saved[id].angular
+		body.freeze=saved[id].freeze
+		body.collision_layer=saved[id].layer
+		body.collision_mask=saved[id].mask
+		body.engine.gear=saved[id].gear
+		body.reset_physics_interpolation()
 	_controller.earth_settlement._refresh_state()
 	_controller.moon_settlement._refresh_state()
 	await _physics_frames(2)
-
 
 func _verify_pause() -> void:
 	_controller.simulation_enabled = true

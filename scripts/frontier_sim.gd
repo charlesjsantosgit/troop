@@ -85,6 +85,9 @@ const MOON_LOCATIONS := {
 var state: Dictionary = {}
 var crops: Dictionary = {}
 var _accumulator := 0.0
+# Server domain supplies one shared player book; offline games keep it empty.
+var shared_players: Dictionary = {}
+var multiplayer_mode := false
 
 func _init() -> void:
 	for id in CROP_ROWS:
@@ -362,8 +365,17 @@ func action(kind: String, payload: Dictionary = {}) -> Dictionary:
 		state.recent_requests[request_id]=result.duplicate(true)
 	return result
 
-func _action(kind: String, payload: Dictionary) -> Dictionary:
-	var player_location := "player_"+str(state.planet)
+func action_for(actor: String, planet: String, kind: String, payload: Dictionary = {}) -> Dictionary:
+	if not multiplayer_mode or not shared_players.has(actor) or planet not in ["earth","moon"]:
+		return _result(false,"Unknown society member or world.")
+	if kind=="travel": return _result(false,"Travel belongs to the expedition authority.")
+	var result := _action(kind,payload,actor,planet)
+	if result.ok and kind!="inspect": _event(result.message)
+	return result
+
+func _action(kind: String, payload: Dictionary, actor: String = "player", realm: String = "") -> Dictionary:
+	if realm.is_empty(): realm=str(state.planet)
+	var player_location := inventory_location(actor,realm)
 	match kind:
 		"travel":
 			var planet := str(payload.get("planet",""))
@@ -374,7 +386,7 @@ func _action(kind: String, payload: Dictionary) -> Dictionary:
 			var id := str(payload.get("plot",""))
 			if not state.plots.has(id): return _result(false,"Choose a valid plot.")
 			var plot: Dictionary = state.plots[id]
-			if plot.owner!="player" or plot.planet!=state.planet: return _result(false,"Use a plot you own on your current world.")
+			if plot.owner!=actor or plot.planet!=realm: return _result(false,"Use a plot you own on your current world.")
 			match kind:
 				"plant": return _plant(plot,str(payload.get("crop","")),player_location)
 				"harvest": return _harvest(plot,player_location)
@@ -388,7 +400,7 @@ func _action(kind: String, payload: Dictionary) -> Dictionary:
 			plot.health=1.0
 			return _result(true,"Plot cleared for a new planting.")
 		"buy","sell":
-			var market := str(payload.get("market",str(state.planet)+"_market"))
+			var market := str(payload.get("market",realm+"_market"))
 			var item := str(payload.get("item",""))
 			var quantity := _quantity(payload.get("quantity",1))
 			if market not in ["earth_market","moon_market","refinery"] or not _same_planet(market,player_location):
@@ -396,8 +408,8 @@ func _action(kind: String, payload: Dictionary) -> Dictionary:
 			if market=="refinery" and item not in ["crude_oil","gasoline","diesel","jet_fuel","bitumen","water","spare_parts"]:
 				return _result(false,"The refinery trades petroleum products, process water and maintenance parts.")
 			return _trade(market if kind=="buy" else player_location,player_location if kind=="buy" else market,item,quantity,kind=="buy")
-		"ship": return _ship(payload)
-		"accept_quest","deliver_quest","cancel_quest": return _quest_action(kind,str(payload.get("id","")))
+		"ship": return _ship(payload,actor,realm)
+		"accept_quest","deliver_quest","cancel_quest": return _quest_action(kind,str(payload.get("id","")),actor,realm)
 		"assign_job":
 			var id := str(payload.get("citizen",""))
 			var job := str(payload.get("job",""))
@@ -407,9 +419,10 @@ func _action(kind: String, payload: Dictionary) -> Dictionary:
 				return _result(false,"This job needs Earth facilities.")
 			if not worker.carrying.is_empty() or not worker._job.is_empty():
 				worker["pending_job"]=job
+				worker["pending_employer"]=actor
 				return _result(true,worker.name+" will join your crew as "+job.replace("_"," ")+" after completing the committed task or delivery.")
 			worker.job=job
-			worker.employer="player"
+			worker.employer=actor
 			worker.enabled=true
 			worker.cooldown=0.0
 			return _result(true,worker.name+" hired as "+job.replace("_"," ")+"; wage "+str(worker.wage)+" credits per completed task.")
@@ -421,10 +434,10 @@ func _action(kind: String, payload: Dictionary) -> Dictionary:
 			return _result(true,worker.name+(" resumed work." if worker.enabled else " will pause after completing the committed task."))
 		"repair":
 			var id := str(payload.get("facility","lunar_greenhouse"))
-			if not state.facilities.has(id) or state.facilities[id].planet!=state.planet: return _result(false,"Visit the facility's world to repair it.")
+			if not state.facilities.has(id) or state.facilities[id].planet!=realm: return _result(false,"Visit the facility's world to repair it.")
 			return _repair(id,player_location)
 		"refill_habitat":
-			if state.planet!="moon": return _result(false,"Visit the lunar greenhouse first.")
+			if realm!="moon": return _result(false,"Visit the lunar greenhouse first.")
 			var quantity := _quantity(payload.get("quantity",20))
 			if quantity==0 or stock(player_location,"water")<quantity: return _result(false,"Not enough water in your Moon locker.")
 			if float(state.facilities.lunar_greenhouse.water_l)+quantity>500.0: return _result(false,"The greenhouse reservoir holds 500 litres.")
@@ -432,27 +445,27 @@ func _action(kind: String, payload: Dictionary) -> Dictionary:
 			state.facilities.lunar_greenhouse.water_l+=quantity
 			return _result(true,"Transferred %d litres to the greenhouse reservoir."%quantity)
 		"build_solar":
-			if state.planet!="moon": return _result(false,"Build the solar array at First Landing.")
+			if realm!="moon": return _result(false,"Build the solar array at First Landing.")
 			if int(state.facilities.solar_array.panels)>=12: return _result(false,"The prepared solar field has twelve mounting positions.")
-			if stock(player_location,"solar_kit")<1 or int(state.accounts.player)<150: return _result(false,"Installation requires one solar kit and 150 trade credits.")
+			if stock(player_location,"solar_kit")<1 or balance(actor)<150: return _result(false,"Installation requires one solar kit and 150 trade credits.")
 			_consume(player_location,"solar_kit",1,"Installed solar equipment")
-			_transfer("player","lunar_cooperative",150,"Solar installation labor")
+			_transfer(actor,"lunar_cooperative",150,"Solar installation labor")
 			state.facilities.solar_array.panels+=1
 			return _result(true,"Installed a 3.8 kW peak solar panel. Generation follows sunlight and condition.")
 		"upgrade_battery":
-			if state.planet!="moon": return _result(false,"Upgrade storage at the lunar solar field.")
+			if realm!="moon": return _result(false,"Upgrade storage at the lunar solar field.")
 			var room: Dictionary = state.facilities.lunar_greenhouse
 			if float(room.battery_capacity_kwh)>=1200.0: return _result(false,"Battery housing is at its 1200 kWh limit.")
-			if stock(player_location,"battery_kit")<1 or int(state.accounts.player)<120: return _result(false,"Battery expansion needs one battery kit and 120 credits.")
+			if stock(player_location,"battery_kit")<1 or balance(actor)<120: return _result(false,"Battery expansion needs one battery kit and 120 credits.")
 			_consume(player_location,"battery_kit",1,"Installed battery storage")
-			_transfer("player","lunar_cooperative",120,"Battery installation labor")
+			_transfer(actor,"lunar_cooperative",120,"Battery installation labor")
 			room.battery_capacity_kwh=minf(1200.0,float(room.battery_capacity_kwh)+100.0)
 			return _result(true,"Added 100 kWh of empty battery storage. Solar surplus will charge it.")
 		"refuel":
-			return _refuel(payload)
+			return _refuel(payload,actor,realm)
 		"process":
 			var recipe := str(payload.get("recipe",""))
-			if state.planet!="earth": return _result(false,"Use the Earth processing workshop.")
+			if realm!="earth": return _result(false,"Use the Earth processing workshop.")
 			return _start_processing(recipe,player_location,"refinery" if recipe=="refine" else "workshop")
 		"inspect":
 			var target := str(payload.get("target",""))
@@ -518,7 +531,7 @@ func _trade(source: String, destination: String, item: String, quantity: int, bu
 	var price := quote(market,item,quantity,buying)
 	var buyer: String = state.locations[destination].owner
 	var seller: String = state.locations[source].owner
-	if int(state.accounts[buyer])<price: return _result(false,"Buyer cannot fund this order; no goods or credits moved.")
+	if balance(buyer)<price: return _result(false,"Buyer cannot fund this order; no goods or credits moved.")
 	_move_goods(source,destination,item,quantity)
 	_transfer(buyer,seller,price,"Trade %d %s"%[quantity,item])
 	state.metrics.trades+=1
@@ -538,25 +551,30 @@ func quote(market: String, item: String, quantity: int = 1, buy: bool = false) -
 		cost+=maxi(1,int(ceil(base*scarcity*freight*(1.12 if buy else 0.82))))
 	return cost
 
-func _ship(payload: Dictionary) -> Dictionary:
-	var source := str(payload.get("from","player_"+str(state.planet)))
-	var destination := str(payload.get("to","player_moon" if state.planet=="earth" else "player_earth"))
+func _ship(payload: Dictionary, actor: String = "player", realm: String = "") -> Dictionary:
+	if realm.is_empty(): realm=str(state.planet)
+	var source := str(payload.get("from",inventory_location(actor,realm)))
+	var destination := str(payload.get("to",inventory_location(actor,"moon" if realm=="earth" else "earth")))
+	# UI aliases name the caller's own lockers, never another player's storage.
+	if source in ["player_earth","player_moon"]: source=inventory_location(actor,source.trim_prefix("player_"))
+	if destination in ["player_earth","player_moon"]: destination=inventory_location(actor,destination.trim_prefix("player_"))
 	var item := str(payload.get("item",""))
 	var quantity := _quantity(payload.get("quantity",1))
-	if source not in ["player_earth","player_moon"] or destination not in ["player_earth","player_moon"] or source==destination or state.locations[source].planet!=state.planet: return _result(false,"Ship from your current locker to your locker on the other world.")
+	if source not in [inventory_location(actor,"earth"),inventory_location(actor,"moon")] or destination not in [inventory_location(actor,"earth"),inventory_location(actor,"moon")] or source==destination or state.locations[source].planet!=realm: return _result(false,"Ship from your current locker to your locker on the other world.")
 	if quantity<1 or not _known_item(item) or stock(source,item)<quantity: return _result(false,"Cargo must exist in your origin locker.")
 	var packages := maxi(1,int(ceil(float(quantity)/10.0)))
 	var needed := packages+(quantity if item=="packaging" else 0)
 	var cost := 20+quantity*2+packages
-	if stock(source,"packaging")<needed or int(state.accounts.player)<cost: return _result(false,"Freight needs %d packaging and %d credits, including gross cargo mass."%[packages,cost])
+	if stock(source,"packaging")<needed or balance(actor)<cost: return _result(false,"Freight needs %d packaging and %d credits, including gross cargo mass."%[packages,cost])
 	if not _has_room(destination,quantity+packages): return _result(false,"Destination capacity is occupied or reserved by incoming cargo.")
 	if state.shipments.size()>=24: return _result(false,"All freight manifests are occupied; wait for arrival.")
 	_remove_goods(source,item,quantity)
 	_remove_goods(source,"packaging",packages)
-	_transfer("player","transport",cost,"Earth–Moon freight")
+	_transfer(actor,"transport",cost,"Earth–Moon freight")
+	_reserve_location(destination,quantity+packages)
 	var id := _next_id("freight")
 	state.shipments.append({"id":id,"from":source,"to":destination,"item":item,
-		"quantity":quantity,"packaging":packages,"owner":"player","remaining":90.0,
+		"quantity":quantity,"packaging":packages,"owner":actor,"remaining":90.0,
 		"duration":90.0,"status":"In transit","cost":cost})
 	return _result(true,"Manifest %s departed with %d %s; arrival in 90 seconds."%[id,quantity,item.replace("_"," ")])
 
@@ -565,14 +583,29 @@ func _update_shipments(dt: float) -> void:
 		var shipment: Dictionary = state.shipments[i]
 		shipment.remaining=maxf(0.0,float(shipment.remaining)-dt)
 		if float(shipment.remaining)>0.0: continue
+		_reserve_location(shipment.to,-int(shipment.quantity)-int(shipment.packaging))
 		_add_goods(shipment.to,shipment.item,int(shipment.quantity))
 		_add_goods(shipment.to,"packaging",int(shipment.packaging))
 		state.metrics.deliveries+=1
 		_event("Freight arrived: %d %s in %s."%[shipment.quantity,shipment.item,state.locations[shipment.to].label])
 		state.shipments.remove_at(i)
 
-func _quest_action(kind: String, id: String) -> Dictionary:
-	if not state.quests.has(id): return _result(false,"Unknown contract.")
+func _quest_action(kind: String, id: String, actor: String = "player", realm: String = "") -> Dictionary:
+	if realm.is_empty(): realm=str(state.planet)
+	if not state.quests.has(id) or state.quests[id].has("actor"): return _result(false,"Unknown contract.")
+	if actor!="player" and state.quests[id].planet!=realm: return _result(false,"Visit this contract's world.")
+	var original_id := id
+	if actor!="player":
+		id=actor+"__"+id
+		if not state.quests.has(id):
+			if kind!="accept_quest": return _result(false,"Accept this contract before delivering goods.")
+			if balance("treasury")<int(state.quests[original_id].reward): return _result(false,"The town cannot fund this contract.")
+			var personal: Dictionary=state.quests[original_id].duplicate(true)
+			personal.id=id
+			personal.actor=actor
+			personal.template=original_id
+			state.quests[id]=personal
+			state.accounts["escrow_"+id]=0
 	var quest: Dictionary = state.quests[id]
 	var escrow := "escrow_"+id
 	if kind=="accept_quest":
@@ -587,11 +620,11 @@ func _quest_action(kind: String, id: String) -> Dictionary:
 		_transfer(escrow,"treasury",int(quest.reward),"Cancel contract "+id)
 		quest.status="available"
 		return _result(true,"Contract canceled; escrow returned to town.")
-	var origin := "player_"+str(state.planet)
-	if quest.planet!=state.planet or stock(origin,quest.item)<int(quest.quantity): return _result(false,"Deliver %d %s from your %s inventory."%[quest.quantity,quest.item.replace("_"," "),quest.planet])
-	if not _has_room(quest.destination,int(quest.quantity)) or int(state.accounts[escrow])<int(quest.reward): return _result(false,"Destination capacity or escrow unavailable; no goods moved.")
+	var origin := inventory_location(actor,realm)
+	if quest.planet!=realm or stock(origin,quest.item)<int(quest.quantity): return _result(false,"Deliver %d %s from your %s inventory."%[quest.quantity,quest.item.replace("_"," "),quest.planet])
+	if not _has_room(quest.destination,int(quest.quantity)) or balance(escrow)<int(quest.reward): return _result(false,"Destination capacity or escrow unavailable; no goods moved.")
 	_move_goods(origin,quest.destination,quest.item,int(quest.quantity))
-	_transfer(escrow,"player",int(quest.reward),"Complete contract "+id)
+	_transfer(escrow,actor,int(quest.reward),"Complete contract "+original_id)
 	quest.status="complete"
 	state.metrics.deliveries+=1
 	return _result(true,"Completed "+quest.title+": "+str(quest.reward)+" trade credits received.")
@@ -632,7 +665,8 @@ func _update_citizen(worker: Dictionary, dt: float) -> void:
 	if worker._job.is_empty():
 		if worker.carrying.is_empty() and worker.has("pending_job"):
 			worker.job=str(worker.pending_job)
-			worker.employer="player"
+			worker.employer=str(worker.get("pending_employer","player"))
+			worker.erase("pending_employer")
 			worker.enabled=true
 			worker.cooldown=0.0
 			worker.erase("pending_job")
@@ -648,7 +682,19 @@ func _update_citizen(worker: Dictionary, dt: float) -> void:
 	var position := Vector2(float(worker.position[0]),float(worker.position[1]))
 	var waypoint: Array = worker.route[0] if not worker.route.is_empty() else worker.destination
 	var destination := Vector2(float(waypoint[0]),float(waypoint[1]))
-	if position.distance_to(destination)>0.1:
+	if bool(worker.get("physical_transport",false)):
+		var motion: Dictionary=state.get("traffic",{}).get(worker.id,{})
+		var ready := int(motion.get("epoch",-1))==int(worker.get("motion_epoch",0)) \
+			and float(state.time)-float(motion.get("reported_at",-100.0))<=3.0 \
+			and bool(motion.get("arrived",false)) and float(motion.get("speed",1.0))<=0.35
+		if not ready:
+			worker.blocker=str(motion.get("blocker","Waiting for the delivery vehicle"))
+			worker.activity="Driving: "+str(job.label) if worker.blocker.is_empty() else "Waiting: "+worker.blocker
+			worker.task=worker.activity
+			return
+		worker.route.clear()
+		worker.blocker=""
+	elif position.distance_to(destination)>0.1:
 		var obstruction := str(worker.get("route_blocked",""))
 		if not obstruction.is_empty():
 			worker.blocker=obstruction
@@ -681,7 +727,7 @@ func _update_citizen(worker: Dictionary, dt: float) -> void:
 		worker.skill=minf(1.0,float(worker.skill)+0.001)
 		worker.needs.fatigue=minf(1.0,float(worker.needs.fatigue)+0.002)
 		state.metrics.work_completed+=1
-		var wage := mini(int(worker.wage),int(state.accounts[worker.employer]))
+		var wage := mini(int(worker.wage),balance(worker.employer))
 		if wage>0: _transfer(worker.employer,worker.id,wage,"Wage: "+str(worker.job))
 		_remember(worker,str(result.message))
 
@@ -696,11 +742,11 @@ func _plan_job(worker: Dictionary) -> void:
 	if float(worker.needs.hunger)>0.6:
 		_set_job(worker,"eat","moon_market" if worker.planet=="moon" else "kitchen","Buying a meal and eating",{},8.0)
 		return
-	if int(state.accounts[worker.employer])<int(worker.wage):
+	if balance(worker.employer)<int(worker.wage):
 		_block(worker,"Employer cannot fund the next wage")
 		return
 	var store := "lunar_greenhouse" if worker.planet=="moon" else "cooperative"
-	if worker.employer=="player": store="player_"+str(worker.planet)
+	if worker.employer=="player" or shared_players.has(worker.employer): store=inventory_location(str(worker.employer),str(worker.planet))
 	match str(worker.job):
 		"grower":
 			for id in _ids(state.plots):
@@ -830,8 +876,13 @@ func _plan_tanker(worker: Dictionary) -> void:
 	_block(worker,"No funded fuel route with available stock; waiting for refinery output")
 
 func _set_job(worker: Dictionary, op: String, target: String, label: String, payload: Dictionary, duration: float) -> void:
+	worker["motion_epoch"]=int(worker.get("motion_epoch",0))+1
 	worker.target=target
 	worker.destination=state.locations[target].position.duplicate()
+	# Refinery staff work at the control-side apron, clear of the service lanes.
+	# The facility/service address remains unchanged for drivers and trading.
+	if target=="refinery" and not bool(worker.get("physical_transport",false)):
+		worker.destination=[91.0,7.0]
 	worker.work_remaining=duration/(0.7+float(worker.skill)*0.5)
 	worker._job={"op":op,"target":target,"label":label,"payload":payload}
 	_route_to(worker,false)
@@ -848,7 +899,7 @@ func _execute_job(worker: Dictionary, job: Dictionary) -> Dictionary:
 			return _result(true,"Enjoying the neighborhood")
 		"eat":
 			var store: String = job.target
-			if stock(store,"meal")<1 or int(state.accounts[worker.id])<8: return _result(false,"No affordable prepared meal; kitchen needs supplies")
+			if stock(store,"meal")<1 or balance(worker.id)<8: return _result(false,"No affordable prepared meal; kitchen needs supplies")
 			_consume(store,"meal",1,"Citizen meal")
 			_transfer(worker.id,state.locations[store].owner,8,"Meal purchase")
 			worker.needs.hunger=maxf(0.0,float(worker.needs.hunger)-0.6)
@@ -893,6 +944,7 @@ func _execute_job(worker: Dictionary, job: Dictionary) -> Dictionary:
 		"unload":
 			var cargo: Dictionary = worker.carrying
 			if cargo.is_empty(): return _result(false,"No cargo to unload")
+			_reserve_location(cargo.to,-int(cargo.quantity)-int(cargo.get("packaging",0)))
 			_add_goods(cargo.to,cargo.item,int(cargo.quantity))
 			_add_goods(cargo.to,"packaging",int(cargo.get("packaging",0)))
 			state.metrics.deliveries+=1
@@ -990,13 +1042,14 @@ func _load_worker(worker: Dictionary, data: Dictionary, traded: bool) -> Diction
 	var seller: String = state.locations[source].owner
 	var price := quote(destination,item,quantity,false) if traded else 0
 	var freight := maxi(1,int(ceil(float(quantity)*0.2))) if traded else 0
-	if int(state.accounts[buyer])<price+freight: return _result(false,"Buyer cannot fund cargo and transport")
+	if balance(buyer)<price+freight: return _result(false,"Buyer cannot fund cargo and transport")
 	if traded:
 		_transfer(buyer,seller,price,"Purchase loaded cargo "+item)
 		_transfer(buyer,"transport",freight,"Local freight fee")
 		state.metrics.trades+=1
 	_remove_goods(source,item,quantity)
 	_remove_goods(source,"packaging",packages)
+	_reserve_location(destination,quantity+packages)
 	worker.carrying={"from":source,"to":destination,"item":item,"quantity":quantity,"packaging":packages,"owner":buyer}
 	return _result(true,"Loaded %d %s; destination capacity reserved"%[quantity,item.replace("_"," ")])
 
@@ -1012,6 +1065,7 @@ func _consume_fuel() -> void:
 
 func _spoil_food() -> void:
 	for location in state.inventories:
+		if _external_location(str(location)): continue
 		for item in ["banana","tomato","lettuce","spinach","strawberry","fish"]:
 			if stock(location,item)>=12:
 				_consume(location,item,1,"Perishable storage loss")
@@ -1052,6 +1106,9 @@ func _same_planet(a: String, b: String) -> bool:
 func _has_room(location: String, additional: int) -> bool:
 	var occupied := 0
 	for item in state.inventories[location]: occupied+=int(state.inventories[location][item])
+	if _external_location(location):
+		var loc: Dictionary=state.locations[location]
+		return occupied+int(shared_players[loc.owner].reserved[loc.planet])+additional<=int(loc.capacity)
 	for shipment in state.shipments:
 		if shipment.to==location: occupied+=int(shipment.quantity)+int(shipment.packaging)
 	for id in _ids(state.citizens):
@@ -1088,8 +1145,8 @@ func _record_resource(kind: String, item: String, quantity: int) -> void:
 
 func _transfer(source: String, destination: String, amount: int, reason: String) -> void:
 	if amount<=0 or source==destination: return
-	state.accounts[source]=int(state.accounts[source])-amount
-	state.accounts[destination]=int(state.accounts[destination])+amount
+	_set_balance(source,balance(source)-amount)
+	_set_balance(destination,balance(destination)+amount)
 	_record("money",{"from":source,"to":destination,"amount":amount,"reason":reason})
 
 func _record(kind: String, payload: Dictionary) -> void:
@@ -1181,7 +1238,9 @@ func validate_state(candidate: Variant) -> bool:
 	for key in ["shipments","ledger","events","batches"]:
 		if not data.get(key) is Array: return false
 	if not _valid_integer(data.get("schema_version"),VERSION,VERSION) or data.get("planet") not in ["earth","moon"] or not _valid_number(data.get("time"),0,1000000000): return false
-	if data.locations.size()!=EARTH_LOCATIONS.size()+MOON_LOCATIONS.size() or data.citizens.size()>64 or data.plots.size()>64 or data.shipments.size()>24 or data.batches.size()>8 or data.ledger.size()>160 or data.events.size()>24 or data.recent_requests.size()>64: return false
+	if bool(data.get("online",false))!=multiplayer_mode: return false
+	var location_count := EARTH_LOCATIONS.size()+MOON_LOCATIONS.size()+(shared_players.size()*2 if multiplayer_mode else 0)
+	if data.locations.size()!=location_count or data.citizens.size()>64 or data.plots.size()>64 or data.shipments.size()>24 or data.batches.size()>8 or data.ledger.size()>160 or data.events.size()>24 or data.recent_requests.size()>64: return false
 	for key in ["initial_money","next_id","seed"]:
 		if not _valid_integer(data.get(key),0,1000000000000): return false
 	for key in ["solar_illumination","lunar_phase"]:
@@ -1190,7 +1249,7 @@ func validate_state(candidate: Variant) -> bool:
 	for id in data.accounts:
 		if not id is String or not _valid_integer(data.accounts[id],0,1000000000): return false
 		money+=int(data.accounts[id])
-	if money!=int(data.initial_money): return false
+	if not multiplayer_mode and money!=int(data.initial_money): return false
 	for id in ["player","cooperative","lunar_cooperative","earth_market","moon_market","oil_company","refinery_company","transport","treasury","gas_station","airfield","carrier"]:
 		if not data.accounts.has(id): return false
 	for id in EARTH_LOCATIONS:
@@ -1205,7 +1264,7 @@ func validate_state(candidate: Variant) -> bool:
 	var reserved := {}
 	for id in data.locations:
 		var location: Variant = data.locations[id]
-		if not location is Dictionary or not _valid_position(location.get("position")) or location.get("planet") not in ["earth","moon"] or not data.accounts.has(location.get("owner","")) or not _valid_integer(location.get("capacity"),1,100000) or not location.get("label") is String: return false
+		if not location is Dictionary or not _valid_position(location.get("position")) or location.get("planet") not in ["earth","moon"] or not _account_exists(str(location.get("owner","")),data) or not _valid_integer(location.get("capacity"),1,100000) or not location.get("label") is String: return false
 		if not data.inventories.get(id) is Dictionary: return false
 		var occupied := 0
 		for item in data.inventories[id]:
@@ -1214,7 +1273,7 @@ func validate_state(candidate: Variant) -> bool:
 		reserved[id]=occupied
 	for id in data.plots:
 		var plot: Variant = data.plots[id]
-		if not plot is Dictionary or not _valid_position(plot.get("position")) or plot.get("planet") not in ["earth","moon"] or not data.accounts.has(plot.get("owner","")): return false
+		if not plot is Dictionary or not _valid_position(plot.get("position")) or plot.get("planet") not in ["earth","moon"] or not _account_exists(str(plot.get("owner","")),data): return false
 		if plot.get("crop","missing")!="" and not crops.has(plot.get("crop","")): return false
 		for key in ["growth","health","drainage","disease"]:
 			if not _valid_number(plot.get(key),0,1): return false
@@ -1238,7 +1297,7 @@ func validate_state(candidate: Variant) -> bool:
 	if float(room.battery_kwh)>float(room.battery_capacity_kwh) or typeof(room.get("powered"))!=TYPE_BOOL: return false
 	for id in data.citizens:
 		var worker: Variant = data.citizens[id]
-		if not worker is Dictionary or worker.get("id")!=id or worker.get("job") not in JOBS or worker.get("planet") not in ["earth","moon"] or not data.accounts.has(id) or not data.accounts.has(worker.get("employer","")) or not data.locations.has(worker.get("target","")): return false
+		if not worker is Dictionary or worker.get("id")!=id or worker.get("job") not in JOBS or worker.get("planet") not in ["earth","moon"] or not data.accounts.has(id) or not _account_exists(str(worker.get("employer","")),data) or not data.locations.has(worker.get("target","")): return false
 		for key in ["position","destination"]:
 			if not _valid_position(worker.get(key)): return false
 		if not worker.get("route",[]) is Array or worker.get("route",[]).size()>80: return false
@@ -1252,7 +1311,11 @@ func validate_state(candidate: Variant) -> bool:
 		for key in ["name","activity","task","blocker"]:
 			if not worker.get(key) is String: return false
 		if not worker.get("memories") is Array or not worker.get("observations") is Array or worker.memories.size()>8 or worker.observations.size()>8 or not _valid_position(worker.get("shift")) or typeof(worker.get("enabled"))!=TYPE_BOOL: return false
+		if worker.has("physical_transport") and typeof(worker.physical_transport)!=TYPE_BOOL: return false
+		if worker.has("motion_epoch") and not _valid_integer(worker.motion_epoch,0,1000000000): return false
+		if bool(worker.get("physical_transport",false)) and not data.get("traffic",{}).has(id): return false
 		if worker.has("pending_job") and worker.pending_job not in JOBS: return false
+		if worker.has("pending_employer") and not _account_exists(str(worker.pending_employer),data): return false
 		if not worker._job.is_empty() and not _valid_job(worker._job,data): return false
 		if not worker.carrying.is_empty():
 			if not _valid_cargo(worker.carrying,data): return false
@@ -1288,6 +1351,24 @@ func validate_state(candidate: Variant) -> bool:
 		if not id is String or id.is_empty() or id.length()>120 or not tank is Dictionary or not _valid_integer(tank.get("kind"),0,3): return false
 		var capacity: float = [12.0,65.0,45.0,900.0][int(tank.kind)]
 		if not _valid_number(tank.get("fuel_l"),0,capacity) or not _valid_number(tank.get("capacity_l"),capacity,capacity) or tank.get("item")!=("jet_fuel" if int(tank.kind)==3 else "gasoline") or not _valid_number(tank.get("used_l",0),0,1000000000): return false
+	if data.has("traffic"):
+		if not data.traffic is Dictionary or data.traffic.size()>64: return false
+		for id in data.traffic:
+			var motion: Variant=data.traffic[id]
+			if not data.citizens.has(id) or not motion is Dictionary or not motion.get("vehicle_id") is String or motion.vehicle_id.is_empty() or motion.vehicle_id.length()>160 or not _valid_position(motion.get("position")): return false
+			var mode: Variant=motion.get("mode","driving")
+			if mode not in ["driving","walking","boarding"]: return false
+			if mode=="walking":
+				if bool(data.citizens[id].get("physical_transport",false)) or not motion.has("pose") or not data.vehicle_fuel.has(motion.vehicle_id) or motion.get("arrived",true)!=false or not _valid_number(motion.get("speed"),0,0.35): return false
+			elif not bool(data.citizens[id].get("physical_transport",false)): return false
+			if not _valid_number(motion.get("speed"),0,150) or typeof(motion.get("arrived"))!=TYPE_BOOL or not _valid_integer(motion.get("epoch"),-1,1000000000) or not _valid_number(motion.get("reported_at"),-100,float(data.time)) or not motion.get("blocker") is String: return false
+			if motion.has("pose"):
+				if not motion.pose is Dictionary: return false
+				for field in ["position","rotation","velocity"]:
+					var vector: Variant=motion.pose.get(field)
+					if not vector is Array or vector.size()!=3: return false
+					for component in vector:
+						if not _valid_number(component,-100000,100000): return false
 	for id in data.recent_requests:
 		if not data.recent_requests[id] is Dictionary or typeof(data.recent_requests[id].get("ok"))!=TYPE_BOOL or not data.recent_requests[id].get("message") is String: return false
 	return _valid_number(data.climate.get("temperature"),-100,100) and _valid_number(data.climate.get("rain"),0,1)
@@ -1331,6 +1412,7 @@ func _start_processing(id: String, location: String, facility_id: String) -> Dic
 	if not _has_room(location,maxi(0,output_count-input_count)): return _result(false,"No capacity for the finished batch.")
 	for item in recipe.inputs: _consume(location,item,int(recipe.inputs[item]),"Processing batch: "+id)
 	facility.energy_kwh-=float(recipe.energy)
+	_reserve_location(location,output_count)
 	state.batches.append({"id":_next_id("batch"),"recipe":id,"location":location,"facility":facility_id,"remaining":12.0,"duration":12.0})
 	return _result(true,"Started "+str(recipe.label)+". Inputs loaded; output ready in 12 seconds.")
 
@@ -1341,7 +1423,9 @@ func _update_batches(dt: float) -> void:
 		batch.remaining=maxf(0.0,float(batch.remaining)-dt)
 		if float(batch.remaining)>0.0: continue
 		var recipe: Dictionary = RECIPES[batch.recipe]
-		for item in recipe.outputs: _produce(batch.location,item,int(recipe.outputs[item]),"Completed batch "+str(batch.recipe))
+		for item in recipe.outputs:
+			_reserve_location(batch.location,-int(recipe.outputs[item]))
+			_produce(batch.location,item,int(recipe.outputs[item]),"Completed batch "+str(batch.recipe))
 		if batch.recipe=="refine": state.metrics.crude_refined+=10
 		_event("Batch ready: "+str(recipe.label)+". Finished goods are in "+str(state.locations[batch.location].label)+".")
 		state.batches.remove_at(index)
@@ -1373,14 +1457,15 @@ func consume_vehicle_fuel(id: String, litres: float) -> float:
 	tank["used_l"]=float(tank.get("used_l",0.0))+used
 	return used
 
-func _refuel(payload: Dictionary) -> Dictionary:
+func _refuel(payload: Dictionary, actor: String = "player", realm: String = "") -> Dictionary:
+	if realm.is_empty(): realm=str(state.planet)
 	var id := str(payload.get("vehicle",""))
 	var facility := str(payload.get("facility",""))
 	var quantity := _quantity(payload.get("quantity",1))
 	if not state.vehicle_fuel.has(id) or facility not in ["gas_station","airfield","carrier","refinery"]:
 		return _result(false,"Choose a registered vehicle and a fuel facility.")
 	var tank: Dictionary = state.vehicle_fuel[id]
-	if state.planet!="earth" or quantity<=0:
+	if realm!="earth" or quantity<=0:
 		return _result(false,"Refuel vehicles at an Earth fuel facility.")
 	var item: String = tank.item
 	if stock(facility,item)<quantity:
@@ -1389,10 +1474,10 @@ func _refuel(payload: Dictionary) -> Dictionary:
 		return _result(false,"That delivery exceeds the vehicle tank capacity.")
 	var cost := quote(facility,item,quantity,true)
 	var owner: String = state.locations[facility].owner
-	if int(state.accounts.player)<cost:
+	if balance(actor)<cost:
 		return _result(false,"Not enough trade credits; no fuel transferred.")
 	_consume(facility,item,quantity,"Dispensed into vehicle "+id)
-	_transfer("player",owner,cost,"Vehicle refueling")
+	_transfer(actor,owner,cost,"Vehicle refueling")
 	tank.fuel_l+=quantity
 	return _result(true,"Pumped %d litres of %s into the vehicle for %d credits."%[quantity,item.replace("_"," "),cost])
 
@@ -1403,3 +1488,102 @@ func _ids(dictionary: Dictionary) -> Array:
 
 func _route_to(worker: Dictionary, plot: bool) -> void:
 	worker["route"]=RoutesScript.path(worker.position,worker.destination,str(worker.planet),plot)
+
+
+func configure_shared_players(book: Dictionary) -> void:
+	multiplayer_mode=true
+	shared_players=book
+	state["online"]=true
+	for actor in shared_players:
+		attach_shared_player(str(actor))
+
+func attach_shared_player(actor: String) -> void:
+	if not shared_players.has(actor): return
+	for realm in ["earth","moon"]:
+		var id := inventory_location(actor,realm)
+		state.locations[id]={"id":id,"label":"Member "+realm+" inventory","planet":realm,"position":[0,4],"capacity":350,"owner":actor}
+		state.inventories[id]=shared_players[actor].inventories[realm]
+
+func inventory_location(actor: String, realm: String) -> String:
+	return actor+"_"+realm
+
+func balance(account: String) -> int:
+	return int(shared_players[account].credits) if shared_players.has(account) else int(state.accounts.get(account,0))
+
+func _set_balance(account: String, amount: int) -> void:
+	if shared_players.has(account): shared_players[account].credits=amount
+	else: state.accounts[account]=amount
+
+func _account_exists(account: String, data: Dictionary) -> bool:
+	return data.accounts.has(account) or shared_players.has(account)
+
+func _external_location(location: String) -> bool:
+	return state.locations.has(location) and shared_players.has(state.locations[location].owner)
+
+func _reserve_location(location: String, quantity: int) -> void:
+	if not _external_location(location): return
+	var loc: Dictionary=state.locations[location]
+	shared_players[loc.owner].reserved[loc.planet]=int(shared_players[loc.owner].reserved[loc.planet])+quantity
+
+
+func enable_physical_transport(worker_id: String, vehicle_id: String) -> bool:
+	if not state.get("citizens",{}).has(worker_id) or vehicle_id.is_empty() or vehicle_id.length()>160: return false
+	if not state.has("traffic"): state.traffic={}
+	var worker: Dictionary=state.citizens[worker_id]
+	if state.traffic.has(worker_id) and state.traffic[worker_id].vehicle_id!=vehicle_id: return false
+	worker["physical_transport"]=true
+	if not worker.has("motion_epoch"): worker.motion_epoch=0
+	if not state.traffic.has(worker_id):
+		state.traffic[worker_id]={"vehicle_id":vehicle_id,"position":worker.position.duplicate(),"speed":0.0,"arrived":false,"epoch":-1,"reported_at":-100.0,"blocker":"Waiting for delivery vehicle"}
+	state.traffic[worker_id]["mode"]="driving"
+	state.traffic[worker_id].arrived=false
+	state.traffic[worker_id].epoch=-1
+	if worker._job.is_empty() and bool(worker.enabled) and float(worker.cooldown)<=0.0:
+		_plan_job(worker)
+	return true
+
+func disable_physical_transport(worker_id: String, exit_position: Array) -> bool:
+	if not state.get("citizens",{}).has(worker_id) or not _valid_position(exit_position): return false
+	var worker: Dictionary=state.citizens[worker_id]
+	if not worker.carrying.is_empty(): return false
+	var record: Dictionary=state.get("traffic",{}).get(worker_id,{})
+	if record.is_empty() or float(record.get("speed",100.0))>0.35 or float(state.time)-float(record.get("reported_at",-100.0))>3.0: return false
+	worker.physical_transport=false
+	worker.position=exit_position.duplicate()
+	record.arrived=false
+	record.epoch=-1
+	record["mode"]="walking"
+	if not worker._job.is_empty(): _route_to(worker,worker._job.op in ["plant","harvest","water","fertilize","treat_crop","clear_crop"])
+	return true
+
+
+func report_physical_transport(worker_id: String, position: Array, speed: float, arrived: bool, blocker: String, motion_epoch: int) -> bool:
+	if not state.get("traffic",{}).has(worker_id) or not _valid_position(position) or not is_finite(speed) or speed<0.0 or speed>150.0: return false
+	var worker: Dictionary=state.citizens[worker_id]
+	if not bool(worker.get("physical_transport",false)) or motion_epoch!=int(worker.get("motion_epoch",0)): return false
+	var target := Vector2(float(worker.destination[0]),float(worker.destination[1]))
+	var actual := Vector2(float(position[0]),float(position[1]))
+	var record: Dictionary=state.traffic[worker_id]
+	record.position=position.duplicate()
+	record.speed=speed
+	record.arrived=arrived and speed<=0.35 and actual.distance_to(target)<=12.0
+	record.epoch=motion_epoch
+	record.reported_at=state.time
+	record.blocker=blocker.left(180)
+	worker.position=position.duplicate()
+	return true
+
+
+func refuel_transport(worker_id: String, facility: String, quantity: int) -> Dictionary:
+	# Server traffic only: this entry point is deliberately absent from action().
+	if not state.get("traffic",{}).has(worker_id) or not state.locations.has(facility):
+		return _result(false,"Unknown physical crew vehicle or fuel depot.")
+	var worker: Dictionary=state.citizens[worker_id]
+	var motion: Dictionary=state.traffic[worker_id]
+	if not bool(worker.get("physical_transport",false)) or float(state.time)-float(motion.reported_at)>3.0 or float(motion.speed)>0.35:
+		return _result(false,"Stop the actual crew vehicle at a fuel depot first.")
+	var actual := Vector2(float(motion.position[0]),float(motion.position[1]))
+	var depot: Array=state.locations[facility].position
+	if actual.distance_to(Vector2(float(depot[0]),float(depot[1])))>12.0:
+		return _result(false,"The crew vehicle is outside the depot loading bay.")
+	return _refuel({"vehicle":motion.vehicle_id,"facility":facility,"quantity":quantity},str(worker.employer),str(worker.planet))

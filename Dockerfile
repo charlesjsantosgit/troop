@@ -84,6 +84,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update \
     && apt-get install --yes --no-install-recommends \
         ca-certificates \
+        util-linux \
         libasound2t64 \
         libfontconfig1 \
         libgl1 \
@@ -103,11 +104,11 @@ WORKDIR /app
 COPY --from=builder --chown=troop:troop \
     /out/troop-server.x86_64 /app/troop-server.x86_64
 
-USER troop
+COPY --chmod=0755 server-entrypoint.sh /usr/local/bin/troop-start
 
 EXPOSE 30623/udp
 
 # `server` is a project user argument because everything after `--` is exposed
 # through OS.get_cmdline_user_args(). Main starts peer 1 as a headless authority.
-ENTRYPOINT ["/app/troop-server.x86_64", "--headless", "--"]
+ENTRYPOINT ["/usr/local/bin/troop-start"]
 CMD ["server"]

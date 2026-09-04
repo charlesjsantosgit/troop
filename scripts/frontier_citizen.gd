@@ -15,11 +15,13 @@ var _job := "citizen"
 var _last_task := ""
 var _time := 0.0
 var _initialized := false
-var _vehicle: Node3D
+var _vehicle: Vehicle
 var _fuel_label: Label3D
 var _sampled_xz := Vector2.INF
 var _sampled_height := 0.0
 var _sampled_up := Vector3.UP
+var _work_tool: Node3D
+var _work_active := false
 
 
 func configure(id: String, simulation: RefCounted, host: Node3D, planet: String) -> void:
@@ -37,6 +39,7 @@ func build() -> void:
 	rig.name = "PeacefulMonkeyRig"
 	add_child(rig)
 	rig.setup(str(data.get("name", citizen_id)), true)
+	rig._t = float(absi(citizen_id.hash()) % 173)*0.137
 	rig.set_melee_pose(false, false, 0.0, 0)
 	rig.scale = Vector3.ONE * 1.18
 	_clean_render(rig)
@@ -60,8 +63,8 @@ func build() -> void:
 	for sx in [-0.21, 0.21]:
 		_part(_cargo, "box", Vector3(sx, 0, -0.171), Vector3(0.04, 0.33, 0.025), Color(0.77, 0.57, 0.29))
 	_cargo.visible = false
-	if _job in ["tanker_driver", "hauler", "freight_hauler"]:
-		_build_vehicle()
+	_build_tool()
+	_bind_vehicle()
 	update_citizen(0.0, Vector3.INF)
 
 
@@ -97,6 +100,10 @@ func update_citizen(dt: float, camera_position: Vector3) -> void:
 		_initialized = false
 		build()
 		return
+	_bind_vehicle()
+	if is_instance_valid(_vehicle):
+		_update_driver(dt, camera_position, data)
+		return
 	var coordinates: Array = data.get("position", [0.0, 0.0])
 	var at := Vector3(float(coordinates[0]), 0.0, float(coordinates[1]))
 	var xz := Vector2(at.x, at.z)
@@ -128,36 +135,12 @@ func update_citizen(dt: float, camera_position: Vector3) -> void:
 	var moving := vel.length_squared() > 0.08
 	if moving:
 		var heading := atan2(-vel.x, -vel.z)
-		if _vehicle != null:
-			_vehicle.rotation.y = lerp_angle(_vehicle.rotation.y, heading, minf(dt * 5.0, 1.0))
-		else:
-			rig.set_yaw(lerp_angle(rig.yaw_node.rotation.y, heading, minf(dt * 8.0, 1.0)))
+		rig.set_yaw(lerp_angle(rig.yaw_node.rotation.y, heading, minf(dt * 8.0, 1.0)))
 	var carried: Dictionary = data.get("carrying", {})
-	_cargo.visible = not carried.is_empty() and _vehicle == null
-	rig.update_motion(dt, MonkeyRig.Anim.RUN if moving and _vehicle == null else MonkeyRig.Anim.IDLE,
+	_cargo.visible = not carried.is_empty()
+	rig.update_motion(dt, MonkeyRig.Anim.RUN if moving else MonkeyRig.Anim.IDLE,
 		vel, true, Vector3.ZERO)
-	if _vehicle != null:
-		rig.sh_l.rotation.x = -0.8
-		rig.sh_r.rotation.x = -0.8
-		rig.el_l.rotation.x = -0.6
-		rig.el_r.rotation.x = -0.6
-		if _fuel_label != null:
-			var cargo_text := "Empty · collecting next load"
-			if not carried.is_empty():
-				var item := str(carried.get("item", carried.keys()[0]))
-				var amount := str(carried.get("quantity", carried.get(item, 0)))
-				cargo_text = "%s · %s %s" % [item.replace("_", " ").capitalize(), amount, "L" if item in ["diesel", "gasoline", "jet_fuel", "crude_oil"] else "kg"]
-			_fuel_label.text = cargo_text
-	if _cargo.visible:
-		rig.sh_l.rotation.x = -0.7
-		rig.sh_r.rotation.x = -0.7
-		rig.el_l.rotation.x = -0.35
-		rig.el_r.rotation.x = -0.35
-	elif not moving and float(data.get("work_remaining", 0.0)) > 0.0:
-		# Small deliberate tool strokes communicate work without combat swings.
-		rig.sh_r.rotation.x = -0.5 + sin(_time * 3.8) * 0.2
-		rig.el_r.rotation.x = -0.45 + sin(_time * 3.8 + 0.7) * 0.16
-		rig.torso_p.rotation.x += 0.07
+	_apply_work_pose(dt, data, moving)
 	if _planet == "moon" and _vehicle == null:
 		rig.position.y = absf(sin(_time * 3.3)) * 0.1 if moving else 0.0
 	var task := str(data.get("activity", data.get("task", "Enjoying the village")))
@@ -206,42 +189,141 @@ func _build_workwear() -> void:
 			rig.winter_scarf.visible = false
 
 
-func _build_vehicle() -> void:
-	_vehicle = Node3D.new()
-	_vehicle.name = "WorkingTanker" if _job == "tanker_driver" else "ProduceHauler"
-	add_child(_vehicle)
-	var props := FrontierProps.new(_vehicle)
-	var steel := Color(0.39, 0.44, 0.43)
-	var paint := Color(0.85, 0.49, 0.15) if _job == "tanker_driver" else Color(0.23, 0.47, 0.36)
-	props.box(Vector3(0, 0.68, 0), Vector3(2.15, 0.34, 5.1), steel)
-	props.box(Vector3(0, 1.16, -1.9), Vector3(1.9, 0.65, 1.05), paint)
-	props.box(Vector3(0, 1.05, -2.46), Vector3(1.28, 0.32, 0.035), Color(0.1, 0.15, 0.16))
-	props.box(Vector3(0, 2.69, -1.32), Vector3(2.05, 0.14, 1.85), paint)
-	for x in [-0.89, 0.89]:
-		for z in [-2.08, -0.54]:
-			props.box(Vector3(x, 2.05, z), Vector3(0.075, 1.2, 0.075), steel)
-		props.box(Vector3(x, 1.5, -2.49), Vector3(0.21, 0.15, 0.04), Color(0.96, 0.89, 0.65))
-	for x in [-1.05, 1.05]:
-		for z in [-1.6, 1.65]:
-			props.cylinder(Vector3(x, 0.49, z), 0.48, 0.27, Color(0.08, 0.1, 0.09), false, Vector3(0, 0, PI * 0.5))
-			props.cylinder(Vector3(x * 1.14, 0.49, z), 0.22, 0.03, steel, false, Vector3(0, 0, PI * 0.5))
-	if _job == "tanker_driver":
-		props.cylinder(Vector3(0, 1.65, 0.95), 0.95, 3.0, Color(0.67, 0.7, 0.64), false, Vector3(PI * 0.5, 0, 0), 0.45)
-		for z in [-0.2, 2.1]:
-			props.cylinder(Vector3(0, 1.65, z), 0.98, 0.12, paint, false, Vector3(PI * 0.5, 0, 0))
-		props.cylinder(Vector3(0, 2.66, 0.9), 0.23, 0.15, steel)
+func _bind_vehicle() -> void:
+	var traffic: Node = _host.get_meta("frontier_traffic") if _host.has_meta("frontier_traffic") else null
+	var vehicle: Vehicle = traffic.vehicle_for(citizen_id) if is_instance_valid(traffic) else null
+	if vehicle == _vehicle:
+		return
+	_vehicle = vehicle
+	if is_instance_valid(_vehicle):
+		_fuel_label = _vehicle.get("cargo_label")
 	else:
-		props.box(Vector3(0, 1.02, 0.95), Vector3(2.0, 0.2, 3.0), Color(0.51, 0.35, 0.19))
-		for x in [-0.96, 0.96]:
-			props.box(Vector3(x, 1.35, 0.95), Vector3(0.1, 0.7, 3.0), paint)
-		for z in [0.0, 1.1, 2.1]:
-			props.box(Vector3(0, 1.4, z), Vector3(1.4, 0.65, 0.85), Color(0.6, 0.43, 0.23))
-	_fuel_label = props.text(Vector3(0, 3.5, 0.8), "", Color(0.95, 0.85, 0.61), 24, 24.0)
-	props.flush()
-	rig.reparent(_vehicle)
-	rig.position = Vector3(0, 1.1, -1.25)
-	rig.scale = Vector3.ONE * 0.84
-	_name_label.position.y = 4.0
+		_fuel_label = null
+		if rig != null:
+			rig.reset_pose_state()
+			rig.scale = Vector3.ONE * 1.18
+			_name_label.position.y = 2.0
+
+
+func _update_driver(dt: float, camera_position: Vector3, data: Dictionary) -> void:
+	_fuel_label = _vehicle.get("cargo_label")
+	# The rigid body owns its pose. Citizens never rotate or move the vehicle.
+	global_position = _vehicle.get_global_transform_interpolated().origin
+	_initialized = true
+	var distant := camera_position != Vector3.INF and camera_position.distance_squared_to(global_position) > 130.0 * 130.0
+	rig.visible = is_visible_in_tree() and not distant
+	_cargo.visible = false
+	_name_label.position.y = 2.8
+	_name_label.text = "%s · %s\n%s" % [data.get("name", citizen_id),
+		_job.replace("_", " ").capitalize(), str(data.get("activity", "Driving")).left(46)]
+	if distant:
+		return
+	rig.physics_interpolation_mode = Node.PHYSICS_INTERPOLATION_MODE_OFF
+	rig.top_level = true
+	rig.set_yaw(0.0)
+	rig.set_vehicle_pose(_vehicle.rider_render_pose())
+	rig.global_transform = _vehicle.rider_render_transform()
+	rig.set_ride_lean(_vehicle.state_aux().y)
+	rig.update_motion(dt, MonkeyRig.Anim.RIDE, _vehicle.linear_velocity, true, Vector3.ZERO)
+	_vehicle.update_manifest(data.get("carrying", {}))
+
+
+func _build_tool() -> void:
+	_work_tool = Node3D.new()
+	rig.paw_r.add_child(_work_tool)
+	_work_tool.position = Vector3(0,-0.06,-0.04)
+	_work_tool.visible = false
+	var wood := Color(0.48,0.31,0.15)
+	var steel := Color(0.5,0.56,0.56)
+	if _job in ["grower","agronomist","farm_manager","beekeeper"]:
+		_part(_work_tool,"box",Vector3(0,-0.12,0),Vector3(0.045,0.32,0.045),wood)
+		_part(_work_tool,"box",Vector3(0,-0.31,0.015),Vector3(0.13,0.16,0.035),steel)
+	elif _job in ["solar_technician","greenhouse_technician","water_operator"]:
+		_part(_work_tool,"box",Vector3(0,-0.15,0),Vector3(0.045,0.38,0.045),steel)
+		_part(_work_tool,"box",Vector3(0,-0.35,0),Vector3(0.3,0.07,0.1),Color(0.22,0.45,0.49))
+	elif _job == "cook":
+		_part(_work_tool,"box",Vector3(0,-0.14,0),Vector3(0.035,0.34,0.035),wood)
+		_part(_work_tool,"sphere",Vector3(0,-0.33,0),Vector3(0.12,0.05,0.08),wood)
+	else:
+		_part(_work_tool,"box",Vector3(0,-0.11,0),Vector3(0.04,0.27,0.025),steel)
+		_part(_work_tool,"box",Vector3(-0.043,-0.24,0),Vector3(0.035,0.075,0.035),steel)
+		_part(_work_tool,"box",Vector3(0.043,-0.24,0),Vector3(0.035,0.075,0.035),steel)
+
+
+func _apply_work_pose(dt: float, data: Dictionary, moving: bool) -> void:
+	var job: Dictionary = data.get("_job",{})
+	var op := str(job.get("op",""))
+	# Planned work_remaining is populated before travel begins. Animating it
+	# while blocked used to repeatedly ADD torso pitch after the rig's blend,
+	# accumulating a backwards lean. Work now requires actual active task state;
+	# every pose writes an absolute bounded joint angle.
+	_work_active = not moving and not job.is_empty() and str(data.get("activity","")) == str(job.get("label","")) and float(data.get("work_remaining",0.0))>0.0 and op not in ["rest","eat","leisure"]
+	_work_tool.visible = _work_active and op not in ["load_move","load_trade","unload","inspect"]
+	if moving and not _cargo.visible:
+		return
+	var blend := 1.0-exp(-14.0*dt)
+	var torso := Vector3(0.04+sin(_time*1.6)*0.008,0,0)
+	var left := Vector3(0.1,0,0.1)
+	var right := Vector3(0.1,0,-0.1)
+	var elbow_left := 0.3
+	var elbow_right := 0.3
+	if _cargo.visible:
+		left=Vector3(-0.7,0,0.1)
+		right=Vector3(-0.7,0,-0.1)
+		elbow_left=-0.35
+		elbow_right=-0.35
+	elif _work_active:
+		var stroke := sin(_time*2.3)
+		var reach := 0.5-0.5*cos(_time*2.3)
+		match _job:
+			"grower","agronomist","farm_manager","beekeeper":
+				torso.x=0.14+reach*0.10
+				right=Vector3(-0.55-reach*0.45,0.12,-0.12)
+				elbow_right=-0.25-reach*0.45
+				left=Vector3(-0.35,0,0.15)
+			"oil_rigger","refinery_operator","mechanic","carpenter":
+				torso.x=0.12
+				right=Vector3(-0.92,stroke*0.15,-0.14-stroke*0.09)
+				left=Vector3(-0.72,0.15,0.18)
+				elbow_right=-0.58+stroke*0.22
+				elbow_left=-0.5
+			"solar_technician","greenhouse_technician","water_operator":
+				torso.x=0.14
+				right=Vector3(-0.84-reach*0.2,stroke*0.28,-0.16)
+				left=Vector3(-0.4,0,0.2)
+				elbow_right=-0.45-stroke*0.15
+			"cook":
+				torso.x=0.12
+				right=Vector3(-0.84+stroke*0.12,cos(_time*2.3)*0.15,-0.15)
+				elbow_right=-0.5+stroke*0.15
+				left=Vector3(-0.5,0,0.14)
+			"packer","warehouse_keeper","hauler","merchant":
+				torso.x=0.1+reach*0.06
+				left=Vector3(-0.5-reach*0.45,0,0.17)
+				right=Vector3(-0.5-reach*0.45,0,-0.17)
+				elbow_left=-0.4-reach*0.3
+				elbow_right=elbow_left
+			_:
+				right=Vector3(-0.65,stroke*0.10,-0.12)
+				elbow_right=-0.45+stroke*0.12
+	if _work_active or _cargo.visible:
+		# This rig faces local -Z: positive arm X reaches forward, while a
+		# forward-leaning torso uses negative X. Keep tools in front of the
+		# worker instead of animating them behind the body silhouette.
+		torso.x=-torso.x
+		left.x=-left.x
+		right.x=-right.x
+		elbow_left=-elbow_left
+		elbow_right=-elbow_right
+	# Calm, planted waiting replaces generic rapid scratching while blocked.
+	# Keep locomotion/foot placement from MonkeyRig; only upper joints change.
+	rig.torso_p.rotation=rig.torso_p.rotation.lerp(torso,blend)
+	rig.sh_l.rotation=rig.sh_l.rotation.lerp(left,blend)
+	rig.sh_r.rotation=rig.sh_r.rotation.lerp(right,blend)
+	rig.el_l.rotation.x=lerp_angle(rig.el_l.rotation.x,elbow_left,blend)
+	rig.el_r.rotation.x=lerp_angle(rig.el_r.rotation.x,elbow_right,blend)
+	if not _work_active:
+		rig.head_p.rotation=rig.head_p.rotation.lerp(Vector3(-0.04,sin(_time*0.35)*0.045,0),blend)
 
 
 func _part(owner: Node3D, shape: String, at: Vector3, size: Vector3, color: Color) -> void:

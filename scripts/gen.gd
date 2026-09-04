@@ -7,6 +7,7 @@ signal vine_visual_changed(chunk_key: Vector2i)
 
 const PlanetTerrainScript = preload("res://scripts/planet_terrain.gd")
 const PlanetRoadNetworkScript = preload("res://scripts/planet_road_network.gd")
+const TownLayout = preload("res://scripts/frontier_town_layout.gd")
 
 const CHUNK := 48.0
 const CELLS := 16                # terrain quads per chunk side
@@ -1049,10 +1050,14 @@ func road_grade(x: float, z: float) -> float:
 
 
 func point_on_road(x: float, z: float) -> bool:
+	if frontier_world and TownLayout.road_distance(Vector2(x, z)) < TownLayout.ROAD_HALF_WIDTH + 4.0:
+		return true
 	return road_grade(x, z) > 0.16
 
 
 func point_in_road_clearance(x: float, z: float, extra := 0.0) -> bool:
+	if frontier_world and TownLayout.road_distance(Vector2(x, z)) < TownLayout.ROAD_HALF_WIDTH + 4.0 + extra:
+		return true
 	var sample := road_surface_sample(x, z)
 	return float(sample.distance) <= ROAD_HALF_WIDTH + ROAD_BLEND + extra
 
@@ -1278,7 +1283,7 @@ func _height_with_planet_sample(x: float, z: float,
 	_last_planet_sample_xz = macro.xz
 	_last_planet_sample = macro
 	if frontier_world:
-		var town_weight := 1.0 - smoothstep(200.0, 280.0, Vector2(x, z).length())
+		var town_weight := TownLayout.terrain_weight(Vector2(x, z))
 		h = lerpf(h, FRONTIER_TOWN_HEIGHT, town_weight)
 	return h
 
@@ -1508,6 +1513,11 @@ func _ground_color_from_sample(h: float, x: float, z: float,
 	if rocket_pad > 0.15:
 		c = c.lerp(Color(0.31, 0.325, 0.33),
 			smoothstep(0.15, 0.78, rocket_pad))
+	if frontier_world and x > -850 and x < 930 and z > -680 and z < 280:
+		var lane_distance := TownLayout.road_distance(Vector2(x, z))
+		var pavement := 1.0 - smoothstep(TownLayout.ROAD_HALF_WIDTH,
+			TownLayout.ROAD_HALF_WIDTH + 0.7, lane_distance)
+		c = c.lerp(Color(0.29, 0.28, 0.245), pavement)
 	return Color(c.r + jit * 0.04, c.g + jit * 0.04, c.b)
 
 
@@ -1903,9 +1913,7 @@ func chunk_layout(cx: int, cz: int, include_decorations := true) -> Dictionary:
 	var rng := _chunk_rng(cx, cz)
 	# Reserve complete chunks touching town plots so near and distant trees
 	# agree. The settlement supplies its own deliberately placed shade trees.
-	var nearest_town := Vector2(clampf(0.0, cx * CHUNK, (cx + 1) * CHUNK),
-		clampf(0.0, cz * CHUNK, (cz + 1) * CHUNK))
-	if debug_world or (frontier_world and nearest_town.length() < 200.0):
+	if debug_world or (frontier_world and TownLayout.touches_town(cx, cz, CHUNK)):
 		return {"trees": [], "bananas": [], "rocks": [], "foliage": [],
 			"structures": [], "arena_pieces": [], "arena_id": "",
 			"airfield_hangars": [], "freeway_tunnels": [],
