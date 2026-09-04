@@ -2,16 +2,24 @@
 
 ## 0.6.2 — NPC HEIGHTS & CONVERSATIONS
 
+### Consistent character heights
+
 - Set the player's anatomical standing height to **5 feet 10 inches (1.778 m)**.
   Adult NPCs have consistent individual heights between **5 feet 7 inches and
   6 feet 2 inches (1.7018–1.8796 m)**. First-person eye level, body collisions,
   remote avatars and seated limb poses follow the same scale.
+
+### Nana and nearby workplaces
+
 - Prefer the resident over a desk occupying the same service point. Pressing
   **E** beside Nana opens Nana's conversation and trading desk and advances
   the first tutorial lesson. **B** remains the personal journal control.
 - Show one compact nameplate for the nearby resident, keep work details in
   their conversation, and hide navigation labels after reaching their target.
   Place the E prompt above the combat instructions so the text stays readable.
+
+### Updating together
+
 - Includes the 0.6.1 town-paving and network fixes. All clients and the public
   server use **0.6.2 / protocol 13**; bootstrap **3** remains compatible with the
   signed content update. Existing saves and town ownership are preserved.
