@@ -46,7 +46,7 @@ const BINDABLE_ACTIONS := [
 const MenuTheme := preload("res://scripts/menu_theme.gd")
 const COLOR_INK := MenuTheme.INK
 const COLOR_PANEL := MenuTheme.PANEL
-const COLOR_LEAF := MenuTheme.TEAL
+const COLOR_LEAF := MenuTheme.SECONDARY
 const COLOR_LEAF_BRIGHT := MenuTheme.ACCENT
 const COLOR_MINT := MenuTheme.TEXT
 const COLOR_MUTED := MenuTheme.MUTED
@@ -807,7 +807,7 @@ func _update_layout() -> void:
 
 
 func _draw() -> void:
-	draw_rect(Rect2(Vector2.ZERO, size), Color(0.025, 0.045, 0.04, 0.16))
+	draw_rect(Rect2(Vector2.ZERO, size), Color(0.02, 0.025, 0.03, 0.16))
 
 
 func _action_button(text_value: String, base: Color, _hover: Color) -> Button:

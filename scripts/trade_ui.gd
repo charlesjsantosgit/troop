@@ -58,7 +58,7 @@ func _ready() -> void:
 	mouse_filter = Control.MOUSE_FILTER_STOP
 	visible = false
 	var scrim := ColorRect.new()
-	scrim.color = Color(0.025, 0.045, 0.04, 0.16)
+	scrim.color = Color(0.02, 0.025, 0.03, 0.16)
 	scrim.set_anchors_preset(Control.PRESET_FULL_RECT)
 	add_child(scrim)
 	_panel = PanelContainer.new()

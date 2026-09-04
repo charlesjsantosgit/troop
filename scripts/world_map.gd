@@ -1474,12 +1474,12 @@ func _draw_chrome(blend: float) -> void:
 	var rect := map_rect()
 	draw_rect(Rect2(0, 0, size.x, HEADER_H), MenuTheme.INK)
 	draw_line(Vector2(0, HEADER_H - 1), Vector2(size.x, HEADER_H - 1),
-		Color(0.36, 0.86, 0.66, 0.58), 2.0)
+		MenuTheme.BORDER, 2.0)
 	draw_string(_font, Vector2(MAP_MARGIN, 31), "World map",
 		HORIZONTAL_ALIGNMENT_LEFT, -1, 24, MenuTheme.TEXT)
 	draw_string(_font, Vector2(MAP_MARGIN, 54),
 		"Explore Earth and the Moon",
-		HORIZONTAL_ALIGNMENT_LEFT, -1, 11, Color(0.47, 0.78, 0.67, 0.92))
+		HORIZONTAL_ALIGNMENT_LEFT, -1, 11, MenuTheme.MUTED)
 	var button_y := 18.0
 	_earth_button_rect = Rect2(size.x - 426, button_y, 90, 38)
 	_moon_button_rect = Rect2(size.x - 328, button_y, 90, 38)
@@ -1494,10 +1494,10 @@ func _draw_chrome(blend: float) -> void:
 	draw_rect(Rect2(0, size.y - FOOTER_H, size.x, FOOTER_H),
 		MenuTheme.INK)
 	draw_line(Vector2(0, size.y - FOOTER_H),
-		Vector2(size.x, size.y - FOOTER_H), Color(0.36, 0.86, 0.66, 0.4), 1.0)
+		Vector2(size.x, size.y - FOOTER_H), MenuTheme.BORDER, 1.0)
 	var footer := "Drag / WASD to pan   ·   Scroll to zoom   ·   Home to recenter   ·   X / Esc to close"
 	draw_string(_font, Vector2(MAP_MARGIN, size.y - 40), footer,
-		HORIZONTAL_ALIGNMENT_LEFT, -1, 12, Color(0.79, 0.91, 0.84, 0.9))
+		HORIZONTAL_ALIGNMENT_LEFT, -1, 12, MenuTheme.MUTED)
 	var right_status := ""
 	if selected_body == CelestialBody.MOON:
 		right_status = "MOON  •  1.62 m/s²  •  TRAVEL TARGET"

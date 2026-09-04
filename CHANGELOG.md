@@ -6,6 +6,8 @@
 
 - Separate online play, the saved local career and practice destinations. Reach
   settings, controls, player name and camera preferences directly from the title.
+- Keep a muted sage landscape on the title screen, with charcoal menu panels,
+  warm ivory text and amber actions throughout the game.
 - Use compact in-game windows so the town stays visible around conversations,
   trading, inventory, the journal, pause menu and world map. Long pages scroll;
   close controls and keyboard navigation remain reachable at small window sizes.

@@ -9,7 +9,7 @@ const MARKET_PAGE_SIZE := 10
 const INK := MenuTheme.TEXT
 const MUTED := MenuTheme.MUTED
 const GOLD := MenuTheme.ACCENT
-const GREEN := MenuTheme.TEAL
+const GREEN := MenuTheme.SECONDARY
 const PANEL := MenuTheme.PANEL
 const INSET := MenuTheme.INSET
 const BORDER := MenuTheme.BORDER
@@ -51,7 +51,7 @@ func _ready() -> void:
 	visible = false
 	mouse_filter = Control.MOUSE_FILTER_STOP
 	var shade := ColorRect.new()
-	shade.color = Color(0.015, 0.03, 0.025, 0.14)
+	shade.color = Color(0.02, 0.025, 0.03, 0.14)
 	shade.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	add_child(shade)
 	_panel = PanelContainer.new()

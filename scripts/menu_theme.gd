@@ -2,15 +2,15 @@ class_name TroopMenuTheme
 extends RefCounted
 ## One quiet, readable visual language for every player menu.
 
-const INK := Color("101c1c")
-const PANEL := Color("182b29")
-const INSET := Color("203633")
-const TEXT := Color("f2f1df")
-const MUTED := Color("a7bbb0")
-const ACCENT := Color("d8e78d")
-const TEAL := Color("78c8ba")
-const BORDER := Color("36534b")
-const DANGER := Color("edab91")
+const INK := Color("15181d")
+const PANEL := Color("23282f")
+const INSET := Color("2e353e")
+const TEXT := Color("f3f0e8")
+const MUTED := Color("b0b6be")
+const ACCENT := Color("e9bc74")
+const SECONDARY := Color("9bb8d5")
+const BORDER := Color("49515c")
+const DANGER := Color("efab99")
 
 static func panel(fill: Color = PANEL, border: Color = BORDER,
 		padding: int = 20, radius: int = 12) -> StyleBoxFlat:
@@ -40,20 +40,20 @@ static func style_button(button: Button, primary: bool = false) -> void:
 	normal.content_margin_top = 9
 	normal.content_margin_bottom = 9
 	var hover := normal.duplicate() as StyleBoxFlat
-	hover.bg_color = ACCENT.lightened(0.1) if primary else Color("2a4740")
-	hover.border_color = ACCENT if primary else TEAL
+	hover.bg_color = ACCENT.lightened(0.1) if primary else Color("3a4551")
+	hover.border_color = ACCENT if primary else SECONDARY
 	var pressed := normal.duplicate() as StyleBoxFlat
-	pressed.bg_color = ACCENT.darkened(0.12) if primary else Color("304b42")
+	pressed.bg_color = ACCENT.darkened(0.12) if primary else Color("404b58")
 	var focus := panel(Color(0, 0, 0, 0), ACCENT, 0, 8)
 	focus.set_border_width_all(2)
 	var disabled := normal.duplicate() as StyleBoxFlat
-	disabled.bg_color = Color("192623")
-	disabled.border_color = Color("293b34")
+	disabled.bg_color = Color("20252c")
+	disabled.border_color = Color("353d47")
 	for pair in [["normal", normal], ["hover", hover], ["pressed", pressed], ["focus", focus], ["disabled", disabled]]:
 		button.add_theme_stylebox_override(pair[0], pair[1])
 	for state in ["font_color", "font_hover_color", "font_pressed_color", "font_focus_color"]:
 		button.add_theme_color_override(state, INK if primary else TEXT)
-	button.add_theme_color_override("font_disabled_color", Color("788d81"))
+	button.add_theme_color_override("font_disabled_color", Color("818994"))
 	button.add_theme_font_size_override("font_size", 16)
 
 static func build() -> Theme:
@@ -77,27 +77,27 @@ static func build() -> Theme:
 	sample.free()
 	for type in ["LineEdit", "TextEdit"]:
 		result.set_stylebox("normal", type, panel(INK, BORDER, 12, 8))
-		result.set_stylebox("focus", type, panel(Color(0,0,0,0), TEAL, 0, 8))
+		result.set_stylebox("focus", type, panel(Color(0,0,0,0), SECONDARY, 0, 8))
 		result.set_color("caret_color", type, ACCENT)
 		result.set_color("font_placeholder_color", type, MUTED)
-		result.set_color("selection_color", type, Color("40624b"))
+		result.set_color("selection_color", type, Color("4d6278"))
 	result.set_stylebox("panel", "PopupMenu", panel(PANEL, BORDER, 8, 8))
-	result.set_stylebox("hover", "PopupMenu", panel(INSET, TEAL, 8, 6))
+	result.set_stylebox("hover", "PopupMenu", panel(INSET, SECONDARY, 8, 6))
 	result.set_color("font_color", "PopupMenu", TEXT)
 	result.set_constant("v_separation", "PopupMenu", 12)
 	result.set_stylebox("panel", "TabContainer", panel(PANEL, BORDER, 16, 10))
 	for type in ["TabBar", "TabContainer"]:
-		result.set_stylebox("tab_selected", type, panel(INSET, TEAL, 12, 6))
+		result.set_stylebox("tab_selected", type, panel(INSET, SECONDARY, 12, 6))
 		result.set_stylebox("tab_unselected", type, panel(INK, BORDER, 12, 6))
-		result.set_stylebox("tab_hovered", type, panel(INSET, TEAL, 12, 6))
+		result.set_stylebox("tab_hovered", type, panel(INSET, SECONDARY, 12, 6))
 		result.set_color("font_selected_color", type, ACCENT)
 		result.set_color("font_unselected_color", type, MUTED)
 		result.set_color("font_hovered_color", type, TEXT)
 	result.set_stylebox("scroll", "VScrollBar", panel(INK, INK, 3, 4))
 	result.set_stylebox("grabber", "VScrollBar", panel(BORDER, BORDER, 3, 4))
-	result.set_stylebox("grabber_highlight", "VScrollBar", panel(TEAL, TEAL, 3, 4))
+	result.set_stylebox("grabber_highlight", "VScrollBar", panel(SECONDARY, SECONDARY, 3, 4))
 	result.set_stylebox("grabber_pressed", "VScrollBar", panel(ACCENT, ACCENT, 3, 4))
 	result.set_stylebox("slider", "HSlider", panel(INK, BORDER, 3, 3))
-	result.set_stylebox("grabber_area", "HSlider", panel(TEAL, TEAL, 3, 3))
+	result.set_stylebox("grabber_area", "HSlider", panel(SECONDARY, SECONDARY, 3, 3))
 	result.set_stylebox("grabber_area_highlight", "HSlider", panel(ACCENT, ACCENT, 3, 3))
 	return result

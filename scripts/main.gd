@@ -1425,13 +1425,13 @@ func _show_menu() -> void:
 	bg.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	menu.add_child(bg)
 	var shade := ColorRect.new()
-	shade.color = Color(0.025, 0.06, 0.055, 0.40)
+	shade.color = Color(0.035, 0.04, 0.045, 0.12)
 	shade.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	shade.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	menu.add_child(shade)
 	_menu_frame = PanelContainer.new()
 	_menu_frame.name = "MainMenuFrame"
-	_menu_frame.add_theme_stylebox_override("panel", MenuTheme.panel(Color("142421"), MenuTheme.BORDER, 28, 18))
+	_menu_frame.add_theme_stylebox_override("panel", MenuTheme.panel(MenuTheme.INK, MenuTheme.BORDER, 28, 18))
 	menu.add_child(_menu_frame)
 	var frame := VBoxContainer.new()
 	frame.add_theme_constant_override("separation", 14)
@@ -1444,7 +1444,7 @@ func _show_menu() -> void:
 	header.add_child(identity)
 	identity.add_child(MenuTheme.label("T R O O P", 36, MenuTheme.TEXT))
 	identity.add_child(MenuTheme.label("A world to explore. A place to belong.", 17, MenuTheme.MUTED))
-	var version := MenuTheme.label("ROOTS & ROCKETS\n" + Updater.current_version(), 13, MenuTheme.TEAL)
+	var version := MenuTheme.label("ROOTS & ROCKETS\n" + Updater.current_version(), 13, MenuTheme.SECONDARY)
 	version.size_flags_horizontal = Control.SIZE_SHRINK_END
 	version.custom_minimum_size.x = 160
 	version.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
@@ -1617,12 +1617,12 @@ func _entry_card(parent: VBoxContainer, eyebrow: String, title: String,
 		copy: String, action: String, primary: bool) -> Button:
 	var card := PanelContainer.new()
 	card.add_theme_stylebox_override("panel", MenuTheme.panel(MenuTheme.INSET if primary else MenuTheme.PANEL,
-		MenuTheme.TEAL if primary else MenuTheme.BORDER, 20, 12))
+		MenuTheme.SECONDARY if primary else MenuTheme.BORDER, 20, 12))
 	parent.add_child(card)
 	var content := VBoxContainer.new()
 	content.add_theme_constant_override("separation", 8)
 	card.add_child(content)
-	content.add_child(MenuTheme.label(eyebrow, 11, MenuTheme.TEAL if primary else MenuTheme.MUTED))
+	content.add_child(MenuTheme.label(eyebrow, 11, MenuTheme.SECONDARY if primary else MenuTheme.MUTED))
 	content.add_child(MenuTheme.label(title, 23))
 	content.add_child(MenuTheme.label(copy, 15, MenuTheme.MUTED))
 	var button := Button.new()
@@ -1662,7 +1662,7 @@ func _build_menu_help(parent: VBoxContainer) -> void:
 		for item in section[1]:
 			var row := HBoxContainer.new()
 			stack.add_child(row)
-			var binding := MenuTheme.label(_menu_binding(StringName(item[0])), 14, MenuTheme.TEAL)
+			var binding := MenuTheme.label(_menu_binding(StringName(item[0])), 14, MenuTheme.SECONDARY)
 			binding.custom_minimum_size.x = 100
 			binding.size_flags_horizontal = Control.SIZE_FILL
 			row.add_child(binding)
