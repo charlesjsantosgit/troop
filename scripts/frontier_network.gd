@@ -88,7 +88,10 @@ func start_authority(seed_value: int, persist := false) -> Error:
 	_physics_root.add_child(_moon_sampler)
 	_moon_sampler.position = Vector3(0, net.MOON_WORLD_ORIGIN_Y, 0)
 	for town: Dictionary in catalog:
-		var site := FrontierSite.new()
+		# Site's renderer-facing World type loads the complete terrain scene.
+		# Only an authority needs these nodes; connection-only clients must not
+		# compile that graph synchronously while Net.join wires the RPC endpoint.
+		var site: Node3D = load("res://scripts/frontier_site.gd").new()
 		site.name = str(town.id)
 		site.planet = str(town.planet)
 		site.town_id = str(town.id)
@@ -249,7 +252,7 @@ static func metered_fuel(kind: int, elapsed: float, distance: float) -> float:
 
 
 func _build_physics_town(town: Dictionary) -> void:
-	var site: FrontierSite = sites[town.id]
+	var site: Node3D = sites[town.id]
 	var floor_body := StaticBody3D.new()
 	var floor_shape := CollisionShape3D.new()
 	var box := BoxShape3D.new()
@@ -466,8 +469,8 @@ func _workplace_in_range(peer_id: int, town: Dictionary, kind: String, payload: 
 				break
 	if local == Vector2.INF:
 		return false
-	var site: FrontierSite = sites[town.id]
-	var position := site.surface_point(local.x, local.y, 0.8)
+	var site: Node3D = sites[town.id]
+	var position: Vector3 = site.surface_point(local.x, local.y, 0.8)
 	var range_limit := 18.0 if kind == "refuel" else 7.5
 	if net._peer_on_foot_positions[peer_id].distance_to(position) > range_limit:
 		return false

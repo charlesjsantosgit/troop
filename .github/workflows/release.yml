@@ -190,8 +190,12 @@ jobs:
           for MODE in frontiertest frontierplaytest frontierroutetest frontiertraffictest lunarskytest; do
             TEST_LOG="$RUNNER_TEMP/troop-$MODE.log"
             TEST_PREFIX="$(printf '%s' "$MODE" | tr '[:lower:]' '[:upper:]')"
+            TEST_FRAMES=30000
+            # Traffic includes 36,000 town frames plus bounded delivery/career
+            # phases (under 85,500 total); allow startup/cleanup within 90,000.
+            if [ "$MODE" = frontiertraffictest ]; then TEST_FRAMES=90000; fi
             "$GODOT_BIN" --headless --path . --fixed-fps 60 \
-              --quit-after 30000 -- "$MODE" 2>&1 | tee "$TEST_LOG"
+              --quit-after "$TEST_FRAMES" -- "$MODE" 2>&1 | tee "$TEST_LOG"
             grep -Eq "^${TEST_PREFIX} (result=)?[0-9]+/[0-9]+ PASS$" "$TEST_LOG"
             ! grep -q 'SCRIPT ERROR:' "$TEST_LOG"
           done

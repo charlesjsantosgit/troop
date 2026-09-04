@@ -19,6 +19,10 @@ func run(main: Node) -> void:
 	main._show_menu()
 	main._begin_menu_offline("solo")
 	var offline_attempt: int = main._join_attempt
+	var offline_camera: Camera3D = main.get_node_or_null("OfflineLoadingCamera")
+	_check(is_instance_valid(offline_camera) and offline_camera.cull_mask == 0 \
+		and get_viewport().get_camera_3d() == offline_camera,
+		"offline loading configures an empty current camera before texture preparation")
 	_check(main._join_in_progress and main.mode == "loading" and main.world == null,
 		"offline first entry waits for graphics while leaving the menu visible")
 	_check(not main._online_button.disabled,
@@ -32,6 +36,9 @@ func run(main: Node) -> void:
 	_check(not main._join_in_progress and main.mode == "menu" \
 		and main.world == null and not Net.active,
 		"cancel wakes an offline texture waiter without creating a world or connection")
+	_check(not is_instance_valid(offline_camera) \
+		and main.get_node_or_null("OfflineLoadingCamera") == null,
+		"cancel frees the temporary offline camera with no retained empty view")
 	main._begin_menu_offline("solo")
 	var escape_attempt: int = main._join_attempt
 	main.name_edit.grab_focus()
@@ -43,6 +50,16 @@ func run(main: Node) -> void:
 	_check(not main._join_in_progress and main.mode == "menu" \
 		and main.world == null and not Net.active,
 		"Escape cannot let the suspended offline loader create a world later")
+	var previous_texture_error: Error = SharedTextureCache._error
+	SharedTextureCache._error = ERR_CANT_OPEN
+	main._begin_menu_offline("solo")
+	for frame in range(3):
+		await get_tree().process_frame
+	_check(main.mode == "menu" and not main._join_in_progress and main.world == null \
+		and main.get_node_or_null("OfflineLoadingCamera") == null \
+		and "could not load" in main.status_label.text,
+		"texture failure removes the empty camera and returns to the usable menu")
+	SharedTextureCache._error = previous_texture_error
 	main.mode = "join"
 	main._join_in_progress = true
 	main._join_attempt += 1
@@ -177,6 +194,11 @@ func run(main: Node) -> void:
 		and main.world.is_build_complete() and main.menu == null \
 		and SharedTextureCache.is_ready(),
 		"offline retry enters a complete world only after graphics are ready")
+	for frame in range(2):
+		await get_tree().process_frame
+	_check(main.get_node_or_null("OfflineLoadingCamera") == null \
+		and get_viewport().get_camera_3d() == main.world.local_player.cam._cam,
+		"successful offline entry retires the empty camera and retains the player's view")
 	main._return_to_main_menu()
 	for frame in range(3):
 		await get_tree().process_frame
@@ -197,10 +219,24 @@ func _press_escape() -> void:
 
 func _start_fixture_entry(main: Node, output: Array) -> void:
 	Net.solo("CancellationFixture", 20260805)
-	# The offline peer supplies a valid local identity for the online build
-	# guard without opening sockets, registering remotely or writing real saves.
+	# Use a real in-memory society authority and its normal registration/view
+	# pipeline. An active peer alone cannot satisfy shared-town entry readiness.
+	# The offline transport opens no sockets and this authority never persists.
 	multiplayer.multiplayer_peer = OfflineMultiplayerPeer.new()
 	Net.active = true
+	Net.is_host = true
+	Net._wire()
+	var authority_error: Error = Net.frontier_network.start_authority(20260805, false)
+	Net._peer_key_fingerprints[Net.local_id()] = "a".repeat(64)
+	if authority_error == OK:
+		Net.frontier_network.register_peer(Net.local_id())
+	var society_ready: bool = authority_error == OK \
+		and Net.frontier_network.society_ready and Net.frontier_network.views.size() == 6 \
+		and not Net.frontier_network.persistence_enabled
+	_check(society_ready, "retry creates six real personalized town views without persistent authority")
+	if not society_ready:
+		output.append(false)
+		return
 	main.mode = "join"
 	main._join_in_progress = true
 	main._join_attempt += 1

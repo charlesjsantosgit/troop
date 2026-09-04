@@ -589,7 +589,7 @@ func _prepare_gameplay_textures(attempt: int) -> bool:
 	return false
 
 
-func _begin_menu_offline(destination: String) -> void:
+func _begin_menu_offline(destination: String, load_frontier_save := true) -> void:
 	if _join_in_progress:
 		return
 	_join_attempt += 1
@@ -600,7 +600,18 @@ func _begin_menu_offline(destination: String) -> void:
 	_set_join_button_busy(true)
 	if is_instance_valid(_online_button):
 		_online_button.text = "CANCEL LOADING"
+	# Set the final render features in an empty view, just as online entry does.
+	# Enabling temporal reconstruction after the whole offline scene exists
+	# invalidates every surface pipeline at once on a cold Metal installation.
+	_configure_rendering_backend()
+	get_viewport().scaling_3d_scale = _preferred_render_scale()
+	var loading_camera := Camera3D.new()
+	loading_camera.name = "OfflineLoadingCamera"
+	loading_camera.cull_mask = 0
+	add_child(loading_camera)
+	loading_camera.current = true
 	var ready := await _prepare_gameplay_textures(attempt)
+	loading_camera.queue_free()
 	if attempt != _join_attempt:
 		return
 	_join_in_progress = false
@@ -612,7 +623,7 @@ func _begin_menu_offline(destination: String) -> void:
 	match destination:
 		"frontier":
 			_close_menu()
-			_start_frontier(pname)
+			_start_frontier(pname, load_frontier_save)
 		"solo":
 			mode = "solo"
 			_close_menu()
