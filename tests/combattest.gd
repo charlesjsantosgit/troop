@@ -1324,15 +1324,17 @@ func run(main) -> void:
 	_check(is_equal_approx(ai.health, 15.0) and not ai.defeated,
 		"a sniper body shot removes exactly 85 percent of full health")
 
-	# Put the head zone on the exact 160 m trajectory, slightly below its centre
-	# so the enlarged swept bullet remains clear of the torso hitbox.
+	# Put the rendered head zone just below the exact 160 m trajectory. The
+	# character's stature and live pose determine its height, not the old 1.17 m
+	# root offset (which now aims into the taller character's torso).
 	var long_headshot_distance := 160.0
 	var long_headshot_origin := Vector3(0, 120.0, 0)
 	var long_headshot_drop := SniperRifle.drop_below_zero_at(
 		long_headshot_distance)
+	var head_offset := ai.head_hitbox.global_position - ai.global_position
 	ai.global_position = Vector3(0,
 		long_headshot_origin.y - long_headshot_drop -
-		1.17 - 0.16,
+		head_offset.y - 0.16,
 		-long_headshot_distance)
 	ai.health = ai.MAX_HEALTH
 	ai.defeated = false
@@ -1416,7 +1418,9 @@ func run(main) -> void:
 	ai._invulnerable_t = 0.0
 	var head_confirmations_before := hit_confirmations.size()
 	var head_hud_flashes_before: int = main.hud.hit_marker.flash_count
-	world.spawn_bullet(player, player_pos + Vector3(0, 1.17, -0.6),
+	var head_origin := Vector3(ai.head_hitbox.global_position.x,
+		ai.head_hitbox.global_position.y, player_pos.z - 0.6)
+	world.spawn_bullet(player, head_origin,
 		Vector3(0, 0, -BananaGun.MUZZLE_SPEED))
 	for i in range(12):
 		await get_tree().physics_frame

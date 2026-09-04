@@ -8,6 +8,8 @@
   Adult NPCs have consistent individual heights between **5 feet 7 inches and
   6 feet 2 inches (1.7018–1.8796 m)**. First-person eye level, body collisions,
   remote avatars and seated limb poses follow the same scale.
+- Keep both sniper grips aligned with the character's hands during vine
+  support, including the shortest and tallest adult NPC sizes.
 
 ### Nana and nearby workplaces
 

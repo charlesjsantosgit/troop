@@ -202,6 +202,10 @@ func _ready() -> void:
 	primary_grip.name = "PrimaryGrip"
 	primary_grip.position = Vector3(0.0, -0.17, 0.12)
 	add_child(primary_grip)
+	# Mount the actual trigger grip on the articulated firing paw. Offsetting
+	# the receiver from the wrist left an 8.4 cm gap that grew with body height;
+	# translating the rifle preserves barrel orientation and the real grip mesh.
+	position = Vector3(0.0, -MonkeyRig.ARM_B, 0.0) - basis * primary_grip.position
 	support_grip = Marker3D.new()
 	support_grip.name = "SupportGrip"
 	# The procedural monkey has compact 0.50 m arms. Keep the support hand on the

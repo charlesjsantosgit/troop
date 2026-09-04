@@ -1929,7 +1929,10 @@ func _pose_weapon_arm(direction: Vector3, recoil: float) -> void:
 	if bend_direction.length_squared() < 0.001:
 		bend_direction = body_basis * Vector3.RIGHT
 	bend_direction = bend_direction.normalized()
-	var bend_angle := 0.62 + recoil * 0.12
+	# Draw the supported rifle toward the chest. With its trigger grip seated
+	# in the firing paw, the former extended elbow put the fore-end beyond the
+	# opposite arm's reach; this folded posture retains the same barrel aim.
+	var bend_angle := lerpf(0.62, 1.12, _sniper_rope_blend) + recoil * 0.12
 	var upper_direction := (
 		aim * cos(bend_angle) + bend_direction * sin(bend_angle)
 	).normalized()

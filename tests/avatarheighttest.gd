@@ -44,6 +44,41 @@ func ragdoll_bounds(doll) -> Vector2:
 				else: sole = minf(sole,y)
 	return Vector2(sole,crown)
 
+func _rope_contacts(player, rig_script) -> void:
+	for stature: float in [1.7018,1.778,1.8796]:
+		var rig = player.rig
+		rig.reset_pose_state()
+		rig.set_standing_height(stature)
+		player.equip_weapon(4)
+		player.state = player.S.SWING
+		player.velocity = Vector3(8,0,0)
+		player.swing_anchor = player.hand_pos()+Vector3.UP*4.0
+		player._sync_weapon_presentation(true)
+		rig.set_sniper_rope_pose(true,player.sniper.support_grip)
+		rig.set_rope(true,player.swing_anchor,player.hand_pos(),0.0,player.velocity)
+		rig.set_gun_aim(true,Vector3.FORWARD,0.0)
+		for frame in range(75):
+			rig.update_motion(1.0/60.0,rig_script.Anim.SWING,player.velocity,false,player.swing_anchor)
+		var tip: Vector3 = rig.tail_segs[-1].to_global(Vector3(0,0,0.17))
+		var tail_error := tip.distance_to(Geometry3D.get_closest_point_to_segment(
+			tip,player.swing_anchor,player.hand_pos()))
+		var left_foot: Vector3 = rig.foot_l.global_position
+		var right_foot: Vector3 = rig.foot_r.global_position
+		var feet_error := maxf(left_foot.distance_to(Geometry3D.get_closest_point_to_segment(
+			left_foot,player.swing_anchor,player.hand_pos())),right_foot.distance_to(
+			Geometry3D.get_closest_point_to_segment(right_foot,player.swing_anchor,player.hand_pos())))
+		var left_error: float = rig.paw_l.global_position.distance_to(player.sniper.support_grip.global_position)
+		var right_error: float = rig.paw_r.global_position.distance_to(player.sniper.primary_grip.global_position)
+		check(left_error<0.005 and right_error<0.005,
+			"%.4f m sniper hands contact the actual modeled rifle grips (left=%.6f right=%.6f m)" % [stature,left_error,right_error])
+		check(tail_error<0.035 and feet_error<0.10,
+			"%.4f m sniper tail and both feet brace the real zero-tail vine (tail=%.6f feet=%.6f m)" % [stature,tail_error,feet_error])
+		var factor: float = stature/rig_script.REST_HEIGHT
+		check(absf(rig.sh_l.global_position.distance_to(rig.el_l.global_position)-rig_script.ARM_A*factor)<0.00001 \
+			and absf(rig.el_l.global_position.distance_to(rig.paw_l.global_position)-rig_script.ARM_B*factor)<0.00001 \
+			and (-player.sniper.global_basis.z).normalized().dot(Vector3.FORWARD)>0.999,
+			"%.4f m two-hand rifle pose retains anatomical arm lengths and exact barrel aim" % stature)
+
 func _run() -> void:
 	var rig_script = load("res://scripts/monkey_rig.gd")
 	var site := Site.new()
@@ -159,6 +194,7 @@ func _run() -> void:
 		check(unit_bases and shapes_match,
 			"%.4f m ragdoll uses scaled collision dimensions and unit rigid-body bases" % stature)
 		doll.free()
+	_rope_contacts(player,rig_script)
 	site.free()
 	await process_frame
 	print("AVATARHEIGHTTEST %d/%d %s" % [passed,total,"PASS" if passed==total else "FAIL"])
