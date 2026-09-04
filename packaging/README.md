@@ -76,15 +76,20 @@ either one.
 
 ## Publishing a release
 
-Version **0.4.10** uses bootstrap **3**, protocol **11**,
-`minimum_bootstrap=3`, and `requires_installer=true`. This is a one-time full
-installer migration even from 0.4.9: the renderer initializes before the first
-autoload, and the Updater autoload is already running when it mounts a hot PCK.
-Those startup fixes cannot be delivered safely as a content-only update.
-Players must download the 0.4.10 installer, close TROOP, replace the old app,
-and confirm 0.4.10 on the menu. Keep `minimum_bootstrap` at least 3 for later
-compatible content releases. The server and every client must activate 0.4.10
-before they can connect, although protocol 11 is unchanged.
+Version **0.5.0 — Roots & Rockets** retains bootstrap **3**, protocol **11**,
+and `minimum_bootstrap=3`. The candidate uses `requires_installer=false` for a
+compatible content update from the **0.4.10** installed bootstrap. **Before
+publishing, verify the 0.5.0 content pack in the actual 0.4.10 release engine.**
+That compatibility gate is pending; set `requires_installer=true` and revise
+player instructions if a full installation is required. Do not change the
+bootstrap or protocol merely to bypass this gate.
+
+Installations older than 0.4.10 need the full 0.5.0 installer because the
+renderer and updater startup migration requires bootstrap 3. The server and
+every client must activate **0.5.0** before connecting, even with protocol 11
+unchanged. The society career is offline; public multiplayer retains classic
+combat and lunar expeditions. Publishing the pack does not add a networked
+society or import local saved wallets into the public server.
 
 1. Set `application/config/version` in `project.godot` to the new numeric
    version (`major.minor.patch`, with an optional fourth numeric component).
@@ -149,7 +154,7 @@ Run the preflight and one actual-export postflight manually with:
 ```bash
 python3 packaging/bake_metal_cache.py --verify packaging/metal_cache
 python3 packaging/verify_packed_metal_cache.py --godot godot \
-  --pack build/release-0.4.10/windows/TROOP.pck
+  --pack build/release-0.5.0/windows/TROOP.pck
 python3 -m unittest discover -s tests -p 'test_*metal*cache.py'
 ```
 
@@ -190,7 +195,7 @@ exist:
 
 ```bash
 python3 packaging/make_update_manifest.py \
-  --version 0.4.10 \
+  --version 0.5.0 \
   --repository OWNER/REPOSITORY \
   --private-key /Users/charlessantos/.config/troop/update-signing-private.pem
 

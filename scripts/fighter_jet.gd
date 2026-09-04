@@ -293,6 +293,9 @@ func _simulate(dt: float) -> void:
 		afterburner = false
 		_pitch_input = 0.0
 		_assisted_heading_active = false
+	if not has_drive_fuel():
+		throttle_setpoint = 0.0
+		afterburner = false
 	spool = move_toward(spool, throttle_setpoint, 0.42 * dt)
 	engine.rpm = lerpf(62.0, 100.0, spool)
 	airbrake = move_toward(airbrake, 1.0 if input_handbrake else 0.0,
@@ -325,6 +328,8 @@ func _simulate(dt: float) -> void:
 	var thrust := THRUST_IDLE + THRUST_MIL * spool * pow(density / 1.225, 0.7)
 	if afterburner:
 		thrust += THRUST_AB_EXTRA * pow(density / 1.225, 0.8)
+	if not has_drive_fuel():
+		thrust = 0.0
 	apply_central_force(global_basis.z * thrust)
 
 	var v := linear_velocity

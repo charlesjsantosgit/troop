@@ -41,6 +41,56 @@ static var EARTH_CINEMATIC_ATLAS: Texture2D:
 const WATER_HANDOFF_BAND := 16.0
 const WATER_HANDOFF_DISTANCE := Gen.CHUNK * Gen.VIEW_R - WATER_HANDOFF_BAND
 
+## One small residency atlas records complete terrain meshes, not queued work.
+## Each channel has its own sector scale/origin. Shared ownership also handles
+## sparse online entry and descent without drawing two levels over one another.
+const TERRAIN_RESIDENCY_SIZE := 32
+const TERRAIN_GRID_SIZES := Vector4(48.0, 192.0, 768.0, 6144.0)
+const TERRAIN_TRANSITION_START := Vector3(64.0, 504.0, 1480.0)
+const TERRAIN_TRANSITION_END := Vector3(96.0, 696.0, 1920.0)
+static var _terrain_residency: Image
+static var _terrain_residency_texture: ImageTexture
+static var _terrain_origins := PackedVector2Array()
+static var _terrain_keys: Array = []
+
+const TERRAIN_OWNERSHIP_SHADER := """
+uniform bool terrain_residency_enabled = false;
+uniform sampler2D terrain_residency : filter_nearest, repeat_disable;
+uniform vec2 terrain_grid_origins[4];
+uniform vec4 terrain_grid_sizes = vec4(48.0, 192.0, 768.0, 6144.0);
+uniform vec3 terrain_transition_start = vec3(64.0, 504.0, 1480.0);
+uniform vec3 terrain_transition_end = vec3(96.0, 696.0, 1920.0);
+uniform int terrain_tier = 0;
+
+bool terrain_present(vec2 point, int tier) {
+	vec2 cell = floor(point / terrain_grid_sizes[tier]) - terrain_grid_origins[tier];
+	if (any(lessThan(cell, vec2(0.0))) || any(greaterThanEqual(cell, vec2(32.0)))) {
+		return false;
+	}
+	return texture(terrain_residency, (cell + vec2(0.5)) / 32.0)[tier] > 0.5;
+}
+
+bool owns_terrain(vec2 point, vec2 focus, float cell_hash) {
+	float d = distance(point, focus);
+	vec3 transition = smoothstep(terrain_transition_start, terrain_transition_end, vec3(d));
+	bool present0 = terrain_present(point, 0);
+	bool present1 = terrain_present(point, 1);
+	bool present2 = terrain_present(point, 2);
+	bool present3 = terrain_present(point, 3);
+	int owner = -1;
+	if (present0 && (cell_hash >= transition.x || !(present1 || present2 || present3))) {
+		owner = 0;
+	} else if (present1 && (cell_hash >= transition.y || !(present2 || present3))) {
+		owner = 1;
+	} else if (present2 && (cell_hash >= transition.z || !present3)) {
+		owner = 2;
+	} else if (present3) {
+		owner = 3;
+	}
+	return terrain_tier == owner;
+}
+"""
+
 const CINEMATIC_CURVE_UNIFORMS := [
 	"cinematic_curve_focus_xz", "cinematic_curve_surface_y",
 	"cinematic_curve_radius", "cinematic_curve_strength",
@@ -52,6 +102,9 @@ const GROUND_SHADER := """
 shader_type spatial;
 render_mode diffuse_burley, specular_schlick_ggx;
 
+""" + TERRAIN_OWNERSHIP_SHADER + """
+
+uniform vec2 focus_xz = vec2(0.0);
 uniform float snow_amount : hint_range(0.0, 1.0) = 0.0;
 uniform vec2 cinematic_curve_focus_xz = vec2(0.0);
 uniform float cinematic_curve_surface_y = 0.0;
@@ -97,9 +150,16 @@ vec3 curved_planet_position(vec3 flat_position) {
 
 void vertex() {
 	vec3 flat_position = (MODEL_MATRIX * vec4(VERTEX, 1.0)).xyz;
+	float parent_blend = 0.0;
+	if (terrain_residency_enabled && terrain_present(flat_position.xz, 1)) {
+		// Complete the geometric transition before either mesh is dithered.
+		// Collision stays on the unmodified near vertices around the player.
+		parent_blend = smoothstep(48.0, 60.0, distance(flat_position.xz, focus_xz));
+		flat_position.y = mix(flat_position.y, UV2.x, parent_blend);
+	}
 	world_pos = flat_position;
 	world_normal = normalize(MODEL_NORMAL_MATRIX * NORMAL);
-	vertex_tint = COLOR;
+	vertex_tint = mix(COLOR, vec4(UV.xy, UV2.y, COLOR.a), parent_blend);
 	// POSITION is written by the cinematic branch, so the ordinary branch must
 	// explicitly provide its normal clip-space position too. Leaving it unset
 	// collapsed every gameplay terrain vertex and exposed the sky's cyan nadir.
@@ -118,6 +178,8 @@ void vertex() {
 }
 
 void fragment() {
+	if (terrain_residency_enabled && !owns_terrain(world_pos.xz, focus_xz,
+			hash21(floor(world_pos.xz * 0.36)))) { discard; }
 	if (cinematic_curve_strength > 0.0001) {
 		if (distance(world_pos.xz, cinematic_curve_focus_xz)
 				> cinematic_curve_cap_radius) { discard; }
@@ -172,6 +234,24 @@ void fragment() {
 	AO = 0.76 + fine * 0.14 + mapped_detail * 0.08;
 	RIM = 0.08;
 	RIM_TINT = 0.55;
+	// Match the successor's complete material before coverage changes. Merely
+	// fixing depth ownership left a conspicuous dark/green checkerboard.
+	float surface_blend = terrain_residency_enabled
+		? smoothstep(48.0, 60.0, distance(world_pos.xz, focus_xz)) : 0.0;
+	surface_blend *= 1.0 - cinematic_curve_strength;
+	if (surface_blend > 0.0) {
+		float far_detail = texture(terrain_microdetail, world_pos.xz / 1024.0).r;
+		float far_noise = hash21(floor(world_pos.xz * 0.12));
+		float far_snow = max(snow_amount, alt_snow) * mix(0.68, 0.90, far_noise);
+		vec3 far_snow_color = vec3(0.68, 0.75, 0.81) * mix(0.90, 1.07, far_noise);
+		vec3 far_albedo = mix(vertex_tint.rgb * mix(0.76, 0.92, far_detail),
+			far_snow_color, far_snow);
+		ALBEDO = mix(ALBEDO, far_albedo, surface_blend);
+		ROUGHNESS = mix(ROUGHNESS, mix(0.99, 0.91, far_detail), surface_blend);
+		SPECULAR = mix(SPECULAR, 0.10, surface_blend);
+		AO = mix(AO, mix(0.82, 0.94, far_detail), surface_blend);
+		RIM *= 1.0 - surface_blend;
+	}
 }
 """
 
@@ -325,6 +405,8 @@ const FAR_GROUND_SHADER := """
 shader_type spatial;
 render_mode diffuse_burley, specular_schlick_ggx;
 
+""" + TERRAIN_OWNERSHIP_SHADER + """
+
 uniform vec2 focus_xz = vec2(0.0);
 uniform float near_fade = 108.0;
 uniform float fade_band = 18.0;
@@ -389,13 +471,17 @@ void fragment() {
 				> cinematic_curve_cap_radius) { discard; }
 	}
 	float distance_to_focus = distance(world_pos.xz, focus_xz);
-	float coverage = near_fade <= 0.0 ? 1.0 : smoothstep(
-		near_fade - fade_band, near_fade + fade_band, distance_to_focus);
 	float cell_hash = hash21(floor(world_pos.xz * 0.36));
-	if (cell_hash > coverage) { discard; }
-	float outgoing = smoothstep(far_fade - far_fade_band,
-		far_fade + far_fade_band, distance_to_focus);
-	if (cell_hash <= outgoing) { discard; }
+	if (terrain_residency_enabled) {
+		if (!owns_terrain(world_pos.xz, focus_xz, cell_hash)) { discard; }
+	} else {
+		float coverage = near_fade <= 0.0 ? 1.0 : smoothstep(
+			near_fade - fade_band, near_fade + fade_band, distance_to_focus);
+		if (cell_hash >= coverage) { discard; }
+		float outgoing = smoothstep(far_fade - far_fade_band,
+			far_fade + far_fade_band, distance_to_focus);
+		if (cell_hash < outgoing) { discard; }
+	}
 	float detail_world_scale = mix(1024.0, 16384.0,
 		cinematic_curve_strength);
 	float mapped_detail = texture(terrain_microdetail,
@@ -432,6 +518,8 @@ void fragment() {
 const STRATOS_GROUND_SHADER := """
 shader_type spatial;
 render_mode diffuse_burley, specular_schlick_ggx;
+
+""" + TERRAIN_OWNERSHIP_SHADER + """
 
 uniform vec2 focus_xz = vec2(0.0);
 uniform float near_fade = 1700.0;
@@ -497,16 +585,20 @@ void fragment() {
 				> cinematic_curve_cap_radius) { discard; }
 	}
 	float distance_to_focus = distance(world_pos.xz, focus_xz);
-	float coverage = near_fade <= 0.0 ? 1.0 : smoothstep(
-		near_fade - fade_band, near_fade + fade_band, distance_to_focus);
 	float cell_hash = hash21(floor(world_pos.xz * 0.36));
-	if (cell_hash > coverage) { discard; }
+	if (terrain_residency_enabled) {
+		if (!owns_terrain(world_pos.xz, focus_xz, cell_hash)) { discard; }
+	} else {
+		float coverage = near_fade <= 0.0 ? 1.0 : smoothstep(
+			near_fade - fade_band, near_fade + fade_band, distance_to_focus);
+		if (cell_hash >= coverage) { discard; }
+	}
 	// Stratos has no successor outside the requested view circle. Finish its
 	// atmospheric fade at that exact radius so circular target selection never
 	// needs hidden padding sectors beyond the camera's horizon.
 	float outgoing = smoothstep(far_fade - far_fade_band,
 		far_fade, distance_to_focus);
-	if (cell_hash <= outgoing) { discard; }
+	if (cell_hash < outgoing) { discard; }
 
 	// COLOR.a carries deterministic canopy coverage. Broad 64/190 m patches
 	// survive at aircraft distance, unlike literal crowns that become sub-pixel.
@@ -1061,6 +1153,7 @@ static func ground_material() -> ShaderMaterial:
 	if not _shared.has("ground"):
 		_shared.ground = _material(GROUND_SHADER, {
 			"snow_amount": _snow_amount,
+			"focus_xz": Vector2.ZERO if not _far_focus.is_finite() else _far_focus,
 			"terrain_microdetail": TERRAIN_MICRODETAIL,
 			"terrain_floor_albedo": TERRAIN_FLOOR_ALBEDO,
 		})
@@ -1304,15 +1397,86 @@ static func full_sphere_nadir_palette(sky_top: Color, sky_horizon: Color,
 		"altitude_blend": altitude_blend}
 
 
+## Dictionaries contain only committed shells. Snapshot membership rather than
+## hashing it: a remove/add with the same count must still refresh the GPU map.
+static func set_terrain_residency(focus: Vector2, near_keys: Dictionary,
+		horizon_keys: Dictionary, skyline_keys: Dictionary,
+		stratos_keys: Dictionary) -> void:
+	var tiers := [near_keys, horizon_keys, skyline_keys, stratos_keys]
+	var origins := PackedVector2Array()
+	var changed := _terrain_keys.size() != 4
+	for tier in range(4):
+		origins.append((focus / TERRAIN_GRID_SIZES[tier]).floor()
+			- Vector2.ONE * (TERRAIN_RESIDENCY_SIZE / 2))
+		if not changed:
+			var previous: Dictionary = _terrain_keys[tier]
+			if previous.size() != tiers[tier].size():
+				changed = true
+			else:
+				for key in tiers[tier]:
+					if not previous.has(key):
+						changed = true
+						break
+	if not changed and origins == _terrain_origins:
+		return
+	_terrain_origins = origins
+	_terrain_keys.clear()
+	_terrain_residency = Image.create(TERRAIN_RESIDENCY_SIZE,
+		TERRAIN_RESIDENCY_SIZE, false, Image.FORMAT_RGBA8)
+	_terrain_residency.fill(Color(0, 0, 0, 0))
+	for tier in range(4):
+		var keys: Dictionary = {}
+		for key in tiers[tier]:
+			keys[key] = true
+			var pixel := Vector2i(key) - Vector2i(origins[tier])
+			if pixel.x < 0 or pixel.y < 0 or pixel.x >= TERRAIN_RESIDENCY_SIZE \
+					or pixel.y >= TERRAIN_RESIDENCY_SIZE:
+				continue
+			var value := _terrain_residency.get_pixelv(pixel)
+			value[tier] = 1.0
+			_terrain_residency.set_pixelv(pixel, value)
+		_terrain_keys.append(keys)
+	if _terrain_residency_texture == null:
+		_terrain_residency_texture = ImageTexture.create_from_image(_terrain_residency)
+	else:
+		_terrain_residency_texture.update(_terrain_residency)
+	var materials := [ground_material(), far_ground_material(),
+		skyline_ground_material(), stratos_ground_material()]
+	for tier in range(4):
+		var material: ShaderMaterial = materials[tier]
+		material.set_shader_parameter("terrain_residency_enabled", true)
+		material.set_shader_parameter("terrain_residency", _terrain_residency_texture)
+		material.set_shader_parameter("terrain_grid_origins", _terrain_origins)
+		material.set_shader_parameter("terrain_grid_sizes", TERRAIN_GRID_SIZES)
+		material.set_shader_parameter("terrain_transition_start", TERRAIN_TRANSITION_START)
+		material.set_shader_parameter("terrain_transition_end", TERRAIN_TRANSITION_END)
+		material.set_shader_parameter("terrain_tier", tier)
+
+
+static func reset_terrain_residency() -> void:
+	_terrain_keys.clear()
+	_terrain_origins.clear()
+	for material in [ground_material(), far_ground_material(),
+			skyline_ground_material(), stratos_ground_material()]:
+		material.set_shader_parameter("terrain_residency_enabled", false)
+
+
+static func terrain_residency_image() -> Image:
+	return _terrain_residency
+
+
+static func terrain_residency_origins() -> PackedVector2Array:
+	return _terrain_origins
+
+
 static func set_far_focus(position: Vector3) -> void:
 	var focus := Vector2(position.x, position.z)
-	# The three horizon shaders share a focus point used only for their broad
-	# cross-fade. Sub-pixel player movement does not change that transition, so
-	# avoid three render-server uniform updates on every 120-160 Hz frame.
+	# All terrain levels share one focus for geometry and coverage transitions.
+	# Sub-pixel movement does not justify updating every shared material.
 	if _far_focus.distance_squared_to(focus) < 0.0625:
 		return
 	_far_focus = focus
-	for material in [far_ground_material(), far_jungle_material(),
+	for material in [ground_material(), far_ground_material(), far_jungle_material(),
 			far_water_material(), skyline_ground_material(), skyline_water_material(),
 			skyline_jungle_material(), stratos_ground_material()]:
 		material.set_shader_parameter("focus_xz", focus)

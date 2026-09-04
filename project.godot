@@ -4,7 +4,7 @@ config_version=5
 [application]
 
 config/name="TROOP"
-config/version="0.4.10"
+config/version="0.5.0"
 config/update_repository="charlesjsantosgit/troop"
 config/update_channel="stable"
 config/update_auto_check=true

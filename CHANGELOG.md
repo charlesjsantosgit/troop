@@ -1,5 +1,53 @@
 # TROOP changelog
 
+## 0.5.0 — ROOTS & ROCKETS
+
+### A working society on Earth and the Moon
+
+- Choose **ROOTS & ROCKETS · LIVING SOCIETY** or **MOON EXPEDITION** for a
+  persistent offline career on the existing planets. A hut neighborhood,
+  gardens, markets, workshops and industry form a walkable working town.
+- Grow 24 crops with distinct planting stock, water, nutrients and temperature
+  needs. Process eleven recipes, trade against finite stock and budgets, and
+  deliver funded contracts. Earth–Moon freight consumes packaging and takes
+  time; cargo stays at its recorded location until delivery.
+- Twenty-four citizens perform nineteen practical occupations. Growers tend
+  plots, technicians repair equipment, riggers extract finite crude, refinery
+  crews make useful fuels, and drivers deliver them to stations, aircraft
+  supply and a marine carrier. Work waits for arrival, supplies and wages.
+- Player vehicles consume saved fuel tanks. Lunar crops depend on pressure,
+  water and electricity from solar panels and batteries. Expand generation and
+  empty battery capacity, maintain equipment, and plan for lunar darkness.
+- **E** talks or works nearby; **B** opens the Society board. Saves retain
+  inventories, workers, shipments, contracts, crops and utilities, with
+  validation and a recoverable previous checkpoint.
+
+### Clearer planetary terrain and lunar skies
+
+- Use credited ESO sky photography, NASA Earth imagery and constellation
+  figures on the Moon, with observation exposure and approximate planet
+  targets. The visible Sun controls lighting; crater relief remains readable
+  beyond nearby dynamic shadows. These are visual references, not a live
+  precision astronomical ephemeris.
+- Remove overlapping opaque Earth terrain at detail-tier transitions and keep
+  debug-world distant terrain on the same flat surface as nearby ground.
+  These terrain and lunar visual changes also apply to the classic modes.
+
+### Updating and playing together
+
+- Version **0.5.0** retains updater bootstrap **3** and network protocol **11**.
+  Install the offered signed update or the full 0.5.0 package, then confirm
+  **0.5.0** on the menu. Installations older than **0.4.10** require the full
+  installer to obtain the current bootstrap.
+- The public server and every client must use **0.5.0**. Public multiplayer
+  retains classic combat, vehicles and the shared lunar expedition; the new
+  society is an offline career. Local wallets and farms do not enter the
+  public economy.
+- See the [gameplay guide](docs/ROOTS_AND_ROCKETS.md),
+  [validation report](docs/ROOTS_AND_ROCKETS_VALIDATION.md) and
+  [classmate setup](docs/PLAY_WITH_CLASSMATES.md) for scope and tested limits.
+  Bounded tests do not establish bug-free play or performance on every device.
+
 ## 0.4.10 — FASTER MAC STARTUP
 
 ### First launch and cancellation

@@ -159,6 +159,10 @@ var boat_dock_yaw := 0.0
 # `debugworld` mode. Layout math short-circuits so streaming stays cheap and
 # the authored parkour/range props own the space.
 var debug_world := false
+## Dedicated to the persistent society entry. Duel and network fixtures keep
+## their existing deterministic terrain and arena layouts.
+var frontier_world := false
+const FRONTIER_TOWN_HEIGHT := 3.25
 var _n_base := FastNoiseLite.new()
 var _n_detail := FastNoiseLite.new()
 var _n_color := FastNoiseLite.new()
@@ -1273,6 +1277,9 @@ func _height_with_planet_sample(x: float, z: float,
 	# same terrain vertex remains a one-entry cache hit.
 	_last_planet_sample_xz = macro.xz
 	_last_planet_sample = macro
+	if frontier_world:
+		var town_weight := 1.0 - smoothstep(200.0, 280.0, Vector2(x, z).length())
+		h = lerpf(h, FRONTIER_TOWN_HEIGHT, town_weight)
 	return h
 
 
@@ -1534,6 +1541,11 @@ func terrain_vertex_sample(x: float, z: float) -> Dictionary:
 ## Skyline equivalent with its exact canopy tint folded into the same macro,
 ## road and biome evaluation. Roads remain physical and visible at this tier.
 func skyline_visual_sample(x: float, z: float) -> Dictionary:
+	if debug_world:
+		var flat := terrain_vertex_sample(x, z)
+		flat["cover"] = 0.0
+		flat["relief"] = 0.0
+		return flat
 	var macro := planet_terrain_sample(x, z)
 	var canonical: Vector2 = macro.xz
 	var road := _road_surface_sample(canonical.x, canonical.y, macro)
@@ -1569,6 +1581,11 @@ func skyline_visual_sample(x: float, z: float) -> Dictionary:
 ## roads. Stratos deliberately filters that sub-pixel feature while sharing one
 ## macro/biome/canopy evaluation for everything the vertex actually displays.
 func stratos_visual_sample(x: float, z: float) -> Dictionary:
+	if debug_world:
+		var flat := terrain_vertex_sample(x, z)
+		flat["cover"] = 0.0
+		flat["relief"] = 0.0
+		return flat
 	var macro := planet_terrain_sample(x, z)
 	var canonical: Vector2 = macro.xz
 	var elevation := _height_with_planet_sample(canonical.x, canonical.y,
@@ -1884,7 +1901,11 @@ func _is_origin_arena_chunk(cx: int, cz: int) -> bool:
 
 func chunk_layout(cx: int, cz: int, include_decorations := true) -> Dictionary:
 	var rng := _chunk_rng(cx, cz)
-	if debug_world:
+	# Reserve complete chunks touching town plots so near and distant trees
+	# agree. The settlement supplies its own deliberately placed shade trees.
+	var nearest_town := Vector2(clampf(0.0, cx * CHUNK, (cx + 1) * CHUNK),
+		clampf(0.0, cz * CHUNK, (cz + 1) * CHUNK))
+	if debug_world or (frontier_world and nearest_town.length() < 200.0):
 		return {"trees": [], "bananas": [], "rocks": [], "foliage": [],
 			"structures": [], "arena_pieces": [], "arena_id": "",
 			"airfield_hangars": [], "freeway_tunnels": [],
