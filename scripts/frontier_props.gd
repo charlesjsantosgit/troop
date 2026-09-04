@@ -8,12 +8,15 @@ static var _meshes: Dictionary = {}
 static var _materials: Dictionary = {}
 var parent: Node3D
 var frame := Transform3D.IDENTITY
+var render_enabled := true
+var collision_footprints: Array[Rect2] = []
 var _batches: Dictionary = {}
 var _body: StaticBody3D
 
 
-func _init(target: Node3D) -> void:
+func _init(target: Node3D, render_geometry := true) -> void:
 	parent = target
+	render_enabled = render_geometry
 	_body = StaticBody3D.new()
 	_body.name = "SettlementCollision"
 	_body.collision_layer = 1
@@ -64,6 +67,8 @@ static func mesh_for(shape: String) -> Mesh:
 
 func piece(shape: String, at: Vector3, size: Vector3, color: Color,
 		euler := Vector3.ZERO, metal := 0.0, glow := 0.0) -> void:
+	if not render_enabled:
+		return
 	var mat := material(color, metal, glow)
 	var key := "%s:%s" % [shape, mat.get_instance_id()]
 	if not _batches.has(key):
@@ -102,6 +107,8 @@ func beam(from: Vector3, to: Vector3, width: float, color: Color) -> void:
 
 func text(at: Vector3, value: String, color := Color(0.98, 0.91, 0.72),
 		size := 38, distance := 45.0) -> Label3D:
+	if not render_enabled:
+		return null
 	var label := Label3D.new()
 	label.text = value
 	label.font_size = size
@@ -120,6 +127,8 @@ func text(at: Vector3, value: String, color := Color(0.98, 0.91, 0.72),
 
 func dynamic_piece(shape: String, at: Vector3, size: Vector3,
 		color: Color, owner: Node3D = null) -> MeshInstance3D:
+	if not render_enabled:
+		return null
 	var node := MeshInstance3D.new()
 	node.mesh = mesh_for(shape)
 	node.material_override = material(color)
@@ -131,7 +140,13 @@ func dynamic_piece(shape: String, at: Vector3, size: Vector3,
 
 
 func flush() -> void:
-	for key in _batches:
+	while not flush_step(16):
+		pass
+
+
+func flush_step(limit := 4) -> bool:
+	var keys := _batches.keys()
+	for key in keys.slice(0, mini(limit, keys.size())):
 		var data: Dictionary = _batches[key]
 		var multi := MultiMesh.new()
 		multi.transform_format = MultiMesh.TRANSFORM_3D
@@ -145,7 +160,8 @@ func flush() -> void:
 		node.material_override = data.material
 		node.visibility_range_end = 520.0
 		parent.add_child(node)
-	_batches.clear()
+		_batches.erase(key)
+	return _batches.is_empty()
 
 
 func _collide(shape: Shape3D, at: Vector3, euler: Vector3) -> void:
@@ -153,3 +169,22 @@ func _collide(shape: Shape3D, at: Vector3, euler: Vector3) -> void:
 	node.shape = shape
 	node.transform = frame * Transform3D(Basis.from_euler(euler), at)
 	_body.add_child(node)
+	var bounds := Vector3.ZERO
+	if shape is BoxShape3D:
+		bounds = shape.size * 0.5
+	elif shape is CylinderShape3D:
+		bounds = Vector3(shape.radius, shape.height * 0.5, shape.radius)
+	var box := AABB(-bounds, bounds * 2.0)
+	var world_box: AABB = node.transform * box
+	if world_box.position.y < frame.origin.y + 2.6:
+		collision_footprints.append(Rect2(Vector2(world_box.position.x, world_box.position.z),
+			Vector2(world_box.size.x, world_box.size.z)))
+
+
+## Horizontal clearance uses the exact authored collision transforms. Roofs
+## above people are ignored, so a canopy never reserves a whole street.
+func has_ground_clearance(point: Vector2, radius: float) -> bool:
+	for footprint in collision_footprints:
+		if footprint.grow(radius).has_point(point):
+			return false
+	return true

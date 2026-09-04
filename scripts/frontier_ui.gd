@@ -1,15 +1,16 @@
 class_name FrontierUI
 extends Control
-## Live, keyboard-accessible management surface. All buttons call the same
-## validated simulation actions used by physical worksite interactions.
+## Every work control belongs to the physical subject that opened this panel.
+## The pocket journal provides information and waypoints, never remote orders.
 
-const PAGES := ["Overview", "Farms", "Market", "Crew", "Industry", "Freight", "Quests", "Sky"]
-const INK := Color("eaf0de")
-const MUTED := Color("b3c3af")
-const GOLD := Color("eccc86")
-const GREEN := Color("a8d995")
+const PAGES := ["Journal", "Tutorial", "Places", "Contracts", "Sky"]
+const INK := Color("edf0df")
+const MUTED := Color("b6c6b4")
+const GOLD := Color("efd395")
+const GREEN := Color("addb99")
 var controller: Node
-var page := "Overview"
+var page := "Journal"
+var context: Dictionary = {}
 var _panel: PanelContainer
 var _body: VBoxContainer
 var _heading: Label
@@ -17,12 +18,13 @@ var _balance: Label
 var _notice: Label
 var _scroll: ScrollContainer
 var _nav: Dictionary = {}
+var _journal_nav: HFlowContainer
 var _live_labels: Array = []
 var _refresh := 0.0
 var _quantity := 5
 var _selected_crop: Dictionary = {}
 var _freight_item := "tomato"
-var _market_location := "earth_market"
+var _structure := ""
 
 
 func configure(owner_controller: Node) -> void:
@@ -34,73 +36,67 @@ func _ready() -> void:
 	visible = false
 	mouse_filter = Control.MOUSE_FILTER_STOP
 	var shade := ColorRect.new()
-	shade.color = Color(0.015, 0.03, 0.025, 0.80)
+	shade.color = Color(0.015, 0.03, 0.025, 0.72)
 	shade.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	add_child(shade)
 	_panel = PanelContainer.new()
-	_panel.add_theme_stylebox_override("panel", _style(Color("17281f"), Color("50634b"), 16))
+	_panel.add_theme_stylebox_override("panel", _style(Color("17281f"), Color("657453"), 18))
 	add_child(_panel)
-	_panel.minimum_size_changed.connect(_resize)
 	var margin := MarginContainer.new()
 	for side in ["left", "right", "top", "bottom"]:
-		margin.add_theme_constant_override("margin_" + side, 20)
+		margin.add_theme_constant_override("margin_" + side, 22)
 	_panel.add_child(margin)
 	var stack := VBoxContainer.new()
 	stack.add_theme_constant_override("separation", 12)
 	margin.add_child(stack)
 	var top := _row(stack)
-	var title := _line(top, "ROOTS & ROCKETS", 25, GOLD)
-	title.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	_button(top, "Save", func():
-		controller.last_message = "Society saved." if controller.save_progress() else "Save failed. Check available disk space."
-		_refresh_live())
+	_heading = _line(top, "TRAVEL JOURNAL", 25, GOLD)
+	_heading.custom_minimum_size.x = 300
+	_button(top, "My journal", func(): open({}))
 	_button(top, "Close · B / Esc", close)
-	_balance = _line(stack, "", 16, GREEN)
-	var content := HBoxContainer.new()
-	content.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	content.add_theme_constant_override("separation", 20)
-	stack.add_child(content)
-	var nav := VBoxContainer.new()
-	nav.custom_minimum_size.x = 128
-	nav.add_theme_constant_override("separation", 7)
-	content.add_child(nav)
+	_balance = _line(stack, "", 15, GREEN)
+	_journal_nav = _row(stack)
 	for label: String in PAGES:
-		var b := _button(nav, label, func(): select_page(label))
-		b.alignment = HORIZONTAL_ALIGNMENT_LEFT
-		_nav[label] = b
-	var right := VBoxContainer.new()
-	right.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	right.add_theme_constant_override("separation", 8)
-	content.add_child(right)
-	_heading = _line(right, "", 24, INK)
+		_nav[label] = _button(_journal_nav, label, func(): select_page(label))
 	_scroll = ScrollContainer.new()
 	_scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
 	_scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	_scroll.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	right.add_child(_scroll)
+	stack.add_child(_scroll)
 	_body = VBoxContainer.new()
 	_body.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	_body.add_theme_constant_override("separation", 12)
 	_scroll.add_child(_body)
 	_notice = _line(stack, "", 15, GOLD)
-	_notice.custom_minimum_size.y = 42
+	_notice.custom_minimum_size.y = 38
 	get_viewport().size_changed.connect(_resize)
 	_resize()
 
 
 func _resize() -> void:
+	if _panel == null:
+		return
 	var window := get_viewport_rect().size
-	var dimensions := Vector2(minf(1260, window.x - 32), minf(810, window.y - 32))
+	var dimensions := Vector2(minf(1060, window.x - 32), minf(790, window.y - 32))
 	_panel.position = (window - dimensions) * 0.5
 	_panel.size = dimensions
 
 
-func open(next_page := "Overview") -> void:
+func open(subject: Variant = {}) -> void:
+	context = subject.duplicate(true) if subject is Dictionary else controller.selected_interaction.duplicate(true)
+	if context.is_empty():
+		page = str(subject) if subject is String and subject in PAGES else "Journal"
+	else:
+		page = "Interaction"
+		if not context.has("town_id"):
+			context.town_id = str(_town().get("id", ""))
 	visible = true
-	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
-	if controller.world.local_player.cam:
+	if DisplayServer.get_name() != "headless":
+		Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
+	if is_instance_valid(controller.world) and is_instance_valid(controller.world.local_player) \
+			and controller.world.local_player.cam:
 		controller.world.local_player.cam.set_aiming(false)
-	select_page(next_page)
+	_rebuild()
 
 
 func close() -> void:
@@ -110,10 +106,8 @@ func close() -> void:
 
 
 func _input(event: InputEvent) -> void:
-	if not visible:
-		return
-	if event is InputEventKey and event.pressed and not event.echo \
-			and (event.physical_keycode in [KEY_ESCAPE, KEY_B]):
+	if visible and event is InputEventKey and event.pressed and not event.echo \
+			and event.physical_keycode in [KEY_ESCAPE, KEY_B]:
 		close()
 		get_viewport().set_input_as_handled()
 
@@ -122,13 +116,30 @@ func _process(delta: float) -> void:
 	if not visible:
 		return
 	_refresh -= delta
-	if _refresh <= 0.0:
-		_refresh = 0.5
+	if _refresh > 0:
+		return
+	_refresh = 0.5
+	var town_id := str(_town().get("id", ""))
+	if not context.is_empty() and not str(context.get("town_id", "")).is_empty() \
+			and not town_id.is_empty() and str(context.town_id) != town_id:
+		close()
+		return
+	if _structure_key() != _structure:
+		_rebuild(true)
+	else:
 		_refresh_live()
 
 
 func _state() -> Dictionary:
 	return controller.simulation.state
+
+
+func _town() -> Dictionary:
+	return controller.current_town() if controller.has_method("current_town") else _state().get("town", {})
+
+
+func _manage() -> bool:
+	return bool(_state().get("permissions", {}).get("manage", _town().get("is_owner", not _state().has("town"))))
 
 
 func _inventory(location: String) -> Dictionary:
@@ -144,340 +155,340 @@ func _items() -> Dictionary:
 
 
 func _title(id: String) -> String:
-	var definition: Variant = _items().get(id, {})
-	return str(definition.get("name", definition.get("label", id.replace("_", " ").capitalize()))) if definition is Dictionary else id.replace("_", " ").capitalize()
+	var definition: Dictionary = _items().get(id, {})
+	return str(definition.get("name", definition.get("label", id.replace("_", " ").capitalize())))
 
 
 func _refresh_live() -> void:
-	var time := float(_state().get("time", 0))
-	var civil_hour := fmod(time, 1200.0) / 50.0
-	_balance.text = "%s  ·  %d credits  ·  %d residents  ·  Day %d · %02d:%02d" % [
-		"Moon / Crater Gardens" if controller.current_planet() == "moon" else "Earth / Canopy Commons",
-		int(_state().get("accounts", {}).get("player", 0)), _state().get("citizens", {}).size(),
-		1 + int(time / 1200.0), int(civil_hour), int(fmod(civil_hour, 1.0) * 60.0)]
-	_notice.text = controller.last_message
+	var town := _town()
+	_balance.text = "%s · %s · %d credits" % [str(town.get("name", "Crater Gardens" if controller.current_planet() == "moon" else "Canopy Commons")),
+		controller.current_planet().capitalize(), int(_state().get("accounts", {}).get("player", 0))]
+	_notice.text = str(controller.last_message)
 	for item: Dictionary in _live_labels:
 		if is_instance_valid(item.label):
 			item.label.text = str(item.read.call())
 
 
+func _structure_key() -> String:
+	var result: Array = [context.get("id", ""), _manage(), _town().get("claimed", false), _town().get("id",""), controller.current_planet()]
+	var subject: Dictionary = _state().get("plots", {}).get(str(context.get("id", "")), {})
+	result.append([subject.get("crop", ""), float(subject.get("health", 1)) <= 0])
+	var citizen: Dictionary = _state().get("citizens", {}).get(str(context.get("id", "")), {})
+	result.append([citizen.get("job", ""),citizen.get("employer", ""),citizen.get("can_manage", false)])
+	if str(context.get("kind", "")) in ["market", "shop"]:
+		result.append(_inventory(str(context.get("id", ""))).keys())
+	for quest: Dictionary in _state().get("quests", {}).values():
+		result.append([quest.get("id", ""), quest.get("status", "")])
+	if page=="Tutorial" and "tutorial" in controller and is_instance_valid(controller.tutorial):
+		result.append(controller.tutorial.summary())
+	return JSON.stringify(result)
+
+
 func select_page(next_page: String) -> void:
-	page = next_page if next_page in PAGES else "Overview"
+	context.clear()
+	page = next_page if next_page in PAGES else "Places" if next_page in ["Farms", "Crew", "Market", "Industry", "Freight"] else "Contracts" if next_page == "Quests" else "Journal"
+	_rebuild()
+
+
+func _rebuild(preserve_scroll := false) -> void:
+	var old_scroll := _scroll.scroll_vertical if preserve_scroll else 0
 	for child in _body.get_children():
 		_body.remove_child(child)
 		child.queue_free()
 	_live_labels.clear()
-	_heading.text = page
-	_scroll.scroll_vertical = 0
+	_journal_nav.visible = context.is_empty()
 	for key in _nav:
 		_nav[key].disabled = key == page
-	match page:
-		"Overview": _overview()
-		"Farms": _farms()
-		"Market": _market()
-		"Crew": _crew()
-		"Industry": _industry()
-		"Freight": _freight()
-		"Quests": _quests()
-		"Sky": _sky()
+	if context.is_empty():
+		_heading.text = "TRAVEL JOURNAL" if page == "Journal" else page.to_upper()
+		match page:
+			"Places": _places()
+			"Tutorial": _tutorial()
+			"Contracts": _contracts("", false)
+			"Sky": _sky()
+			_: _journal()
+	else:
+		var id := str(context.get("id", ""))
+		_heading.text = str(context.get("label", "Your neighbor"))
+		match str(context.get("kind", "")):
+			"citizen", "npc", "worker": _citizen(id)
+			"plot", "farm": _plot(id)
+			"board", "quest_board", "quest": _board()
+			"market", "shop": _market(id)
+			_: _facility(id)
+	_structure = _structure_key()
 	_refresh_live()
+	_scroll.set_deferred("scroll_vertical", old_scroll)
 	_resize.call_deferred()
 
 
-func _overview() -> void:
-	_line(_body, "A society built by working paws", 21, GOLD)
-	_line(_body, "Grow food, care for your crew, keep machines running and deliver what your neighbors need. E opens a nearby workplace. B opens this board anywhere.")
-	var actions := _row(_body)
-	_button(actions, "Find paid work", func(): select_page("Quests"))
-	_button(actions, "Visit your farm", func(): select_page("Farms"))
-	_button(actions, "Find rocket", controller.locate_rocket)
-	_line(_body, "Your cargo · " + controller.current_planet().capitalize(), 19, GOLD)
-	_live(_body, func(): return _inventory_text(_inventory(_pack())))
-	_line(_body, "Work in progress", 19, GOLD)
-	_live(_body, func():
-		var lines: Array[String] = []
-		for citizen: Dictionary in _state().get("citizens", {}).values():
-			if citizen.get("planet", "earth") == controller.current_planet():
-				lines.append("%s · %s%s" % [citizen.get("name", "Worker"), citizen.get("activity", "Resting"),
-					" · " + str(citizen.blocker) if not str(citizen.get("blocker", "")).is_empty() else ""])
-		return "\n".join(lines))
-	_line(_body, "Town ledger", 19, GOLD)
-	_live(_body, func():
-		var events: Array = _state().get("events", [])
-		var lines: Array[String] = []
-		for index in range(maxi(0, events.size() - 7), events.size()):
-			var entry: Variant = events[index]
-			lines.append(str(entry.get("message", entry.get("text", entry))) if entry is Dictionary else str(entry))
-		return "\n".join(lines) if not lines.is_empty() else "Your crew is beginning its shift.")
+func _journal() -> void:
+	_line(_body, "Good places. Useful work. People to meet.", 22, GOLD)
+	_line(_body, "Walk up to a neighbor, crop bed or workplace and press E to interact. Your journal keeps track of your cargo, contracts and places to visit.")
+	var card := _card(_body)
+	_line(card, "Your cargo", 19, GOLD)
+	_live(card, func(): return _inventory_text(_inventory(_pack())))
+	var row := _row(_body)
+	_button(row, "Find a workplace", func(): select_page("Places"))
+	_button(row, "My contracts", func(): select_page("Contracts"))
+	_button(row, "Find rocket", controller.locate_rocket)
+	for town: Dictionary in (controller.known_towns() if controller.has_method("known_towns") else _state().get("towns", [])):
+		var place := _card(_body)
+		_line(place, str(town.get("name", "Town")), 19, GOLD)
+		_line(place, "%s · %s" % [str(town.get("planet", "earth")).capitalize(), "Managed by " + str(town.get("owner_name", "a neighbor")) if town.get("claimed", false) else "Open for a new town steward"], 15, MUTED)
+		_button(place, "Locate town board", func(): controller.locate("town:"+str(town.id)))
 
 
-func _farms() -> void:
-	_line(_body, "Each bed uses real planting stock, water and nutrients. Walk to a bed for hands-on work, or enable its grower on the Crew page.")
-	var crops: Dictionary = controller.simulation.crop_catalog()
-	var plots: Dictionary = _state().get("plots", {})
-	for id: String in plots:
-		var plot: Dictionary = plots[id]
-		if plot.get("planet", "earth") != controller.current_planet():
-			continue
+func _places() -> void:
+	if controller.has_method("known_towns"):
+		for town: Dictionary in controller.known_towns():
+			var town_card := _card(_body)
+			_line(town_card,str(town.get("name","Town")),19,GOLD)
+			_line(town_card,str(town.get("planet","earth")).capitalize()+" · "+("Claimed" if town.get("claimed",false) else "Available to claim"),15,MUTED)
+			_button(town_card,"Find town board",func(): controller.locate("town:"+str(town.id)))
+	_line(_body, "Choose a waypoint, then visit the person or worksite. Orders are placed in person.")
+	var entries: Array = controller.interactions()
+	for item: Dictionary in entries:
 		var card := _card(_body)
-		var head := _row(card)
-		var label := _line(head, str(plot.get("name", id.replace("_", " ").capitalize())), 19, GOLD)
-		label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-		_button(head, "Locate", func(): controller.locate(id))
-		_live(card, func():
-			var p: Dictionary = _state().plots[id]
-			return "%s · Growth %d%% · Health %d%% · Water %d%% · Nutrients %d%%" % [
-				_title(str(p.get("crop", "empty"))), roundi(float(p.get("growth", 0)) * 100),
-				roundi(float(p.get("health", 1)) * 100), roundi(float(p.get("moisture", 0))),
-				roundi(float(p.get("nutrients", 0)))])
-		_live(card, func():
-			var p: Dictionary = _state().plots[id]
-			return "%s · %s · Crew care %s" % [str(p.get("status", "")), str(p.get("owner", "")).capitalize(), "enabled" if p.get("automatic", false) else "off"])
-		if plot.get("owner", "") != "player":
-			continue
 		var row := _row(card)
-		var choose := OptionButton.new()
-		choose.custom_minimum_size = Vector2(190, 36)
-		choose.add_theme_font_size_override("font_size", 15)
-		var crop_ids: Array = crops.keys()
-		for crop_id: String in crop_ids:
-			choose.add_item(str(crops[crop_id].get("name", crops[crop_id].get("label", crop_id.capitalize()))))
-		var selected := str(_selected_crop.get(id, plot.get("crop", "lettuce")))
-		choose.select(maxi(0, crop_ids.find(selected)))
-		_selected_crop[id] = crop_ids[choose.selected]
-		choose.item_selected.connect(func(index: int): _selected_crop[id] = crop_ids[index])
-		row.add_child(choose)
-		_button(row, "Plant", func(): _act("plant", {"plot": id, "crop": _selected_crop[id]}))
-		_action(row, "Harvest", "harvest", {"plot": id})
-		_action(row, "Water", "water", {"plot": id})
-		_action(row, "Feed", "fertilize", {"plot": id})
-		var orders := _row(card)
-		_action(orders, "Enable / pause crew care", "toggle_plot", {"plot": id})
-		_action(orders, "Inspect", "inspect", {"target": id})
-		if not str(plot.get("crop", "")).is_empty() and float(plot.get("health", 1)) <= 0.0:
-			_action(orders, "Clear failed crop", "clear_plot", {"plot": id})
+		_line(row, str(item.get("label", item.get("id", "Place"))), 18, GOLD)
+		_button(row, "Locate", func(): controller.locate(str(item.id)))
+		var citizen: Dictionary = _state().get("citizens", {}).get(str(item.id), {})
+		if not citizen.is_empty():
+			_line(card, str(citizen.get("activity", "Enjoying the town")), 14, MUTED)
 
 
-func _market() -> void:
-	var default_market: String = controller.current_planet() + "_market"
-	if not _state().locations.has(_market_location) or _state().locations[_market_location].planet != controller.current_planet():
-		_market_location = default_market
-	var market := _market_location
-	_line(_body, "Prices follow available stock. Both sides need money, goods and capacity; the full quantity is quoted again when you trade.")
-	if controller.current_planet() == "earth":
-		var desks := _row(_body)
-		_button(desks, "Canopy market", func():
-			_market_location = "earth_market"
-			select_page("Market"))
-		_button(desks, "Refinery fuel desk", func():
-			_market_location = "refinery"
-			select_page("Market"))
-	_line(_body, str(_state().locations[market].label), 19, GOLD)
+func _board() -> void:
+	var town := _town()
+	_heading.text = str(town.get("name", "Community board"))
+	_line(_body, "COMMUNITY BOARD", 14, GREEN)
+	_line(_body, "%d residents · %d growing beds" % [_state().get("citizens", {}).values().filter(func(person): return person.get("planet")==controller.current_planet()).size(), _state().get("plots", {}).values().filter(func(bed): return bed.get("planet")==controller.current_planet()).size()], 20, GOLD)
+	if town.get("claimed", false):
+		_line(_body, "Your town" if town.get("is_owner", false) else "Town steward: " + str(town.get("owner_name", "another player")))
+	else:
+		_line(_body, "Become the steward of this town to manage its growers, work crews and equipment. Trade and neighbor contracts are open to visitors.")
+		if bool(_state().get("permissions", {}).get("claim", true)):
+			_action(_body, "Claim this town · %d credits" % int(town.get("claim_price", 750)), "claim_town", {})
+		else:
+			_line(_body, "You already steward another town.", 15, MUTED)
+	_line(_body, "Neighbors' requests", 21, GOLD)
+	_contracts("", true)
+
+
+func _citizen(id: String) -> void:
+	var citizen: Dictionary = _state().get("citizens", {}).get(id, {})
+	if citizen.is_empty():
+		_line(_body, "Your neighbor has moved on. Close this conversation and meet them again.")
+		return
+	_heading.text = str(citizen.get("name", id))
+	_line(_body, str(citizen.get("job", "citizen")).replace("_", " ").capitalize(), 21, GREEN)
+	var card := _card(_body)
+	_live(card, func():
+		var person: Dictionary = _state().get("citizens", {}).get(id, {})
+		return "Right now: %s%s\nSkill %.1f · %d jobs completed · Wage %d cr per task" % [person.get("activity", "Resting"),
+			"\nI need help: " + str(person.blocker) if not str(person.get("blocker", "")).is_empty() else "",
+			float(person.get("skill", 1)), int(person.get("completed", 0)), int(person.get("wage", 0))])
+	_live(card, func():
+		var person: Dictionary = _state().get("citizens", {}).get(id, {})
+		var needs: Dictionary = person.get("needs", {})
+		var observations: Array = person.get("observations", [])
+		return "Hunger %d%% · Fatigue %d%%%s" % [roundi(float(needs.get("hunger", 0)) * 100), roundi(float(needs.get("fatigue", 0)) * 100),
+			"\n" + str(observations.back().get("fact", "")) if not observations.is_empty() else ""])
+	_contracts(id, true)
+	var trade := str(citizen.get("trade_location", ""))
+	if trade.is_empty() and not _state().has("permissions"):
+		trade = ("moon_market" if controller.current_planet() == "moon" else "earth_market") if citizen.get("job") == "merchant" else "refinery" if citizen.get("job") == "refinery_operator" else ""
+	if not trade.is_empty():
+		_line(_body, "My trading desk", 20, GOLD)
+		if _near(trade):
+			_market(trade, false)
+		else:
+			_line(_body, "Meet me at the trading desk to exchange goods.", 15, MUTED)
+			_button(_body, "Locate trading desk", func(): controller.locate(trade))
+	if bool(citizen.get("can_manage", _manage())):
+		_line(_body, "Work together", 20, GOLD)
+		var jobs: Variant = controller.simulation.job_catalog()
+		var ids: Array = jobs.keys() if jobs is Dictionary else jobs
+		if controller.current_planet() == "moon":
+			ids = ids.filter(func(job): return job in ["grower", "agronomist", "greenhouse_technician", "water_operator", "solar_technician", "merchant", "farm_manager", "citizen"])
+		var row := _row(_body)
+		var choose := _options(row, ids, str(citizen.get("job", "citizen")))
+		_button(row, "Assign work" if citizen.get("employer") == "player" else "Hire for this job", func(): _act("assign_job", {"citizen": id, "job": ids[choose.selected]}))
+		_action(row, "Pause / resume work", "toggle_worker", {"citizen": id})
+	else:
+		_line(_body, "The town steward arranges my work and wages.", 15, MUTED)
+
+
+func _plot(id: String) -> void:
+	var plot: Dictionary = _state().get("plots", {}).get(id, {})
+	if plot.is_empty():
+		_line(_body, "This growing bed is no longer available.")
+		return
+	_heading.text = str(plot.get("name", id.replace("_", " ").capitalize()))
+	_live(_body, func():
+		var bed: Dictionary = _state().get("plots", {}).get(id, {})
+		return "%s · Growth %d%% · Health %d%%\nWater %d%% · Nutrients %d%% · %s" % [_title(str(bed.get("crop", "empty bed"))),
+			roundi(float(bed.get("growth", 0)) * 100), roundi(float(bed.get("health", 1)) * 100),
+			roundi(float(bed.get("moisture", 0))), roundi(float(bed.get("nutrients", 0))), str(bed.get("status", "Growing"))])
+	if not _manage() or plot.get("owner", "") != "player":
+		_line(_body, "This bed is tended by the town's growers. Speak to its steward about the farm.")
+		return
+	var crops: Dictionary = controller.simulation.crop_catalog()
+	var ids: Array = crops.keys()
+	var row := _row(_body)
+	var select := _options(row, ids, str(_selected_crop.get(id, plot.get("crop", "lettuce"))))
+	_selected_crop[id] = ids[select.selected]
+	select.item_selected.connect(func(index): _selected_crop[id] = ids[index])
+	_button(row, "Plant", func(): _act("plant", {"plot": id, "crop": _selected_crop[id]}))
+	var work := _row(_body)
+	_action(work, "Water", "water", {"plot": id})
+	_action(work, "Feed nutrients", "fertilize", {"plot": id})
+	_action(work, "Harvest", "harvest", {"plot": id})
+	_action(work, "Inspect bed", "inspect", {"target": id})
+	_action(_body, "Pause / resume grower care", "toggle_plot", {"plot": id})
+	if not str(plot.get("crop", "")).is_empty() and float(plot.get("health", 1)) <= 0:
+		_action(_body, "Clear failed crop", "clear_plot", {"plot": id})
+	var definition: Dictionary = crops.get(str(_selected_crop[id]), {})
+	_line(_body, "Planting stock: %s · Suitable temperature %.0f–%.0f °C" % [_title(str(definition.get("planting_item", "seed"))), float(definition.get("min_temp", 0)), float(definition.get("max_temp", 40))], 15, MUTED)
+
+
+func _market(id: String, heading := true) -> void:
+	if heading:
+		_heading.text = str(_state().get("locations", {}).get(id, {}).get("label", context.get("label", "Trading desk")))
+	_line(_body, "Local stock and funded demand set the price. Your complete order is quoted again when the trade is accepted.", 15, MUTED)
 	var tools := _row(_body)
-	_button(tools, "Locate market", func(): controller.locate(market))
-	_line(tools, "Quantity", 16)
+	_line(tools, "Order quantity", 16)
 	_quantity_control(tools)
-	var stock := _inventory(market)
-	var all_items: Array = _items().keys()
-	all_items.sort()
-	for item: String in all_items:
-		if market == "refinery" and item not in ["crude_oil", "gasoline", "diesel", "jet_fuel", "bitumen", "water", "spare_parts"]:
+	var stock := _inventory(id)
+	var ids: Array = _items().keys()
+	ids.sort()
+	for item: String in ids:
+		if id == "refinery" and item not in ["crude_oil", "gasoline", "diesel", "jet_fuel", "bitumen", "water", "spare_parts"]:
 			continue
 		if int(stock.get(item, 0)) <= 0 and int(_inventory(_pack()).get(item, 0)) <= 0:
 			continue
 		var card := _card(_body)
 		_line(card, _title(item), 18, GOLD)
-		_live(card, func():
-			return "Market %d · Your cargo %d · Buy %d: %d cr · Sell %d: %d cr" % [
-				int(_inventory(market).get(item, 0)), int(_inventory(_pack()).get(item, 0)),
-				_quantity, controller.simulation.quote(market, item, _quantity, true),
-				_quantity, controller.simulation.quote(market, item, _quantity, false)])
+		_live(card, func(): return "In stock %d · In your cargo %d\nBuy %d: %d cr · Sell %d: %d cr" % [int(_inventory(id).get(item, 0)), int(_inventory(_pack()).get(item, 0)),
+			_quantity, controller.simulation.quote(id, item, _quantity, true), _quantity, controller.simulation.quote(id, item, _quantity, false)])
 		var row := _row(card)
-		_button(row, "Buy", func(): _act("buy", {"market": market, "item": item, "quantity": _quantity}))
-		_button(row, "Sell", func(): _act("sell", {"market": market, "item": item, "quantity": _quantity}))
+		_button(row, "Buy", func(): _act("buy", {"market": id, "item": item, "quantity": _quantity}))
+		_button(row, "Sell", func(): _act("sell", {"market": id, "item": item, "quantity": _quantity}))
+	if heading:
+		_contracts("", true, id)
 
 
-func _crew() -> void:
-	var selected := str(controller.selected_interaction.get("id", ""))
-	if _state().get("citizens", {}).has(selected):
-		_conversation(selected)
-	_line(_body, "Your residents travel to workplaces, use available resources, take breaks and earn wages. Their current task and blocker come from the simulation.")
-	var jobs: Variant = controller.simulation.job_catalog()
-	var job_ids: Array = jobs.keys() if jobs is Dictionary else jobs
-	for id: String in _state().get("citizens", {}):
-		var citizen: Dictionary = _state().citizens[id]
-		if citizen.get("planet", "earth") != controller.current_planet():
-			continue
-		var card := _card(_body)
-		var row := _row(card)
-		var title := _line(row, "%s · %s" % [citizen.get("name", id), str(citizen.get("job", "citizen")).replace("_", " ").capitalize()], 19, GOLD)
-		title.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-		_button(row, "Locate", func(): controller.locate(id))
-		_live(card, func():
-			var c: Dictionary = _state().citizens[id]
-			return "%s · %s\n%s\nSkill %.1f · Completed jobs %d · Wage %s cr/task" % [
-				str(c.get("job", "citizen")).replace("_", " ").capitalize(),
-				str(c.get("activity", "Resting")), str(c.get("blocker", "")) if not str(c.get("blocker", "")).is_empty() else "Work can proceed with available tools and supplies.",
-				float(c.get("skill", 1)), int(c.get("completed", 0)), str(c.get("wage", 0))])
-		var controls := _row(card)
-		var select := OptionButton.new()
-		select.custom_minimum_size = Vector2(205, 36)
-		for job: String in job_ids:
-			select.add_item(job.replace("_", " ").capitalize())
-		select.select(maxi(0, job_ids.find(citizen.get("job", "citizen"))))
-		controls.add_child(select)
-		_button(controls, "Assign profession", func(): _act("assign_job", {"citizen": id, "job": job_ids[select.selected]}))
-		_action(controls, "Pause / resume work", "toggle_worker", {"citizen": id})
-
-
-func _conversation(id: String) -> void:
-	var citizen: Dictionary = _state().citizens[id]
-	var card := _card(_body)
-	_line(card, "Talking with " + str(citizen.name), 23, GOLD)
-	_live(card, func():
-		var current: Dictionary = _state().citizens[id]
-		var text := "I'm %s. Right now: %s." % [str(current.job).replace("_", " "), str(current.activity)]
-		if not str(current.blocker).is_empty(): text += "\nI need help: " + str(current.blocker) + "."
-		if not str(current.get("pending_job", "")).is_empty(): text += "\nI'll take the new assignment after finishing this task."
-		text += "\nHunger %d%% · Fatigue %d%%" % [roundi(float(current.needs.hunger) * 100), roundi(float(current.needs.fatigue) * 100)]
-		return text)
-	_live(card, func():
-		var current: Dictionary = _state().citizens[id]
-		var observations: Array = current.get("observations", [])
-		var memories: Array = current.get("memories", [])
-		var lines: Array[String] = []
-		if not observations.is_empty():
-			var observation: Dictionary = observations.back()
-			lines.append("What I know: %s\nSource: %s · %ds ago" % [str(observation.get("fact", "")), str(observation.get("source", "My work")), maxi(0, int(float(_state().time) - float(observation.get("time", 0))))])
-		if not memories.is_empty(): lines.append("My last completed job: " + str(memories.back().get("fact", "")))
-		return "\n".join(lines) if not lines.is_empty() else "I'm starting my shift. I'll report what I find at the worksite.")
-	for quest_id: String in _state().quests:
-		var quest: Dictionary = _state().quests[quest_id]
-		if quest.get("giver", "") != id:
-			continue
-		_line(card, "Could you help? " + str(quest.title), 19, GOLD)
-		_line(card, str(quest.description) + " Reward: %d credits." % int(quest.reward))
-		var actions := _row(card)
-		_action(actions, "Accept request", "accept_quest", {"id": quest_id})
-		_button(actions, "Locate delivery", func(): controller.locate(str(quest.destination)))
-		_action(actions, "Complete delivery", "deliver_quest", {"id": quest_id})
-
-
-func _industry() -> void:
-	_line(_body, "Crude oil is refined into useful fuels before delivery. Lunar panels feed lights, pumps and batteries; maintenance and supplies limit output.")
-	for id: String in _state().get("facilities", {}):
-		var facility: Dictionary = _state().facilities[id]
-		if facility.get("planet", "earth") != controller.current_planet():
-			continue
-		var card := _card(_body)
-		var row := _row(card)
-		var title := _line(row, str(facility.get("name", id.replace("_", " ").capitalize())), 19, GOLD)
-		title.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-		_button(row, "Locate", func(): controller.locate(id))
-		_live(card, func():
-			var f: Dictionary = _state().facilities[id]
-			var lines: Array[String] = [str(f.get("status", "Operating"))]
-			for key: String in ["power_kw", "demand_kw", "battery_kwh", "battery_capacity_kwh", "water_l", "condition", "pressure", "pump_condition", "panels", "reserve"]:
-				if f.has(key):
-					lines.append("%s: %s" % [key.replace("_", " ").capitalize(), str(snappedf(float(f[key]), 0.01))])
-			var stock := _inventory(id)
-			if not stock.is_empty(): lines.append(_inventory_text(stock))
-			return " · ".join(lines))
-		_action(card, "Maintain / repair", "repair", {"facility": id})
+func _facility(id: String) -> void:
+	var facility: Dictionary = _state().get("facilities", {}).get(id, {})
+	_heading.text = str(_state().get("locations", {}).get(id, {}).get("label", context.get("label", "Workplace")))
+	_live(_body, func():
+		var data: Dictionary = _state().get("facilities", {}).get(id, {})
+		var lines: Array[String] = [str(data.get("status", "Community workplace"))]
+		for key: String in ["power_kw", "demand_kw", "battery_kwh", "battery_capacity_kwh", "water_l", "condition", "pressure", "panels", "reserve"]:
+			if data.has(key): lines.append("%s: %s" % [key.replace("_", " ").capitalize(), str(snappedf(float(data[key]), 0.01))])
+		return " · ".join(lines))
+	if not _inventory(id).is_empty():
+		_live(_body, func(): return "Stored here: " + _inventory_text(_inventory(id)))
+	if _manage() and not facility.is_empty():
+		_action(_body, "Maintain equipment", "repair", {"facility": id})
+		if id == "solar_array":
+			_action(_body, "Install panel · solar kit + 150 cr", "build_solar", {})
+			_action(_body, "Add 100 kWh capacity · battery kit + 120 cr", "upgrade_battery", {})
 		if id == "lunar_greenhouse":
-			_action(card, "Refill reservoir · 20 L from your locker", "refill_habitat", {"quantity": 20})
-	if controller.current_planet() == "moon":
-		_action(_body, "Install solar panel · solar kit + 150 cr", "build_solar", {})
-		_action(_body, "Add 100 kWh storage · battery kit + 120 cr", "upgrade_battery", {})
-		_button(_body, "Locate solar and battery worksite", func(): controller.locate("solar_array"))
-	else:
-		_line(_body, "Vehicle fuel service", 19, GOLD)
-		_line(_body, "Park beside a depot, then buy fuel for a nearby vehicle. NPC tankers replenish depot stocks. Driving consumes the fuel saved in each vehicle's tank.")
-		var depots := _row(_body)
-		for depot: String in ["gas_station", "airfield", "refinery"]:
-			_button(depots, "Locate " + depot.replace("_", " "), func(): controller.locate(depot))
+			_action(_body, "Refill reservoir · 20 L", "refill_habitat", {"quantity": 20})
+	if id == "refinery":
+		_market(id, false)
+	if id in ["gas_station", "airfield", "refinery"]:
+		_line(_body, "Parked vehicle fuel service", 20, GOLD)
 		for vehicle: Vehicle in controller.nearby_fuel_vehicles():
 			var card := _card(_body)
 			_line(card, vehicle.display_name(), 18, GOLD)
 			_live(card, func(): return vehicle.fuel_readout() if is_instance_valid(vehicle) else "Vehicle departed")
-			var controls := _row(card)
-			for depot: String in ["gas_station", "airfield", "refinery"]:
-				_action(controls, "Buy 5 L · " + depot.replace("_", " "), "refuel", {"vehicle": vehicle.vid, "facility": depot, "quantity": 5})
-	_line(_body, "Processing orders", 19, GOLD)
+			_action(card, "Buy 5 L from this depot", "refuel", {"vehicle": vehicle.vid, "facility": id, "quantity": 5})
+	if id in ["warehouse", "cargo"]:
+		_freight()
+	_recipes(id)
+	_contracts("", true, id)
+	if id in ["cooperative", "lunar_greenhouse", "housing", "habitat", "oil_rig", "workshop"]:
+		_line(_body, "People at this workplace", 20, GOLD)
+		for person: Dictionary in _state().get("citizens", {}).values():
+			if str(person.get("target", "")) != id:
+				continue
+			_button(_body, "Find " + str(person.name), func(): controller.locate(str(person.id)))
+
+
+func _recipes(facility: String) -> void:
 	var recipes: Dictionary = controller.simulation.recipe_catalog()
-	for recipe: String in recipes:
-		var definition: Dictionary = recipes[recipe]
-		if definition.get("planet", "earth") != controller.current_planet():
+	for id: String in recipes:
+		var recipe: Dictionary = recipes[id]
+		var worksite := str(recipe.get("facility", "refinery" if id == "refine" else "workshop"))
+		if worksite != facility:
 			continue
-		var recipe_card := _card(_body)
-		var location := "refinery" if recipe == "refine" else "workshop"
-		_line(recipe_card, "%s · %s" % [str(definition.get("name", definition.get("label", recipe.capitalize()))), location.capitalize()], 18, GOLD)
-		_line(recipe_card, "Inputs: %s\nOutputs: %s · Energy %.1f kWh" % [_inventory_text(definition.get("inputs", {})), _inventory_text(definition.get("outputs", {})), float(definition.get("energy", 0))], 14, MUTED)
-		var controls := _row(recipe_card)
-		_action(controls, "Start batch", "process", {"recipe": recipe})
-		_button(controls, "Locate " + location, func(): controller.locate(location))
-	_line(_body, "Batches in progress", 19, GOLD)
+		var card := _card(_body)
+		_line(card, str(recipe.get("label", id)), 19, GOLD)
+		_line(card, "Uses: %s\nMakes: %s" % [_inventory_text(recipe.get("inputs", {})), _inventory_text(recipe.get("outputs", {}))], 15, MUTED)
+		_action(card, "Start processing batch", "process", {"recipe": id})
 	_live(_body, func():
 		var lines: Array[String] = []
 		for batch: Dictionary in _state().get("batches", []):
-			lines.append("%s · %s · %ds" % [str(batch.get("recipe", "")).replace("_", " ").capitalize(), str(batch.get("facility", "")), ceili(float(batch.get("remaining", 0)))])
-		return "\n".join(lines) if not lines.is_empty() else "No processing orders are running.")
+			if str(batch.get("facility", "")) == facility:
+				lines.append("%s · %d seconds remaining" % [str(batch.get("recipe", "Batch")).replace("_", " "), ceili(float(batch.get("remaining", 0)))])
+		return "\n".join(lines))
 
 
 func _freight() -> void:
-	_line(_body, "Shipments remove goods at departure and deliver them after transit. Cargo stays in its recorded location while your expedition travels separately.")
+	_line(_body, "Dispatch cargo to the other world", 20, GOLD)
+	_line(_body, "Packaging, freight fees and travel time apply. Goods arrive in your locker; your rocket journey is separate.", 15, MUTED)
 	var row := _row(_body)
-	_button(row, "Find rocket boarding hatch", controller.locate_rocket)
-	_button(row, "Locate cargo office", func(): controller.locate("cargo" if controller.current_planet() == "moon" else "warehouse"))
-	_line(_body, "Dispatch your cargo to the other world", 19, GOLD)
-	var fields := _row(_body)
-	var items := OptionButton.new()
-	items.custom_minimum_size = Vector2(220, 36)
-	var item_ids: Array = _items().keys()
-	for item: String in item_ids:
-		items.add_item(_title(item))
-	items.select(maxi(0, item_ids.find(_freight_item)))
-	_freight_item = str(item_ids[items.selected])
-	items.item_selected.connect(func(index: int): _freight_item = str(item_ids[index]))
-	fields.add_child(items)
-	_quantity_control(fields)
-	_button(fields, "Dispatch", func():
-		_act("ship", {"from": _pack(), "to": "player_earth" if controller.current_planet() == "moon" else "player_moon",
-			"item": _freight_item, "quantity": _quantity}))
-	_line(_body, "Manifest and fleet activity", 19, GOLD)
+	var ids: Array = _items().keys()
+	var choose := _options(row, ids, _freight_item)
+	_freight_item = str(ids[choose.selected])
+	choose.item_selected.connect(func(index): _freight_item = str(ids[index]))
+	_quantity_control(row)
+	_button(row, "Dispatch shipment", func(): _act("ship", {"from": _pack(), "to": "player_earth" if controller.current_planet() == "moon" else "player_moon", "item": _freight_item, "quantity": _quantity}))
 	_live(_body, func():
 		var lines: Array[String] = []
 		for shipment: Dictionary in _state().get("shipments", []):
-			lines.append("%s · %d %s · %s → %s · %s · %ds" % [
-				shipment.get("id", "Freight"), int(shipment.get("quantity", 0)), _title(str(shipment.get("item", "cargo"))),
-				shipment.get("from", ""), shipment.get("to", ""), shipment.get("status", "In transit"), ceili(float(shipment.get("remaining", 0)))])
-		return "\n".join(lines) if not lines.is_empty() else "No cargo is in transit. Your dispatcher will create loads when suppliers and funded customers are ready.")
+			lines.append("%d %s · %s · %ds" % [int(shipment.get("quantity", 0)), _title(str(shipment.get("item", "cargo"))), str(shipment.get("status", "in transit")), ceili(float(shipment.get("remaining", 0)))])
+		return "\n".join(lines) if not lines.is_empty() else "No shipments in transit.")
 
 
-func _quests() -> void:
-	_line(_body, "Neighbors pay for useful work from funded accounts. Delivery rewards require the goods at the destination; completed contracts cannot be claimed again.")
+func _contracts(giver: String, work_controls: bool, destination := "") -> void:
+	var shown := 0
 	for id: String in _state().get("quests", {}):
 		var quest: Dictionary = _state().quests[id]
+		if work_controls and str(_state().get("locations", {}).get(str(quest.get("destination", "")), {}).get("planet", controller.current_planet())) != controller.current_planet():
+			continue
+		if not giver.is_empty() and str(quest.get("giver", "")) != giver:
+			continue
+		if not destination.is_empty() and str(quest.get("destination", "")) != destination:
+			continue
+		if not work_controls and str(quest.get("status", "available")) == "available":
+			continue
+		shown += 1
 		var card := _card(_body)
-		_line(card, str(quest.get("title", id.capitalize())), 20, GOLD)
-		_line(card, str(quest.get("description", "")))
+		_line(card, str(quest.get("title", id)), 19, GOLD)
+		_line(card, str(quest.get("description", "")), 15, MUTED)
 		_live(card, func():
-			var q: Dictionary = _state().quests[id]
-			return "%s · %d × %s → %s · Reward %d credits" % [str(q.get("status", "available")).capitalize(),
-				int(q.get("quantity", 0)), _title(str(q.get("item", "work"))), str(q.get("destination", "community")), int(q.get("reward", 0))])
+			var current: Dictionary = _state().get("quests", {}).get(id, {})
+			return "%s · Reward %d credits · %d × %s" % [str(current.get("status", "available")).capitalize(), int(current.get("reward", 0)), int(current.get("quantity", 0)), _title(str(current.get("item", "goods")))])
 		var row := _row(card)
-		_action(row, "Accept", "accept_quest", {"id": id})
-		_action(row, "Deliver", "deliver_quest", {"id": id})
-		_action(row, "Cancel", "cancel_quest", {"id": id})
+		if work_controls:
+			if str(quest.get("status", "available")) == "available":
+				_action(row, "Accept request", "accept_quest", {"id": id})
+			elif str(quest.get("status")) == "active":
+				if not destination.is_empty():
+					_action(row, "Give goods", "deliver_quest", {"id": id})
+				_action(row, "Cancel request", "cancel_quest", {"id": id})
 		_button(row, "Locate customer", func(): controller.locate(str(quest.get("destination", "earth_market"))))
+	if shown == 0:
+		_line(_body,"No active requests yet. Visit the community board or talk to a neighbor to find a job." if not work_controls else "No requests here right now.",15,MUTED)
 
 
 func _sky() -> void:
-	_line(_body, "Lunar observatory", 22, GOLD)
-	_line(_body, "The photographic panorama records faint structures with long exposure. Observation mode increases their visibility and reveals real constellation guides. Planet locations use an approximate astronomical reference epoch.")
-	_line(_body, "Photograph: ESO / S. Brunier · Earth and constellation reference: NASA / GSFC", 14, MUTED)
+	_line(_body, "A personal guide to the lunar sky", 22, GOLD)
+	_line(_body, "Photographs show faint structures through long exposure. Planet positions use an approximate reference epoch. ESO / S. Brunier; NASA / GSFC.", 15, MUTED)
 	if controller.current_planet() != "moon":
-		_line(_body, "Travel to the Moon to observe the airless sky.")
 		_button(_body, "Find rocket", controller.locate_rocket)
 		return
 	var toggle := CheckButton.new()
@@ -487,15 +498,24 @@ func _sky() -> void:
 	_body.add_child(toggle)
 	for target: Dictionary in controller.sky_targets():
 		var card := _card(_body)
-		_line(card, str(target.get("name", "Sky target")), 18, GOLD)
+		_line(card, str(target.get("name", "Sky target")), 19, GOLD)
 		_line(card, str(target.get("detail", "")), 15, MUTED)
 		if target.get("direction") is Vector3:
 			_button(card, "Look toward " + str(target.get("name", "target")), func(): controller.look_at_sky(target.direction))
 
 
+func _near(id: String) -> bool:
+	return bool(controller.call("_target_in_range", id)) if controller.has_method("_target_in_range") else false
+
+
 func _act(kind: String, payload: Dictionary) -> void:
-	controller.request_action(kind, payload)
-	_refresh_live()
+	if context.is_empty():
+		return
+	var scoped := payload.duplicate(true)
+	if not str(context.get("town_id", "")).is_empty():
+		scoped.town_id = str(context.town_id)
+	controller.request_action(kind, scoped)
+	_rebuild(true)
 
 
 func _quantity_control(parent: Node) -> void:
@@ -504,11 +524,21 @@ func _quantity_control(parent: Node) -> void:
 	quantity.max_value = 100
 	quantity.step = 1
 	quantity.value = _quantity
-	quantity.custom_minimum_size = Vector2(100, 36)
+	quantity.custom_minimum_size = Vector2(100, 38)
 	quantity.value_changed.connect(func(value: float):
 		_quantity = int(value)
 		_refresh_live())
 	parent.add_child(quantity)
+
+
+func _options(parent: Node, ids: Array, selected: String) -> OptionButton:
+	var select := OptionButton.new()
+	select.custom_minimum_size = Vector2(220, 38)
+	for id in ids:
+		select.add_item(_title(str(id)))
+	select.select(maxi(0, ids.find(selected)))
+	parent.add_child(select)
+	return select
 
 
 func _inventory_text(inventory: Dictionary) -> String:
@@ -521,9 +551,11 @@ func _inventory_text(inventory: Dictionary) -> String:
 	return "  ·  ".join(lines) if not lines.is_empty() else "Empty"
 
 
-func _row(parent: Node) -> HBoxContainer:
-	var row := HBoxContainer.new()
-	row.add_theme_constant_override("separation", 8)
+func _row(parent: Node) -> HFlowContainer:
+	var row := HFlowContainer.new()
+	row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	row.add_theme_constant_override("h_separation", 8)
+	row.add_theme_constant_override("v_separation", 8)
 	parent.add_child(row)
 	return row
 
@@ -562,7 +594,7 @@ func _live(parent: Node, read: Callable) -> Label:
 func _button(parent: Node, text: String, action: Callable) -> Button:
 	var button := Button.new()
 	button.text = text
-	button.custom_minimum_size.y = 36
+	button.custom_minimum_size.y = 38
 	button.add_theme_font_size_override("font_size", 15)
 	button.add_theme_color_override("font_color", INK)
 	button.add_theme_stylebox_override("normal", _style(Color("37523a"), Color("698157"), 7))
@@ -574,7 +606,9 @@ func _button(parent: Node, text: String, action: Callable) -> Button:
 
 
 func _action(parent: Node, text: String, kind: String, payload: Dictionary) -> void:
-	_button(parent, text, func(): _act(kind, payload))
+	var button := _button(parent, text, func(): _act(kind, payload))
+	button.set_meta("frontier_action", kind)
+	button.set_meta("frontier_payload", payload.duplicate(true))
 
 
 static func _style(fill: Color, border: Color, radius: int) -> StyleBoxFlat:
@@ -588,3 +622,27 @@ static func _style(fill: Color, border: Color, radius: int) -> StyleBoxFlat:
 	style.content_margin_top = 6
 	style.content_margin_bottom = 6
 	return style
+
+
+func _tutorial() -> void:
+	var guide: Variant = controller.get("tutorial") if "tutorial" in controller else null
+	if not is_instance_valid(guide):
+		_line(_body,"Walk up to a person or place and press E. Your journal can show a waypoint to any nearby job or town.",20,GOLD)
+		_button(_body,"Find places",func(): select_page("Places"))
+		return
+	var chapters := _row(_body)
+	for chapter: String in ["basics","farming","industry","moon"]:
+		_button(chapters,{"basics":"First day","farming":"Grow food","industry":"Make & deliver","moon":"Moon life"}[chapter],func(): guide.start(chapter); _rebuild())
+	var summary: Dictionary = guide.summary()
+	_line(_body,"Learn one thing at a time",22,GOLD)
+	var card := _card(_body)
+	_line(card,str(summary.get("title","Your first day")),20,GREEN)
+	_line(card,str(summary.get("text","Meet your neighbors and try a simple job.")),18)
+	_line(card,"Step %d of %d"%[int(summary.get("step",1)),int(summary.get("total",1))],15,MUTED)
+	var row := _row(_body)
+	if bool(summary.get("active",false)):
+		_button(row,"Show me where",guide.show_target)
+		_button(row,"Pause guide",func(): guide.pause(); _rebuild())
+	else:
+		_button(row,"Start guide" if not bool(summary.get("complete",false)) else "Practice again",func(): guide.start(); _rebuild())
+	_button(row,"Restart tutorial",func(): guide.restart(); _rebuild())

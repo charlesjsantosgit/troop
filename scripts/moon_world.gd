@@ -53,6 +53,8 @@ uniform sampler2D lunar_atlas : source_color, repeat_enable,
     filter_linear_mipmap_anisotropic;
 uniform sampler2D lunar_microdetail : source_color, repeat_enable,
     filter_linear_mipmap_anisotropic;
+uniform sampler2DArray terrain_radii : filter_linear, repeat_disable;
+uniform float terrain_grid_segments = 64.0;
 uniform float scaled_space_active : hint_range(0.0, 1.0) = 0.0;
 uniform float scaled_cap_retraction : hint_range(0.0, 1.0) = 0.0;
 uniform vec3 playable_center = vec3(0.0);
@@ -86,6 +88,41 @@ void vertex() {
             - inward_bias);
     VERTEX = mix(VERTEX, scaled_vertex, scaled_space_active);
     ground_world_position = (MODEL_MATRIX * vec4(VERTEX, 1.0)).xyz;
+}
+
+float surface_radius(vec3 d) {
+    vec3 a=abs(d);
+    vec2 uv;
+    float face;
+    if (a.x>=a.y && a.x>=a.z) {
+        face=d.x>=0.0 ? 0.0 : 1.0;
+        uv=vec2(d.x>=0.0 ? -d.z : d.z,d.y)/a.x;
+    } else if (a.y>=a.z) {
+        face=d.y>=0.0 ? 2.0 : 3.0;
+        uv=vec2(d.x,d.y>=0.0 ? -d.z : d.z)/a.y;
+    } else {
+        face=d.z>=0.0 ? 4.0 : 5.0;
+        uv=vec2(d.z>=0.0 ? d.x : -d.x,d.y)/a.z;
+    }
+    uv=((uv*0.5+0.5)*terrain_grid_segments+0.5)/(terrain_grid_segments+1.0);
+    return texture(terrain_radii,vec3(uv,face)).r;
+}
+float terrain_sun_visibility(vec3 origin,vec3 normal,vec3 sun) {
+    float elevation=dot(normalize(origin),sun);
+    if (elevation<=-0.025) { return 0.0; }
+    if (elevation>0.55) { return 1.0; }
+    // Ten bounded samples of the same welded height grid as collision/rendering.
+    // Curvature is included in ray radius, so the rim shadow follows the Sun
+    // and cannot make another coplanar surface or a shadow-map contour ring.
+    float visibility=1.0;
+    for (int i=0;i<10;i++) {
+        float distance_along=2.0*pow(1.62,float(i));
+        vec3 ray=origin+normalize(origin)*0.32+sun*distance_along;
+        float clearance=length(ray)-surface_radius(normalize(ray));
+        float penumbra=max(0.08,distance_along*0.00465);
+        visibility=min(visibility,smoothstep(-penumbra,penumbra,clearance));
+    }
+    return visibility;
 }
 
 void fragment() {
@@ -127,15 +164,10 @@ void fragment() {
     // opposing walls retain their slope lighting and low-Sun bowls retain shade.
     vec3 terrain_normal = normalize(surface_normal);
     vec3 local_sun = normalize(sun_local);
-    float radial_solar = dot(radial, local_sun);
     float terrain_solar = dot(terrain_normal, local_sun);
-    float wall_contrast = clamp((terrain_solar - radial_solar) * 3.6, -0.56, 0.28);
     float cavity = smoothstep(0.3, 7.5, relief_depth);
-    float crater_horizon = relief_depth / 34.0;
-    float bowl_shadow = smoothstep(crater_horizon - 0.025,
-        crater_horizon + 0.075, radial_solar);
-    float relief_light = (1.0 + wall_contrast) * mix(1.0,
-        mix(0.31, 0.88, bowl_shadow), cavity);
+    float sun_visibility=terrain_sun_visibility(ground_position,terrain_normal,local_sun);
+    float relief_light=mix(0.15,1.0,sun_visibility)*(1.0-cavity*0.08);
     ALBEDO = local_colour * relief_light * (1.0 - orbital_weight);
     // Orbital compression also retains a terminator and crater relief instead
     // of turning the entire lunar surface into a uniformly emissive photograph.
@@ -168,6 +200,8 @@ var _crater_directions := PackedVector3Array()
 var _crater_radii := PackedFloat32Array()
 var _crater_depths := PackedFloat32Array()
 var _crater_cutoffs := PackedFloat32Array()
+var _relief_images: Array[Image] = []
+var _relief_texture: Texture2DArray
 var _sphere_vertices := PackedVector3Array()
 var _sphere_indices := PackedInt32Array()
 var _grid_vertex_indices: Dictionary = {}
@@ -371,9 +405,10 @@ func _build_setup_vertex_row() -> void:
 	# Preserve the synchronous face/row/column order, including edge welding.
 	for x in range(SPHERE_FACE_SEGMENTS + 1):
 		var key := _cube_grid_point(_setup_face, x, _setup_row)
+		var point := _grid_surface_vertex(_setup_face, x, _setup_row)
+		_store_relief_height(_setup_face, x, _setup_row, point)
 		if _grid_vertex_indices.has(key):
 			continue
-		var point := _grid_surface_vertex(_setup_face, x, _setup_row)
 		_grid_vertex_indices[key] = _sphere_vertices.size()
 		_sphere_vertices.append(point)
 		_setup_normals.append(Vector3.ZERO)
@@ -407,6 +442,7 @@ func _publish_setup_terrain() -> void:
 	arrays[Mesh.ARRAY_NORMAL] = _setup_normals
 	arrays[Mesh.ARRAY_COLOR] = _setup_colors
 	arrays[Mesh.ARRAY_INDEX] = _sphere_indices
+	_publish_relief_texture()
 	var mesh := ArrayMesh.new()
 	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
 	terrain_mesh = MeshInstance3D.new()
@@ -753,9 +789,10 @@ func _build_terrain() -> void:
 		for y in range(SPHERE_FACE_SEGMENTS + 1):
 			for x in range(SPHERE_FACE_SEGMENTS + 1):
 				var key := _cube_grid_point(face, x, y)
+				var point := _grid_surface_vertex(face, x, y)
+				_store_relief_height(face, x, y, point)
 				if _grid_vertex_indices.has(key):
 					continue
-				var point := _grid_surface_vertex(face, x, y)
 				_grid_vertex_indices[key] = _sphere_vertices.size()
 				_sphere_vertices.append(point)
 				normals.append(Vector3.ZERO)
@@ -786,6 +823,7 @@ func _build_terrain() -> void:
 	arrays[Mesh.ARRAY_NORMAL] = normals
 	arrays[Mesh.ARRAY_COLOR] = colors
 	arrays[Mesh.ARRAY_INDEX] = _sphere_indices
+	_publish_relief_texture()
 	var mesh := ArrayMesh.new()
 	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
 	terrain_mesh = MeshInstance3D.new()
@@ -1079,6 +1117,9 @@ static func _disable_fog_on_descendants(root: Node) -> void:
 
 
 func _ensure_surface_material() -> void:
+	_relief_images.clear()
+	for face in range(6):
+		_relief_images.append(Image.create_empty(SPHERE_FACE_SEGMENTS+1, SPHERE_FACE_SEGMENTS+1, false, Image.FORMAT_RF))
 	if not _surface_shader:
 		_surface_shader = Shader.new()
 		_surface_shader.code = LUNAR_CAP_SHADER
@@ -1092,3 +1133,42 @@ func _ensure_surface_material() -> void:
 	_horizon_material.set_shader_parameter("scaled_surface_local", Vector3(LANDING_XZ.x, 0.0, LANDING_XZ.y))
 	_horizon_material.set_shader_parameter("lunar_atlas", SpaceVoyageVisuals.shared_moon_texture())
 	_horizon_material.set_shader_parameter("lunar_microdetail", LUNAR_MICRODETAIL)
+
+
+func _store_relief_height(face: int, x: int, y: int, point: Vector3) -> void:
+	_relief_images[face].set_pixel(x,y,Color((point-PLAYABLE_CENTER).length(),0,0,1))
+
+
+func _publish_relief_texture() -> void:
+	if _relief_texture: return
+	_relief_texture=Texture2DArray.new()
+	_relief_texture.create_from_images(_relief_images)
+	_horizon_material.set_shader_parameter("terrain_radii",_relief_texture)
+	_horizon_material.set_shader_parameter("terrain_grid_segments",float(SPHERE_FACE_SEGMENTS))
+
+
+func terrain_sun_visibility(point: Vector3, sunlight: Vector3) -> float:
+	# CPU mirror for collision/lighting regression probes. No invented crater map.
+	var origin := point-PLAYABLE_CENTER
+	var sun := sunlight.normalized()
+	var normal := origin.normalized()
+	var elevation := origin.normalized().dot(sun)
+	if elevation<=-0.025: return 0.0
+	if elevation>0.55: return 1.0
+	var visibility := 1.0
+	for step in range(10):
+		var distance_along := 2.0*pow(1.62,float(step))
+		var ray := origin+normal*0.32+sun*distance_along
+		var grid := _direction_grid(ray.normalized())
+		var x := mini(int(grid.y),SPHERE_FACE_SEGMENTS-1)
+		var y := mini(int(grid.z),SPHERE_FACE_SEGMENTS-1)
+		var fx := grid.y-x
+		var fy := grid.z-y
+		var a := (_grid_surface_vertex(int(grid.x),x,y)-PLAYABLE_CENTER).length()
+		var b := (_grid_surface_vertex(int(grid.x),x+1,y)-PLAYABLE_CENTER).length()
+		var c := (_grid_surface_vertex(int(grid.x),x,y+1)-PLAYABLE_CENTER).length()
+		var d := (_grid_surface_vertex(int(grid.x),x+1,y+1)-PLAYABLE_CENTER).length()
+		var radius := lerpf(lerpf(a,b,fx),lerpf(c,d,fx),fy)
+		var penumbra := maxf(0.08,distance_along*0.00465)
+		visibility=minf(visibility,smoothstep(-penumbra,penumbra,ray.length()-radius))
+	return visibility

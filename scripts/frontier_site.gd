@@ -6,6 +6,7 @@ extends Node3D
 var world: World
 var moon: MoonWorld
 var planet := "earth"
+var town_id := ""
 var local_player: MonkeyPlayer:
 	get:
 		return world.local_player if is_instance_valid(world) else null
@@ -24,11 +25,13 @@ func surface_height(x: float, z: float) -> float:
 				return next_height
 			height = next_height
 		return height
-	if Gen.frontier_world and x * x + z * z <= 40000.0:
+	var point := to_global(Vector3(x, 0, z))
+	var xz := Vector2(point.x, point.z)
+	if Gen.frontier_world and xz.distance_to(FrontierTownLayout.nearest_earth_center(xz)) <= 200.0:
 		# The shared generator grades this complete disk to the same constant.
 		# Worker collision probes need not repeat planetary road/biome sampling.
-		return Gen.FRONTIER_TOWN_HEIGHT
-	return Gen.height(x, z)
+		return Gen.FRONTIER_TOWN_HEIGHT - global_position.y
+	return Gen.height(point.x, point.z) - global_position.y
 
 
 func surface_normal(x: float, z: float) -> Vector3:

@@ -6,21 +6,21 @@ Do not disable school security controls to install or connect.
 
 ## Get the same version
 
-1. Open the [TROOP 0.5.0 download page](https://github.com/charlesjsantosgit/troop/releases/tag/v0.5.0)
+1. Open the [TROOP 0.6.0 download page](https://github.com/charlesjsantosgit/troop/releases/tag/v0.6.0)
    or check the [latest release](https://github.com/charlesjsantosgit/troop/releases/latest).
 2. Download the **Windows x86_64 Setup.exe** or **macOS universal.dmg** for your
    computer. The content `.pck` is for the updater, not a standalone game.
-3. If you already have **0.4.10**, apply the signed in-game update when offered
-   and restart, or use the full 0.5.0 installer. **Versions older than 0.4.10
+3. If you already have **0.4.10 or newer**, apply the signed in-game update when offered
+   and restart, or use the full 0.6.0 installer. **Versions older than 0.4.10
    require the full installer** to obtain updater bootstrap **3**. Close every
    running copy before installing. On a Mac, replace TROOP.app in Applications
    and launch that copy. Windows Setup installs for your user.
-4. Check that the installed game's menu shows **0.5.0**. Installing a new copy
+4. Check that the installed game's menu shows **0.6.0**. Installing a new copy
    does not update a different old copy left in Downloads or another folder;
    launch the updated installation when joining friends.
 
-The server and all classmates must run **0.5.0**. Older clients cannot join the
-0.5.0 server, even though multiplayer protocol **11** is unchanged.
+The server and all classmates must run **0.6.0**. Older clients cannot join the
+0.6.0 server. This release uses multiplayer protocol **12**.
 
 No Godot installation, GitHub account, home server, or router port forwarding is
 needed. Windows on ARM, Chromebooks, browsers, and phones are not verified targets.
@@ -28,11 +28,11 @@ The macOS build includes Apple Silicon and Intel executables.
 
 ## Join and talk
 
-- **PLAY ONLINE** keeps the classic shared combat, vehicles and lunar expedition.
-  The new **ROOTS & ROCKETS · LIVING SOCIETY** and **MOON EXPEDITION** menu choices
-  run a separate offline career with farming, jobs, markets and industry. Those
-  wallets and farms are saved locally and are not imported into public games.
-  The Earth terrain and lunar visual fixes are shared by the updated modes.
+- **PLAY ONLINE · SHARED TOWNS** brings Roots & Rockets to the shared world.
+  Explore three Earth towns and three Moon towns. Press **E** beside a person
+  or workplace; press **B → Tutorial** for guided lessons. One player can claim
+  each town, and every visitor can still trade and do their own requests.
+  Existing offline careers remain separate and do not import their wallets.
 - Choose a recognizable player name, then **PLAY ONLINE**. Everyone joins the
   same public world at `troop-public-canopy.fly.dev`; it is not a private class room.
 - The loading screen shows the current setup stage. **CANCEL CONNECTION** or
@@ -48,17 +48,19 @@ The macOS build includes Apple Silicon and Intel executables.
 - Press **Enter** for text chat and **Esc** for controls/settings or to leave.
 - Begin near the spawn area and test movement, chat, and voice with one friend
   before organizing a larger group. Rocket expeditions have four passenger seats.
-- Public multiplayer colonies and their farm/market progress are session-only:
-  disconnecting or restarting the server resets them. Solo colony saves are local
-  to your computer. Do not expect an online colony to survive between school days.
+- Shared society claims, player bags, wallets, crops and delivery progress are
+  stored on the server and survive reconnects and deployments. Keep the same
+  installation identity to keep your ownership. The older expedition-colony
+  side activity retains its separate session-only online rules.
+
 
 ## If someone cannot connect
 
 - Check the menu version first. An update-required message means the client and
   server differ in game version or protocol. Apply the offered update and
-  confirm **0.5.0**; use the full installer if the update cannot apply. If your
+  confirm **0.6.0**; use the full installer if the update cannot apply. If your
   installation predates 0.4.10, restarting an old content pack cannot upgrade
-  its bootstrap: close TROOP and replace it with the full 0.5.0 installation.
+  its bootstrap: close TROOP and replace it with the full 0.6.0 installation.
 - The game needs outbound **UDP 30623**. Some school networks block game traffic;
   a successful browser download does not prove that multiplayer is allowed.
 - Ask school IT whether the game, its public host, and that outbound port are

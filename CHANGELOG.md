@@ -1,5 +1,44 @@
 # TROOP changelog
 
+## 0.6.0 — SHARED SOCIETIES
+
+### Roots & Rockets on the public server
+
+- Explore three Earth towns and three Moon towns. Claim one town for 750
+  credits, manage its beds and workers, and welcome other players to its shops.
+  Shared ownership, crops, cargo and accounts persist on server storage.
+- Each authenticated resident has private bags and requests, with one wallet
+  across societies. Trading transfers finite stock and money. Duplicate
+  requests, remote actions and unauthorized town management are rejected.
+- Delivery NPCs use physical vehicles with wheels, turning, braking and
+  obstacle checks. They unload real cargo only after reaching a loading bay.
+  Town roads, more trees and detailed crop growth phases improve the streets
+  and farms while distant plant meshes use simpler geometry.
+
+### Learn by playing
+
+- Press E beside a neighbor or workplace for its own focused menu. B opens
+  the personal journal, directions and optional tutorials for the first day,
+  growing food, industry and Moon life. Lessons observe completed gameplay
+  actions, can pause and resume, and never reset your resources.
+- Fix accumulated backward lean while NPCs wait. Job-specific tools and motions
+  play during actual work, with planted idle poses when work is blocked.
+- Repair the lunar greenhouse roof and align compact Moon services with their
+  paths and usable entrances. Keep photographic skies visible through space
+  travel and cast crater shadows from the actual terrain relief.
+
+### Updating together
+
+- Apply the signed update and restart, or use the full Windows/macOS installer.
+  Version **0.6.0** uses protocol **12** and retains bootstrap **3**.
+  Installations older than **0.4.10** need the full installer.
+- The public server and all clients must show **0.6.0**. Existing offline
+  careers remain separate from shared society progress. See the
+  [shared society guide](docs/SHARED_SOCIETIES.md) for controls and details.
+- Cold Metal shader compilation can still cause long first-entry pauses.
+  The strict native frame-time gate has not passed; testing here used Apple M4.
+  An existing exhaust renderer warning at shutdown remains under investigation.
+
 ## 0.5.0 — ROOTS & ROCKETS
 
 ### A working society on Earth and the Moon

@@ -26,16 +26,18 @@ the next launch. TROOP verifies the signature, exact file size, and SHA-256
 digest before it loads any downloaded code. Engine or installer-level changes
 still require the normal Windows installer or macOS disk-image flow.
 
-TROOP 0.5.0 adds Roots & Rockets and fixes planetary terrain. Existing 0.4.10
-installations can apply the signed content update and restart. Installations
-older than 0.4.10 need the full 0.5.0 installer for updater bootstrap 3. Close
-every running copy before replacing the app. On a Mac, replace TROOP.app in
-Applications and launch that copy. Confirm 0.5.0 on the menu before joining.
+TROOP 0.6.0 brings Roots & Rockets to the shared public server. Installations
+on bootstrap 3 (0.4.10 or newer) can apply the signed content update and restart.
+Older installations need the full installer. Close every running copy before
+replacing the app. On a Mac, replace TROOP.app in Applications and launch that
+copy. Confirm 0.6.0 on the menu before joining the protocol-12 server.
 
-Choose ROOTS & ROCKETS or MOON EXPEDITION for the saved offline society:
-farming, jobs, finite markets, oil delivery, and lunar solar power. E talks or
-works nearby; B opens the Society board. Public multiplayer retains classic
-combat, vehicles, and the shared lunar expedition.
+Choose PLAY ONLINE - SHARED TOWNS for six Earth/Moon towns, claimable communities,
+finite markets, farming, job-specific workers and physical delivery vehicles.
+Your accounts, bags and town claims save on the server. Follow the optional
+first-day guide; E talks or works nearby, and B opens your journal and tutorials.
+Each person and workplace has its own controls. The offline career preserves
+your separate local progress. Classic combat and lunar expeditions remain.
 
 The startup changes were measured on an M4 Mac, not an M1. M1/Tahoe acceptance
 is still pending, and occasional startup/menu hitches remain under investigation.

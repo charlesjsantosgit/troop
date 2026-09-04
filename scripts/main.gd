@@ -92,6 +92,11 @@ func _ready() -> void:
 		_show_menu()
 		return
 	match args[0]:
+		"frontiertraffictest":
+			mode = args[0]
+			var traffic_test = load("res://tests/frontiertraffictest.gd").new()
+			add_child(traffic_test)
+			traffic_test.call_deferred("run", self)
 		"frontiertest", "lunarskytest":
 			mode = args[0]
 			var expansion_test = load("res://tests/%s.gd" % args[0]).new()
@@ -407,6 +412,8 @@ func _enter_online_world(pname: String, seed_v: int,
 	if not await _prepare_gameplay_textures(attempt):
 		return false
 	var phase_started := Time.get_ticks_usec()
+	_enable_frontier = true
+	Gen.frontier_world = true
 	Gen.setup(seed_v)
 	_trace_join_phase("seed", phase_started)
 	# Keep the connection screen alive between the expensive setup phases. The
@@ -479,6 +486,22 @@ func _enter_online_world(pname: String, seed_v: int,
 		if not _join_entry_current(attempt, entry_world):
 			return false
 	world.expedition_manager = expedition_manager
+	_set_join_status("Connecting shared towns…")
+	var town_deadline := Time.get_ticks_msec() + 15000
+	while not Net.frontier_network.society_ready:
+		await get_tree().process_frame
+		if not _join_entry_current(attempt, entry_world):
+			return false
+		if Time.get_ticks_msec() > town_deadline:
+			Net.net_error.emit("The server could not load the shared towns. Please reconnect.")
+			return false
+	_install_frontier()
+	while not frontier_controller.is_initial_ready():
+		_set_join_status("Preparing town streets and residents…")
+		frontier_controller.build_entry_step()
+		await get_tree().process_frame
+		if not _join_entry_current(attempt, entry_world):
+			return false
 	_set_join_status("Preparing chat and nearby players…")
 	_build_session_ui()
 	_session_ui_layer.visible = false
@@ -566,7 +589,7 @@ func _prepare_gameplay_textures(attempt: int) -> bool:
 	return false
 
 
-func _begin_menu_offline(destination: String) -> void:
+func _begin_menu_offline(destination: String, load_frontier_save := true) -> void:
 	if _join_in_progress:
 		return
 	_join_attempt += 1
@@ -577,7 +600,18 @@ func _begin_menu_offline(destination: String) -> void:
 	_set_join_button_busy(true)
 	if is_instance_valid(_online_button):
 		_online_button.text = "CANCEL LOADING"
+	# Set the final render features in an empty view, just as online entry does.
+	# Enabling temporal reconstruction after the whole offline scene exists
+	# invalidates every surface pipeline at once on a cold Metal installation.
+	_configure_rendering_backend()
+	get_viewport().scaling_3d_scale = _preferred_render_scale()
+	var loading_camera := Camera3D.new()
+	loading_camera.name = "OfflineLoadingCamera"
+	loading_camera.cull_mask = 0
+	add_child(loading_camera)
+	loading_camera.current = true
 	var ready := await _prepare_gameplay_textures(attempt)
+	loading_camera.queue_free()
 	if attempt != _join_attempt:
 		return
 	_join_in_progress = false
@@ -589,7 +623,7 @@ func _begin_menu_offline(destination: String) -> void:
 	match destination:
 		"frontier":
 			_close_menu()
-			_start_frontier(pname)
+			_start_frontier(pname, load_frontier_save)
 		"solo":
 			mode = "solo"
 			_close_menu()
@@ -647,7 +681,7 @@ func _finish_world_entry(pname: String) -> void:
 	_sync_puppets()
 	_reset_adaptive_rendering()
 	_trace_join_phase("session_ui", phase_started)
-	if _enable_frontier:
+	if _enable_frontier or Net.active:
 		_install_frontier()
 	if DisplayServer.get_name() != "headless" \
 			and mode in ["menu", "solo", "host", "join", "debugworld", "frontier", "moon"]:
@@ -884,7 +918,7 @@ func _install_frontier() -> void:
 	if hud:
 		hud.score_label.visible = false
 	if chat_box:
-		chat_box.add_system_line("ROOTS & ROCKETS · E talks and works · B opens your society. Your career saves automatically.")
+		chat_box.add_system_line("ROOTS & ROCKETS · E talks to a person or works at a site · B opens your personal journal. Towns save automatically.")
 
 
 func _do_frontier_shot(args: PackedStringArray) -> void:
@@ -1459,8 +1493,8 @@ func _show_menu() -> void:
 	play_head.add_theme_color_override("font_color", Color("8fb98f"))
 	_menu_scale_font(play_head, 12)
 	play_column.add_child(play_head)
-	var society := _menu_action_card(play_column, "ROOTS & ROCKETS · LIVING SOCIETY",
-		"Persistent farms · working citizens · fuel industry · Earth and Moon",
+	var society := _menu_action_card(play_column, "ROOTS & ROCKETS · OFFLINE CAREER",
+		"Your local farms · working citizens · Earth and Moon",
 		Color("4c7443"), Color("80a961"))
 	_offline_buttons.append(society)
 	society.pressed.connect(func(): _begin_menu_offline("frontier"))
@@ -1471,8 +1505,8 @@ func _show_menu() -> void:
 	_offline_buttons.append(solo)
 	solo.pressed.connect(func(): _begin_menu_offline("solo"))
 
-	_online_button = _menu_action_card(play_column, "PLAY ONLINE · PUBLIC CANOPY",
-		"Managed dedicated server · push-to-talk T · no port forwarding",
+	_online_button = _menu_action_card(play_column, "PLAY ONLINE · SHARED TOWNS",
+		"Claim towns · shared markets · working societies · Earth and Moon",
 		Color("257f70"), Color("39aa8f"))
 	_online_button.disabled = _public_server_host().is_empty()
 	if _online_button.disabled:

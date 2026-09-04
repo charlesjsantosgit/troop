@@ -50,7 +50,7 @@ signal moon_colony_result(action: String, ok: bool, reason: String)
 const PORT := 30623
 const MAX_CLIENTS := 24
 const CHANNEL_COUNT := 2
-const PROTOCOL_VERSION := 11
+const PROTOCOL_VERSION := 12
 const MAX_NAME_LENGTH := 20
 const REGISTRATION_TIMEOUT_SECONDS := 5.0
 const MAX_STATE_PACKETS_PER_SECOND := 30
@@ -160,6 +160,7 @@ var _client_registration_challenge_used := false
 var _bans: Dictionary = {}      # server: remote address -> {until, name}
 var is_host := false
 var is_dedicated := false
+var frontier_network: Node
 var local_name := "Monkey"
 var world_seed := 0
 var names: Dictionary = {}      # peer id -> display name (server is omitted)
@@ -337,6 +338,10 @@ func effective_game_version() -> String:
 
 
 func _wire() -> void:
+	if not is_instance_valid(frontier_network):
+		frontier_network = load("res://scripts/frontier_network.gd").new()
+		frontier_network.name = "FrontierNetwork"
+		add_child(frontier_network)
 	if _wired:
 		return
 	_wired = true
@@ -386,6 +391,15 @@ func host(pname: String, seed_v: int, port := PORT) -> Error:
 	admin_changed.emit(true)
 	admin_roster_changed.emit()
 	_initialize_cycle_from_local_calendar()
+	Gen.frontier_world = true
+	var frontier_error: Error = frontier_network.start_authority(seed_v, false)
+	if frontier_error != OK:
+		shutdown()
+		return frontier_error
+	var host_key := _load_or_create_identity_key()
+	if host_key:
+		_peer_key_fingerprints[1] = _parse_public_identity(host_key.save_to_string(true)).get("fingerprint", "")
+		frontier_network.register_peer(1)
 	return OK
 
 
@@ -399,6 +413,7 @@ func start_dedicated(seed_v: int, port := PORT, bind_ip := "*",
 	# Prepare the same deterministic generator clients use so claims can be
 	# resolved from the server's seed instead of trusting client-authored ids.
 	Gen.debug_world = false
+	Gen.frontier_world = true
 	Gen.setup(seed_v)
 	var peer := ENetMultiplayerPeer.new()
 	var resolved_bind := bind_ip.strip_edges()
@@ -444,12 +459,22 @@ func start_dedicated(seed_v: int, port := PORT, bind_ip := "*",
 	is_admin = false
 	_load_bans()
 	_initialize_cycle_from_local_calendar()
+	# Source test fixtures are ephemeral unless they explicitly select isolated
+	# storage. Exported production authorities always retain the shared society.
+	var persist_frontier := not OS.has_feature("editor") \
+		or not OS.get_environment("TROOP_STATE_DIR").strip_edges().is_empty()
+	var frontier_error: Error = frontier_network.start_authority(seed_v, persist_frontier)
+	if frontier_error != OK:
+		push_error(frontier_network.storage_error)
+		shutdown()
+		return frontier_error
 	return OK
 
 
 func join(address: String, pname: String, port := PORT) -> Error:
 	_save_offline_moon_colony()
 	_wire()
+	frontier_network.stop()
 	_session_epoch += 1
 	var host_address := address.strip_edges()
 	if host_address.is_empty():
@@ -493,6 +518,8 @@ func join(address: String, pname: String, port := PORT) -> Error:
 
 
 func solo(pname: String, seed_v: int) -> void:
+	if is_instance_valid(frontier_network):
+		frontier_network.stop()
 	_save_offline_moon_colony()
 	_reset_moon_colonies()
 	_session_epoch += 1
@@ -529,6 +556,8 @@ func solo(pname: String, seed_v: int) -> void:
 
 
 func shutdown() -> void:
+	if is_instance_valid(frontier_network):
+		frontier_network.stop()
 	_save_offline_moon_colony()
 	_reset_moon_colonies()
 	_session_epoch += 1
@@ -956,6 +985,8 @@ func _enforce_registration_timeout(id: int, epoch: int) -> void:
 
 
 func _on_peer_disconnected(id: int) -> void:
+	if is_instance_valid(frontier_network):
+		frontier_network.unregister_peer(id)
 	var was_registered := _registered.has(id) or names.has(id)
 	_release_vehicles_of_peer(id)
 	_remove_peer_from_rocket(id)
@@ -1130,6 +1161,8 @@ func _finish_registration(id: int, pname: String, fingerprint: String,
 		effective_game_version(), claimed_vehicles, vehicle_rests,
 		vehicle_spawn_definitions, player_realms, expedition_state_snapshot())
 	_broadcast_expedition_state()
+	if is_instance_valid(frontier_network):
+		frontier_network.register_peer(id)
 	roster_changed.emit()
 
 
@@ -2303,6 +2336,9 @@ func _host_claim_vehicle(vehicle_id: String, claimant_id: int) -> bool:
 		if claimant_id != local_id():
 			rpc_id(claimant_id, "cl_vehicle_claimed", vehicle_id,
 				int(claimed_vehicles[vehicle_id]))
+		return false
+	if is_instance_valid(frontier_network) and frontier_network.society_ready \
+			and not frontier_network.prepare_player_vehicle(vehicle_id, _canonical_vehicle_kind(vehicle_id), claimant_id):
 		return false
 	claimed_vehicles[vehicle_id] = claimant_id
 	# A claimed driver is no longer an on-foot proximity authority. Keeping the

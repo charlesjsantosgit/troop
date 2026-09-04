@@ -69,6 +69,7 @@ var engine := VehicleEngine.new()
 var driver: Node3D = null              # local MonkeyPlayer while driven
 var remote_controlled := false         # a network peer is driving
 var occupied_by_peer := 0              # peer id holding the network claim
+var npc_controlled := false            # server-owned AI; explicit gear selection
 
 # Driver inputs, written each tick by the seated player.
 var input_throttle := 0.0
@@ -333,7 +334,7 @@ func interaction_position() -> Vector3:
 
 
 func can_enter(_player: Node3D) -> bool:
-	return driver == null and not remote_controlled and occupied_by_peer == 0
+	return not npc_controlled and driver == null and not remote_controlled and occupied_by_peer == 0
 
 
 func begin_drive(player: Node3D) -> void:
@@ -583,7 +584,7 @@ func _simulate(dt: float) -> void:
 	# the accelerator and W the brake, like every road car ever made.
 	var throttle := input_throttle if driver else 0.0
 	var brake := input_brake if driver else 1.0
-	if engine.reverse_ratio > 0.0 and driver:
+	if engine.reverse_ratio > 0.0 and driver and not npc_controlled:
 		# Direction changes are only legal at a genuine stop. Signed comparisons
 		# used to select reverse while already rolling backward quickly (and first
 		# while rolling forward), turning the driver's brake into acceleration.

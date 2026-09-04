@@ -189,6 +189,15 @@ var _retained_wilderness_vehicle_ids: Dictionary = {} # mounted once -> session 
 var _marker: MeshInstance3D
 var _particles: GPUParticles3D
 var water_fx: WaterFX
+# The compact Earth aviation chart ends below the separate lunar realm at 36 km.
+# This is a game-scale optical transition, not Earth's real Karman altitude.
+const SPACE_SKY_START_ALTITUDE := 12000.0
+const SPACE_SKY_FULL_ALTITUDE := 30000.0
+var _ground_sky: Sky
+var _space_sky: Sky
+var _photographic_space: LunarSky
+var _space_sky_weight := 0.0
+var _ground_fog_enabled := true
 var _environment: Environment
 var _sky_material: ShaderMaterial
 var _celestial_sky: CelestialSky
@@ -436,6 +445,7 @@ func _build_environment() -> void:
 	sky.process_mode = Sky.PROCESS_MODE_INCREMENTAL
 	env.background_mode = Environment.BG_SKY
 	env.sky = sky
+	_ground_sky = sky
 	env.ambient_light_source = Environment.AMBIENT_SOURCE_SKY
 	env.ambient_light_energy = 0.44
 	env.reflected_light_source = Environment.REFLECTION_SOURCE_SKY
@@ -1934,6 +1944,7 @@ func _update_biome_ambience(dt: float) -> void:
 	# old linear Gen helper saturated by ~83 m and forced an 81-sector satellite
 	# square over ordinary hills.
 	var altitude: float = local_player.global_position.y
+	_apply_altitude_sky(altitude)
 	var target_far := stream_view_distance_for_altitude(altitude)
 	current_view_distance = lerpf(current_view_distance, target_far,
 		1.0 - exp(-0.55 * dt))
@@ -1968,7 +1979,7 @@ func _update_biome_ambience(dt: float) -> void:
 	_environment.fog_light_color = _environment.fog_light_color.lerp(
 		fog_target, 1.0 - exp(-0.42 * dt))
 	_environment.fog_density = lerpf(_environment.fog_density,
-		minf(_biome_density_target, 3.2 / current_view_distance) * density_multiplier,
+		minf(_biome_density_target, 3.2 / current_view_distance) * density_multiplier * (1.0-_space_sky_weight),
 		1.0 - exp(-0.42 * dt))
 	_environment.adjustment_saturation = lerpf(
 		_environment.adjustment_saturation,
@@ -2030,7 +2041,7 @@ func _apply_day_night(update_sky: bool) -> void:
 	# contribution turns a clear midnight teal. Keep clear nights navy while
 	# allowing rain and snow to retain a believable veil over the stars.
 	_environment.fog_sky_affect = lerpf(
-		0.025 + (1.0 - weather_light) * 0.12, 0.12, daylight_amount)
+		0.025 + (1.0 - weather_light) * 0.12, 0.12, daylight_amount) * (1.0-_space_sky_weight)
 	var sunrise_color := Color(1.0, 0.42, 0.16)
 	var noon_color := Color(1.0, 0.955, 0.86)
 	_sun.light_color = sunrise_color.lerp(noon_color, high_sun)
@@ -3261,3 +3272,37 @@ func add_debug_banana(pos: Vector3, id: String) -> void:
 	b.setup(id, pos)
 	add_child(b)
 	register_banana(b)
+
+
+static func space_sky_weight_for_altitude(altitude: float) -> float:
+	return smoothstep(SPACE_SKY_START_ALTITUDE,SPACE_SKY_FULL_ALTITUDE,altitude)
+
+
+func _apply_altitude_sky(altitude: float) -> void:
+	if not _environment or Net.player_realm()!=Net.PlayerRealm.EARTH: return
+	var weight := space_sky_weight_for_altitude(altitude)
+	if not _ground_sky: _ground_sky=_environment.sky
+	if weight<=0.0:
+		if _space_sky_weight>0.0:
+			_environment.sky=_ground_sky
+			_environment.fog_enabled=_ground_fog_enabled
+		_space_sky_weight=0.0
+		return
+	if _space_sky_weight<=0.0: _ground_fog_enabled=_environment.fog_enabled
+	_space_sky_weight=weight
+	if not _photographic_space:
+		_photographic_space=LunarSky.new()
+		_photographic_space.material.set_shader_parameter("earth_visibility",0.0)
+		_space_sky=Sky.new()
+		_space_sky.sky_material=_photographic_space.material
+		_space_sky.radiance_size=Sky.RADIANCE_SIZE_32
+		_space_sky.process_mode=Sky.PROCESS_MODE_INCREMENTAL
+	_photographic_space.set_sun_direction(_sun.global_basis.z if _sun else Vector3(-0.29,0.78,-0.55))
+	_photographic_space.material.set_shader_parameter("atmosphere_strength",1.0-weight)
+	if _sky_material:
+		for pair in [["atmosphere_top","sky_top_color"],["atmosphere_horizon","sky_horizon_color"],
+				["atmosphere_bottom","ground_bottom_color"],["atmosphere_energy","sky_energy"]]:
+			var value: Variant=_sky_material.get_shader_parameter(pair[1])
+			if value!=null: _photographic_space.material.set_shader_parameter(pair[0],value)
+	_environment.sky=_space_sky
+	_environment.fog_enabled=_ground_fog_enabled and weight<1.0

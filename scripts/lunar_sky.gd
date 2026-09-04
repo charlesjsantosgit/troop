@@ -35,12 +35,26 @@ uniform vec3 earth_direction = vec3(-0.48,0.38,-0.79);
 uniform vec3 planet_directions[7];
 uniform float observation_strength = 0.0;
 uniform float earth_rotation = -0.45;
+uniform float earth_visibility = 1.0;
+uniform float atmosphere_strength = 0.0;
+uniform vec4 atmosphere_top : source_color = vec4(0.027,0.082,0.239,1.0);
+uniform vec4 atmosphere_horizon : source_color = vec4(0.063,0.169,0.357,1.0);
+uniform vec4 atmosphere_bottom : source_color = vec4(0.008,0.025,0.075,1.0);
+uniform float atmosphere_energy = 0.72;
 vec2 galactic_uv(vec3 d) {
     return vec2(0.5 - atan(d.y,d.x) / 6.28318530718,
         0.5 - asin(clamp(d.z,-1.0,1.0)) / 3.14159265359);
 }
+vec3 atmospheric_scattering(vec3 d) {
+    float gradient=pow(clamp(abs(d.y),0.0,1.0),0.58);
+    // One horizon color prevents a false plane when an elevated eye sees below
+    // its local horizontal. The same gradient supplies only atmospheric radiance.
+    return mix(mix(atmosphere_horizon.rgb,atmosphere_bottom.rgb,gradient),
+        mix(atmosphere_horizon.rgb,atmosphere_top.rgb,gradient),
+        smoothstep(-0.04,0.04,d.y))*atmosphere_energy;
+}
 void sky() {
-    COLOR = vec3(0.0);
+    COLOR = atmospheric_scattering(normalize(EYEDIR))*atmosphere_strength;
     if (!AT_CUBEMAP_PASS) {
         vec3 d = normalize(EYEDIR);
         vec2 uv = galactic_uv(normalize(world_to_galactic*d));
@@ -63,7 +77,7 @@ void sky() {
         }
         vec3 ed = normalize(earth_direction);
         float ef = dot(d,ed);
-        if (ef>0.99970) {
+        if (earth_visibility>0.0 && ef>0.99970) {
             vec3 right = normalize(cross(vec3(0.0,1.0,0.0),ed));
             vec3 up = normalize(cross(ed,right));
             vec2 p = vec2(dot(d,right),dot(d,up)) / 0.0165799;
@@ -85,6 +99,7 @@ void sky() {
         float sun_distance=length(d-normalize(sun_direction));
         float sun=1.0-smoothstep(0.00456,0.00473,sun_distance);
         COLOR=mix(COLOR,vec3(9.0,8.55,7.70),sun);
+        COLOR=mix(COLOR,atmospheric_scattering(d),atmosphere_strength);
     }
 }
 """

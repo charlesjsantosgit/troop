@@ -23,13 +23,13 @@ textures for readable globe and voyage views.
 
 ## Highlights
 
-- **Roots & Rockets society career** — choose **ROOTS & ROCKETS · LIVING SOCIETY**
-  from the menu for persistent Earth farms, a working hut town, 24 residents,
-  practical professions, funded quests, finite markets, oil production and fuel
-  deliveries. Expand a sealed lunar farm with solar generation, battery storage
-  and freight. **E** talks or works nearby; **B** opens the society board. This
-  is an offline career alongside the existing public multiplayer game.
-  See the [gameplay guide and implementation scope](docs/ROOTS_AND_ROCKETS.md).
+- **Shared Roots & Rockets societies** — choose **PLAY ONLINE · SHARED TOWNS**
+  for three Earth towns and three Moon towns with persistent owners, personal
+  bags, finite markets, working citizens and vehicle deliveries. Claim one town
+  for 750 credits; visitors can still shop and do requests. **E** opens the nearby
+  person's or workplace's menu. **B → Tutorial** offers four guided lessons.
+  The separate offline career preserves existing saves.
+  See the [shared society guide](docs/SHARED_SOCIETIES.md).
 - **Photographic lunar astronomy** — a credited ESO sky panorama, NASA Earth
   imagery and constellation guides, with seven planetary targets and an
   observation exposure mode. The visible Sun also drives lunar lighting;
@@ -108,24 +108,22 @@ textures for readable globe and voyage views.
   frame-rate cap, ordered with Unlimited first, 480 FPS second, lower presets,
   and a validated Custom setting.
 
-## What's new in 0.5 — ROOTS & ROCKETS
+## What's new in 0.6 — SHARED SOCIETIES
 
-Current source version: **0.5.0**, using **multiplayer protocol 11**.
+Current source version: **0.6.0**, using **multiplayer protocol 12**.
 Clients and server must use the same game version and multiplayer protocol.
 
-The new offline society career brings 24 crops, 24 citizens in 19 occupations,
-finite markets, funded quests, oil refining and deliveries, saved vehicle fuel,
-and lunar farming powered by expandable solar panels and batteries. Start with
-**ROOTS & ROCKETS · LIVING SOCIETY** or **MOON EXPEDITION**. **E** interacts;
-**B** opens your Society board. Read the
-[gameplay guide](docs/ROOTS_AND_ROCKETS.md) for resources, work and recovery.
+Roots & Rockets is now shared online: six claimable towns, private player bags,
+one wallet across societies, finite markets, funded requests and persistent
+ownership. Trees and roads organize the towns. Detailed crops show five growth
+stages; delivery crews drive physical vehicles and only unload after arriving.
+NPC conversations belong to that person and explain their current work or needs.
 
-Shared visual fixes remove overlapping Earth terrain and inconsistent distant
-debug ground. The Moon gains photographic astronomy and persistent crater
-relief. Public multiplayer keeps the classic combat and shared expedition
-modes; offline society progress is separate. See the
-[0.5.0 release](https://github.com/charlesjsantosgit/troop/releases/tag/v0.5.0)
-and [validation report](docs/ROOTS_AND_ROCKETS_VALIDATION.md).
+Four optional tutorials introduce trade, farming, industry and the Moon.
+The lunar greenhouse roof is repaired, services share practical entrances and
+paths, photographic space continues through voyages, and sunlight shadows the
+actual crater relief. Existing offline career saves remain separate from the
+public economy. Read the [shared society guide](docs/SHARED_SOCIETIES.md).
 
 ## Planet and expedition features from 0.4 — ONE SMALL STEP
 
@@ -217,7 +215,7 @@ and [validation report](docs/ROOTS_AND_ROCKETS_VALIDATION.md).
   bananas each, only when it fits in the pack.
 - **Planet and expedition state are multiplayer-authoritative.** The server owns
   the four-seat manifest, exact voyage clock, realm changes, banana spending,
-  and late-join state under **network protocol 11**. Local and remote monkeys also
+  and late-join state under **network protocol 12**. Local and remote monkeys also
   reset every authored joint and transient look, recoil, hand, and vehicle solver
   after vehicle exit, defeat, and revive, so a seated or death pose cannot leak
   into ordinary movement on another peer. Admins can use `/moon [player]` or
@@ -275,7 +273,7 @@ while solo play is paused, while you are away from the Moon, or while the game i
 closed. Test/capture modes use fresh state without reading or writing your colony.
 Network colonies are personal, host-owned session ledgers: harvests, spending,
 range checks, and one-time rewards are validated by the host. This source build
-uses network protocol 11; the public server and every client must run the same
+uses network protocol 12; the public server and every client must run the same
 game version and protocol.
 
 ```bash
@@ -472,7 +470,7 @@ TROOP_SERVER_HOST=game.example.com \
 godot --headless --path . -- server    # dedicated authority used by managed hosting
 ```
 
-Player releases expose **PLAY ONLINE · PUBLIC CANOPY**, which connects straight
+Player releases expose **PLAY ONLINE · SHARED TOWNS**, which connects straight
 to the managed worldwide server embedded by the release workflow. Players do
 not host matches, forward router ports, or expose a home computer. Source builds
 deliberately keep the endpoint blank; see `hosting/README.md` for the one-time
@@ -531,16 +529,19 @@ Bananas float along swing arcs; collect them for score (synced).
 
 ## Online
 
-For a quick download, setup, and connection checklist, see
-[Playing with classmates](docs/PLAY_WITH_CLASSMATES.md). The current release is
-**0.5.0 / protocol 11**. On 0.4.10, apply the offered signed in-game update and
-restart, or install the full 0.5.0 package. Older installations need the full
-installer for bootstrap 3. Close TROOP before replacing an installation; on a
-Mac, launch the replacement in Applications. Confirm **0.5.0** before joining
-the matching server. All classmates must activate the same version, even though
-the protocol is unchanged. Public multiplayer retains classic combat and lunar
-expeditions; the Roots & Rockets society career stays offline. School networks
-may block outbound UDP 30623; use school-approved devices and networks.
+For download and connection instructions, see
+[Playing with classmates](docs/PLAY_WITH_CLASSMATES.md). Every player and the
+public server must run **0.6.0 / protocol 12**. On bootstrap 3 (0.4.10 or newer),
+apply the signed in-game update and restart, or install the full 0.6.0 package.
+Older installations need the full installer. Close TROOP before replacing an
+installation; on a Mac, launch the replacement in Applications.
+
+Roots & Rockets now runs on the shared public server, with persistent town
+claims, private bags, trade, crops and physical delivery crews. Classic combat
+and lunar expeditions remain available. Start with the on-screen guide or
+**B → Tutorial**; see [Shared societies](docs/SHARED_SOCIETIES.md) for controls.
+School networks may block outbound UDP 30623; use school-approved devices and
+networks.
 
 Worldwide multiplayer uses a headless ENet authority on UDP **30623**. Clients
 rebuild identical jungle geometry from its seed while the server validates and
@@ -552,9 +553,9 @@ stutter on quick repeated presses. Voice volume and the PTT binding are configur
 
 ## Player installers & updates
 
-Download [TROOP 0.5.0](https://github.com/charlesjsantosgit/troop/releases/tag/v0.5.0):
-[Windows Setup](https://github.com/charlesjsantosgit/troop/releases/download/v0.5.0/TROOP-0.5.0-Windows-x86_64-Setup.exe)
-or [macOS universal DMG](https://github.com/charlesjsantosgit/troop/releases/download/v0.5.0/TROOP-0.5.0-macOS-universal.dmg).
+Download [TROOP 0.6.0](https://github.com/charlesjsantosgit/troop/releases/tag/v0.6.0):
+[Windows Setup](https://github.com/charlesjsantosgit/troop/releases/download/v0.6.0/TROOP-0.6.0-Windows-x86_64-Setup.exe)
+or [macOS universal DMG](https://github.com/charlesjsantosgit/troop/releases/download/v0.6.0/TROOP-0.6.0-macOS-universal.dmg).
 The [latest release page](https://github.com/charlesjsantosgit/troop/releases/latest)
 always lists the current packages. The content PCK is used by the updater.
 
@@ -600,7 +601,7 @@ resource pack, are re-verified on every boot, and take effect on the next
 launch. Updates that change Godot itself, the updater bootstrap, native code, or
 non-version project settings instead offer the full Windows installer or macOS disk image.
 The game remains fully playable when GitHub is offline.
-Version 0.5.0 retains bootstrap **3**, introduced by the 0.4.10 full installer.
+Version 0.6.0 retains bootstrap **3**, introduced by the 0.4.10 full installer.
 Installations older than 0.4.10 must replace the app to obtain that bootstrap;
 compatible content updates on bootstrap 3 can apply automatically.
 

@@ -10,6 +10,7 @@ on:
       - Dockerfile
       - export_presets.cfg
       - fly.toml
+      - server-entrypoint.sh
       - project.godot
       - scenes/**
       - scripts/**

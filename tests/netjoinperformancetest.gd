@@ -90,6 +90,7 @@ func _run() -> void:
 		SIGNATURE_BUDGET_MS)
 	timings.registration_signature_ms = signature_ms
 
+	var world_script_was_loaded := ResourceLoader.has_cached("res://scripts/world.gd")
 	start = Time.get_ticks_usec()
 	var join_error: int = net.join("localhost", "TimingFixture",
 		reserved.get_local_port())
@@ -98,6 +99,8 @@ func _run() -> void:
 		"cached local join returns promptly before network registration",
 		join_ms, CACHED_JOIN_BUDGET_MS)
 	timings.cached_join_ms = join_ms
+	_check(ResourceLoader.has_cached("res://scripts/world.gd") == world_script_was_loaded,
+		"connection-only client does not load the town rendering and terrain scene graph")
 	net.shutdown()
 	reserved.close()
 

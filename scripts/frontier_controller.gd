@@ -1,7 +1,8 @@
 class_name FrontierController
 extends Node
 ## Connects the persistent society to the existing planet, expedition, inputs
-## and physical workplaces. Local careers never enter the public economy.
+## and physical workplaces. Online views are supplied by the shared authority;
+## existing local saves remain a separate, explicit offline career.
 
 const SAVE_PATH := "user://frontier/roots_and_rockets.json"
 const INTERACTION_RANGE := 5.2
@@ -21,7 +22,7 @@ var persistence_enabled := true
 var simulation_enabled := true
 var selected_interaction: Dictionary = {}
 var waypoint: Dictionary = {}
-var last_message := "Welcome to Canopy Commons. E talks and works; B opens your society."
+var last_message := "Welcome to Canopy Commons. E talks and works; B opens your journal."
 var _layer: CanvasLayer
 var _status: Label
 var _prompt: Label
@@ -33,6 +34,19 @@ var _save_timer := 20.0
 var _last_realm := -1
 var _observation := false
 var _saved_player_position: Array = []
+var _online := false
+var _network: Node
+var _town_entries: Dictionary = {}
+var _town_build_queue: Array[String] = []
+var _active_town_id := "canopy_earth"
+var _town_refresh := 0.0
+var _offline_traffic: Node3D
+var tutorial: Node
+var _tutorial_save_path := ""
+var _pending_actions: Dictionary = {}
+var _pending_kind := ""
+var _pending_town := ""
+var _pending_retry_at := 0
 
 
 func configure(main: Node, host: World, manager: ExpeditionManager,
@@ -42,19 +56,24 @@ func configure(main: Node, host: World, manager: ExpeditionManager,
 	expedition = manager
 	save_path = custom_save_path
 	process_mode = Node.PROCESS_MODE_PAUSABLE
+	_online = Net.active
+	_tutorial_save_path = "user://frontier/tutorial-online.cfg" if _online else custom_save_path + ".tutorial.cfg" if load_saved else ""
+	if _online:
+		_configure_online()
+		return
 	simulation = load("res://scripts/frontier_sim.gd").new()
 	var loaded: bool = load_saved and simulation.load_game(save_path)
-	if load_saved and not loaded and FileAccess.file_exists(save_path) \
+	if load_saved and not loaded and FileAccess.file_exists(save_path + ".bak") \
 			and simulation.load_game(save_path + ".bak"):
 		loaded = true
 		var original := ProjectSettings.globalize_path(save_path)
 		var preserved := original + ".unreadable-%d" % int(Time.get_unix_time_from_system())
-		persistence_enabled = DirAccess.copy_absolute(original, preserved) == OK
+		persistence_enabled = not FileAccess.file_exists(original) or DirAccess.copy_absolute(original, preserved) == OK
 		last_message = "Recovered the preceding society checkpoint. The unreadable save was preserved." \
 			if persistence_enabled else "Recovered the preceding checkpoint; saving is disabled because the unreadable file could not be preserved."
 	if not loaded:
 		simulation.new_game(Gen.world_seed)
-		if load_saved and FileAccess.file_exists(save_path):
+		if load_saved and (FileAccess.file_exists(save_path) or FileAccess.file_exists(save_path + ".bak")):
 			persistence_enabled = false
 			last_message = "The previous society save could not be read. It has been preserved; this session will not overwrite it."
 	world.set("frontier", self)
@@ -81,6 +100,10 @@ func _create_sites() -> void:
 	earth_settlement = load("res://scripts/frontier_settlement.gd").new()
 	earth_settlement.configure(earth_site, simulation, "earth")
 	earth_site.add_child(earth_settlement)
+	_offline_traffic = load("res://scripts/frontier_traffic.gd").new()
+	earth_site.add_child(_offline_traffic)
+	_offline_traffic.configure(simulation, earth_site, true, "offline_earth")
+	_offline_traffic.build()
 	earth_settlement.build()
 	moon_site = FrontierSite.new()
 	moon_site.name = "LunarAgricultureDistrict"
@@ -133,6 +156,9 @@ func _build_ui() -> void:
 	_sky_credit.offset_bottom = -96
 	_sky_credit.text = "Sky photograph: ESO / S. Brunier · celestial reference: NASA / GSFC"
 	_layer.add_child(_sky_credit)
+	tutorial = load("res://scripts/frontier_tutorial.gd").new()
+	add_child(tutorial)
+	tutorial.configure(self, _layer, _tutorial_save_path)
 
 
 func _overlay_label(size: int) -> Label:
@@ -147,6 +173,9 @@ func _overlay_label(size: int) -> Label:
 
 func _process(delta: float) -> void:
 	if not simulation or not is_instance_valid(world):
+		return
+	if _online:
+		_process_online(delta)
 		return
 	_sync_realm()
 	_refresh -= delta
@@ -174,6 +203,13 @@ func _sync_realm() -> void:
 	if realm == _last_realm:
 		return
 	_last_realm = realm
+	if _online:
+		if is_instance_valid(ui) and ui.visible:
+			ui.close()
+		selected_interaction.clear()
+		waypoint.clear()
+		_town_refresh = 0.0
+		return
 	if realm != Net.PlayerRealm.TRANSIT:
 		simulation.state.planet = "moon" if realm == Net.PlayerRealm.MOON else "earth"
 	if is_instance_valid(earth_site):
@@ -195,7 +231,7 @@ func _sync_realm() -> void:
 
 func _update_sun() -> void:
 	var moon := expedition.moon_world
-	if not is_instance_valid(moon) or not moon.has_method("set_lunar_sun_direction"):
+	if not is_instance_valid(moon) or not is_instance_valid(moon_site) or not moon.has_method("set_lunar_sun_direction"):
 		return
 	var angle := float(simulation.state.get("lunar_phase", 0.0833333)) * TAU
 	var solar_azimuth := Vector2(0.67, 0.74).normalized()
@@ -247,14 +283,14 @@ func _refresh_overlays() -> void:
 	var active := Net.player_realm() != Net.PlayerRealm.TRANSIT
 	_status.visible = active and not ui.visible
 	_prompt.visible = active and not ui.visible
-	_waypoint_label.visible = active and not ui.visible
+	_waypoint_label.visible = false # The world-space marker already gives name and distance.
 	_waypoint_marker.visible = active and not ui.visible and not waypoint.is_empty()
 	_sky_credit.visible = Net.player_realm() == Net.PlayerRealm.MOON and not ui.visible
 	var credits := int(simulation.state.get("accounts", {}).get("player", 0))
-	_status.text = "%s  ·  %s credits  ·  B Society" % [
-		"CRATER GARDENS" if current_planet() == "moon" else "CANOPY COMMONS", str(credits)]
+	_status.text = "%s  ·  %s credits  ·  B Journal" % [
+		str(current_town().get("name", "Town")).to_upper(), str(credits)]
 	var interaction := nearest_interaction()
-	_prompt.text = "E · " + str(interaction.get("label", "Interact")) if not interaction.is_empty() else "B · Farm, trade, hire and find work"
+	_prompt.text = "E · " + str(interaction.get("label", "Interact")) if not interaction.is_empty() else "Talk to a resident or visit a workplace · B Journal"
 	_waypoint_label.text = ""
 	if not waypoint.is_empty():
 		for candidate: Dictionary in interactions():
@@ -283,12 +319,15 @@ func current_planet() -> String:
 
 
 func current_settlement() -> Node3D:
+	if _online:
+		return _town_entries.get(_active_town_id, {}).get("settlement")
 	return moon_settlement if current_planet() == "moon" else earth_settlement
 
 
 func interactions() -> Array:
 	var settlement := current_settlement()
-	return settlement.get_interactions() if is_instance_valid(settlement) else []
+	return settlement.get_interactions() if is_instance_valid(settlement) \
+		and settlement.is_build_complete() else []
 
 
 func nearest_interaction() -> Dictionary:
@@ -312,15 +351,9 @@ func try_interact(player: MonkeyPlayer) -> bool:
 	if item.is_empty():
 		return false
 	selected_interaction = item
-	var page := "Overview"
-	match str(item.get("kind", "")):
-		"plot", "farm", "greenhouse": page = "Farms"
-		"market", "shop": page = "Market"
-		"citizen", "npc", "worker": page = "Crew"
-		"quest", "quest_board", "board": page = "Quests"
-		"solar", "oil_rig", "refinery", "facility", "industry": page = "Industry"
-		"cargo", "port", "freight": page = "Freight"
-	ui.open(page)
+	ui.open(item)
+	if tutorial:
+		tutorial.observe_interaction(str(item.get("id", "")))
 	return true
 
 
@@ -328,12 +361,32 @@ func open_board() -> void:
 	if Net.player_realm() == Net.PlayerRealm.TRANSIT:
 		return
 	selected_interaction.clear()
-	ui.open("Overview")
+	ui.open({})
 
 
 func request_action(kind: String, payload: Dictionary = {}) -> Dictionary:
-	if Net.active:
-		return {"ok": false, "message": "This saved society belongs to your offline career."}
+	if _online:
+		if not _pending_actions.is_empty():
+			return _notice_result(false, "Waiting for the town to finish your previous request.")
+		var town_id := str(payload.get("town_id", _active_town_id))
+		if town_id != _active_town_id or selected_interaction.is_empty() \
+				or not _target_in_range(str(selected_interaction.get("id", ""))):
+			return _notice_result(false, "Stay beside this person or workplace to act.")
+		var request := payload.duplicate(true)
+		request.erase("town_id")
+		request["source"] = str(selected_interaction.get("id", ""))
+		var result: Dictionary = _network.request_action(town_id, kind, request)
+		if result.get("pending", false):
+			_pending_actions[int(result.request)] = request
+			_pending_kind = kind
+			_pending_town = town_id
+			_pending_retry_at = Time.get_ticks_msec() + 4000
+		elif tutorial:
+			tutorial.observe_action(kind, request, result)
+		last_message = str(result.get("message", "Waiting for the town…"))
+		return result
+	payload = payload.duplicate(true)
+	payload.erase("town_id")
 	if Net.player_realm() == Net.PlayerRealm.TRANSIT:
 		return {"ok": false, "message": "Wait until your expedition lands."}
 	if kind in MANUAL_ACTIONS:
@@ -369,6 +422,8 @@ func request_action(kind: String, payload: Dictionary = {}) -> Dictionary:
 	last_message = str(result.get("message", result.get("reason", "")))
 	if bool(result.get("ok", false)):
 		save_progress()
+		if tutorial:
+			tutorial.observe_action(kind, payload, result)
 	return result
 
 
@@ -403,6 +458,15 @@ func nearby_fuel_vehicles() -> Array:
 
 
 func locate(target: String) -> void:
+	if _online and target.begins_with("town:"):
+		var town: Dictionary = _network.town_info(target.trim_prefix("town:"))
+		if not town.is_empty() and town.planet == current_planet():
+			var site: FrontierSite = _town_entries.get(town.id, {}).get("site")
+			var frame := FrontierTownLayout.world_frame(town, expedition.moon_world)
+			waypoint = {"label": town.name, "position": site.surface_point(3.8, -0.3, 0.8) \
+				if is_instance_valid(site) else frame.origin}
+			ui.close()
+			return
 	for candidate: Dictionary in interactions():
 		if str(candidate.get("id", "")) == target:
 			waypoint = candidate.duplicate()
@@ -440,6 +504,8 @@ func look_at_sky(direction: Vector3) -> void:
 
 
 func save_progress() -> bool:
+	if _online:
+		return _network.society_ready
 	if not persistence_enabled or not simulation or save_path.is_empty():
 		return false
 	var saved: bool = simulation.save_game(save_path)
@@ -450,3 +516,159 @@ func save_progress() -> bool:
 
 func _exit_tree() -> void:
 	save_progress()
+
+
+func _configure_online() -> void:
+	persistence_enabled = false
+	simulation_enabled = false
+	_network = Net.frontier_network
+	_network.state_changed.connect(_on_shared_state)
+	_network.traffic_changed.connect(_on_shared_traffic)
+	_network.action_finished.connect(_on_shared_result)
+	world.frontier = self
+	for town: Dictionary in _network.catalog:
+		_ensure_town_entry(town)
+	_activate_town("canopy_moon" if current_planet() == "moon" else "canopy_earth")
+	_build_ui()
+	last_message = "Shared towns · E meets one neighbor or workplace · claim an unowned town at its community board."
+	_sync_realm()
+	if world.local_player:
+		world.local_player.melee_mode = true
+		world.local_player.rig.set_melee_pose(false, false, 0.0, 0)
+
+
+func _ensure_town_entry(town: Dictionary) -> void:
+	if town.is_empty():
+		return
+	var id := str(town.id)
+	if _town_entries.has(id) or not _network.views.has(id):
+		return
+	var model: FrontierSim = load("res://scripts/frontier_remote_view.gd").new()
+	model.state = _network.views[id].duplicate(true)
+	var site := FrontierSite.new()
+	site.name = id
+	site.town_id = id
+	site.world = world
+	site.planet = str(town.planet)
+	site.moon = expedition.moon_world if town.planet == "moon" else null
+	(world if town.planet == "earth" else expedition.moon_world).add_child(site)
+	site.global_transform = FrontierTownLayout.world_frame(town, expedition.moon_world)
+	site.visible = false
+	site.process_mode = Node.PROCESS_MODE_DISABLED
+	var driver: Node3D
+	if town.planet == "earth":
+		driver = load("res://scripts/frontier_traffic.gd").new()
+		site.add_child(driver)
+		driver.configure(model, site, false, id)
+		driver.build()
+		if _network.traffic_views.has(id):
+			driver.apply_snapshot(_network.traffic_views[id])
+	var settlement: FrontierSettlement = load("res://scripts/frontier_settlement.gd").new()
+	settlement.configure(site, model, str(town.planet), town)
+	site.add_child(settlement)
+	_town_entries[id] = {"site": site, "settlement": settlement, "simulation": model, "traffic": driver}
+	_town_build_queue.append(id)
+	if id == "canopy_earth":
+		earth_site = site
+		earth_settlement = settlement
+	elif id == "canopy_moon":
+		moon_site = site
+		moon_settlement = settlement
+
+
+func _activate_town(town_id: String) -> void:
+	if not _town_entries.has(town_id):
+		return
+	if _active_town_id != town_id:
+		if is_instance_valid(ui) and ui.visible:
+			ui.close()
+		selected_interaction.clear()
+		waypoint.clear()
+	_active_town_id = town_id
+	simulation = _town_entries[town_id].simulation
+	if town_id in _town_build_queue:
+		_town_build_queue.erase(town_id)
+		_town_build_queue.push_front(town_id)
+
+
+func is_initial_ready() -> bool:
+	if not _online:
+		return true
+	var settlement := current_settlement()
+	return is_instance_valid(settlement) and settlement.is_build_complete()
+
+
+func build_entry_step() -> void:
+	if _town_build_queue.is_empty():
+		return
+	var id: String = _town_build_queue[0]
+	var entry: Dictionary = _town_entries[id]
+	if entry.settlement.build_step(2.0):
+		_town_build_queue.pop_front()
+		entry.site.visible = entry.site.planet == current_planet()
+		entry.site.process_mode = Node.PROCESS_MODE_INHERIT if entry.site.visible else Node.PROCESS_MODE_DISABLED
+
+
+func _process_online(delta: float) -> void:
+	if not _pending_actions.is_empty() and Time.get_ticks_msec() >= _pending_retry_at and Net.active:
+		# Retry the same sequence number if the server was busy. Its idempotency
+		# record returns the original result rather than charging twice.
+		var serial: int = _pending_actions.keys()[0]
+		_network.rpc_id(1, "sv_action", serial, _pending_town, _pending_kind, _pending_actions[serial])
+		_pending_retry_at = Time.get_ticks_msec() + 4000
+	_sync_realm()
+	build_entry_step()
+	_town_refresh -= delta
+	_refresh -= delta
+	if _town_refresh <= 0 and world.local_player and Net.player_realm() != Net.PlayerRealm.TRANSIT:
+		_town_refresh = 1.0
+		var nearest: String = _network.nearest_town(world.local_player.global_position, current_planet())
+		if not nearest.is_empty():
+			_activate_town(nearest)
+			_network.watch_town(nearest)
+		for id in _town_entries:
+			var entry: Dictionary = _town_entries[id]
+			var show: bool = entry.site.planet == current_planet() and entry.settlement.is_build_complete()
+			entry.site.visible = show
+			var close_enough := world.local_player.global_position.distance_to(entry.site.global_position) < 430.0
+			entry.site.process_mode = Node.PROCESS_MODE_INHERIT if show and close_enough else Node.PROCESS_MODE_DISABLED
+	if _refresh <= 0:
+		_refresh = 0.25
+		for vehicle: Vehicle in world.vehicles.values():
+			if vehicle.frontier_simulation != simulation:
+				vehicle.configure_frontier_fuel(simulation)
+		_refresh_overlays()
+		_update_sun()
+
+
+func _on_shared_state(town_id: String) -> void:
+	_ensure_town_entry(_network.town_info(town_id))
+	if _town_entries.has(town_id):
+		_town_entries[town_id].simulation.state = _network.views[town_id].duplicate(true)
+		_town_entries[town_id].settlement.town_info = _network.town_info(town_id)
+		if town_id == _active_town_id:
+			simulation = _town_entries[town_id].simulation
+
+
+func _on_shared_traffic(town_id: String, rows: Array) -> void:
+	var driver: Node3D = _town_entries.get(town_id, {}).get("traffic")
+	if is_instance_valid(driver):
+		driver.apply_snapshot(rows)
+
+
+func _on_shared_result(request: int, kind: String, result: Dictionary) -> void:
+	last_message = str(result.get("message", "The town has responded."))
+	if tutorial and _pending_actions.has(request):
+		tutorial.observe_action(kind, _pending_actions[request], result)
+	_pending_actions.erase(request)
+
+
+func current_town() -> Dictionary:
+	if _online:
+		return _network.town_info(_active_town_id)
+	return {"id": "offline_" + current_planet(), "name": "Crater Gardens" if current_planet() == "moon" else "Canopy Commons",
+		"planet": current_planet(), "is_owner": true, "claimed": true, "owner_name": "You"}
+
+
+func known_towns() -> Array:
+	return _network.catalog if _online else [current_town()]
