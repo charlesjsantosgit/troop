@@ -213,8 +213,7 @@ func _create_rocket(progressive := false) -> void:
 
 
 func _configure_rocket_route() -> void:
-	var earth_transform := Transform3D(Basis(Vector3.UP, PI),
-		_earth_launch_position())
+	var earth_transform := _earth_launch_transform()
 	var moon_local := moon_world.landing_transform()
 	var moon_transform := Transform3D(moon_world.global_basis * moon_local.basis,
 		moon_world.to_global(moon_local.origin))
@@ -580,8 +579,33 @@ func toggle_inventory() -> void:
 		show_notice("No backpack equipped. Lunar suits include a space backpack.")
 
 
-func try_interact(player: MonkeyPlayer) -> bool:
-	if player != world.local_player or rocket.is_in_transit():
+## Candidate consumed by World's shared physical-entry selector. The real hatch
+## point and this exact range are also what the rocket prompt presents.
+func rocket_interaction_candidate(player: MonkeyPlayer) -> Dictionary:
+	if not is_instance_valid(player) or not is_instance_valid(world) \
+			or player != world.local_player or not is_instance_valid(rocket) \
+			or rocket.is_in_transit() or player.vehicle or player.expedition_locked:
+		return {}
+	var phase := int(Net.expedition_state_snapshot().get("phase",
+		Net.RocketMissionPhase.EARTH_READY))
+	var realm := Net.player_realm()
+	if (realm == Net.PlayerRealm.EARTH and phase not in [
+			Net.RocketMissionPhase.EARTH_READY,
+			Net.RocketMissionPhase.SPLASHDOWN_RECOVERY]) \
+			or (realm == Net.PlayerRealm.MOON \
+			and phase != Net.RocketMissionPhase.MOON_READY) \
+			or realm == Net.PlayerRealm.TRANSIT:
+		return {}
+	var hatch := rocket.boarding_global_position()
+	var distance_squared := player.global_position.distance_squared_to(hatch)
+	if distance_squared > ROCKET_INTERACTION_RANGE * ROCKET_INTERACTION_RANGE:
+		return {}
+	return {"kind": "rocket", "target": rocket, "position": hatch,
+		"distance_squared": distance_squared}
+
+
+func try_rocket_interact(player: MonkeyPlayer) -> bool:
+	if rocket_interaction_candidate(player).is_empty():
 		return false
 	var phase := int(Net.expedition_state_snapshot().get("phase",
 		Net.RocketMissionPhase.EARTH_READY))
@@ -596,6 +620,20 @@ func try_interact(player: MonkeyPlayer) -> bool:
 	if _local_reboard_cooldown_remaining > 0.0 \
 			or _local_disembark_request_remaining > 0.0:
 		return true
+	if local_suit and Net.player_realm() == Net.PlayerRealm.MOON \
+			and local_suit.oxygen_fraction() < 0.98:
+		local_suit.refill_oxygen()
+		show_notice("Oxygen tanks refilled from the rocket life-support manifold.")
+		return true
+	if Net.request_rocket_board(true):
+		show_notice("Seat requested · %s launches when any crew member presses %s." % [
+			LAUNCH_KEY_NAME, LAUNCH_KEY_NAME])
+	return true
+
+
+func try_non_rocket_interact(player: MonkeyPlayer) -> bool:
+	if player != world.local_player or rocket.is_in_transit():
+		return false
 	if Net.player_realm() == Net.PlayerRealm.MOON \
 			and moon_world.cheese_shop \
 			and moon_world.cheese_shop.is_customer_in_range(player, SHOP_INTERACTION_RANGE):
@@ -610,18 +648,13 @@ func try_interact(player: MonkeyPlayer) -> bool:
 			else:
 				_request_colony_action(action, int(interaction.get("target", 0)))
 			return true
-	if player.global_position.distance_to(rocket.boarding_global_position()) \
-			> ROCKET_INTERACTION_RANGE:
-		return false
-	if local_suit and Net.player_realm() == Net.PlayerRealm.MOON \
-			and local_suit.oxygen_fraction() < 0.98:
-		local_suit.refill_oxygen()
-		show_notice("Oxygen tanks refilled from the rocket life-support manifold.")
-		return true
-	if Net.request_rocket_board(true):
-		show_notice("Seat requested · %s launches when any crew member presses %s." % [
-			LAUNCH_KEY_NAME, LAUNCH_KEY_NAME])
-	return true
+	return false
+
+
+## Compatibility entry point for focused expedition tests and older callers.
+## Gameplay routes through World's exact physical selector first.
+func try_interact(player: MonkeyPlayer) -> bool:
+	return try_rocket_interact(player) or try_non_rocket_interact(player)
 
 
 func request_launch() -> bool:
@@ -1577,17 +1610,30 @@ func _update_proximity_prompt() -> void:
 	if is_ui_open() or not world.local_player:
 		return
 	var player := world.local_player
-	if Net.player_realm() == Net.PlayerRealm.MOON and moon_world.cheese_shop \
-			and moon_world.cheese_shop.is_customer_in_range(player, SHOP_INTERACTION_RANGE):
-		_mission_label.text = "🧀 CRATER & CURD · E TO TRADE MOON CHEESE"
+	# Seated crew do not participate in the on-foot selector, but still need the
+	# complete disembark, launch and camera prompt while the parked cabin owns E.
+	if is_local_player_aboard():
+		_mission_label.text = "LUNAR ROCKET · E TO DISEMBARK · L TO LAUNCH\n4 PRESSURIZED CREW SEATS · C CABIN / EXTERIOR"
 		_mission_panel.visible = true
-	elif is_local_player_aboard() or player.global_position.distance_to(rocket.boarding_global_position()) \
-			<= ROCKET_INTERACTION_RANGE:
+		return
+	var physical_interaction: Dictionary = world.nearby_physical_interaction(player) \
+		if world.has_method("nearby_physical_interaction") else {}
+	# The shared selector also drives Player's E action and HUD queries. A chest
+	# or ordinary vehicle therefore suppresses the rocket/colony prompt rather
+	# than displaying two different actions for the same key.
+	if not physical_interaction.is_empty() \
+			and physical_interaction.get("kind", "") != "rocket":
+		return
+	if physical_interaction.get("kind", "") == "rocket":
 		var action := "E TO DISEMBARK" if is_local_player_aboard() \
 			else "E TO BOARD"
 		_mission_label.text = "LUNAR ROCKET · %s · L TO LAUNCH\n4 PRESSURIZED CREW SEATS · C CABIN / EXTERIOR" % action
 		if Net.player_realm() == Net.PlayerRealm.MOON and not is_local_player_aboard():
 			_mission_label.text = "LUNAR ROCKET · E BOARD / REFILL\n%s  CHEESE FARM  ·  J JOURNAL" % _lunar_bearing(moon_world.colony_world.interaction_position("farm", 0))
+		_mission_panel.visible = true
+	elif Net.player_realm() == Net.PlayerRealm.MOON and moon_world.cheese_shop \
+			and moon_world.cheese_shop.is_customer_in_range(player, SHOP_INTERACTION_RANGE):
+		_mission_label.text = "🧀 CRATER & CURD · E TO TRADE MOON CHEESE"
 		_mission_panel.visible = true
 	elif Net.player_realm() == Net.PlayerRealm.MOON:
 		var colony := moon_world.colony_world
@@ -1775,14 +1821,19 @@ func _reset_rocket_to_launchpad() -> void:
 
 
 func _earth_launch_position() -> Vector3:
+	return _earth_launch_transform().origin
+
+
+func _earth_launch_transform() -> Transform3D:
+	var xz := Vector2(92.0, 76.0)
+	var nominal := Vector3(xz.x, Gen.height(xz.x, xz.y), xz.y)
 	if Gen.has_method("rocket_launch_position"):
 		var generated: Variant = Gen.call("rocket_launch_position")
 		if generated is Vector3:
-			return generated + Vector3.UP \
-				* LunarRocket.ORIGIN_ABOVE_LANDING_SURFACE
-	var xz := Vector2(92.0, 76.0)
-	return Vector3(xz.x, Gen.height(xz.x, xz.y) \
-		+ LunarRocket.ORIGIN_ABOVE_LANDING_SURFACE, xz.y)
+			nominal = generated
+	return LunarRocket.grounded_landing_transform(nominal,
+		Basis(Vector3.UP, PI),
+		func(x: float, z: float) -> float: return Gen.height(x, z))
 
 
 func _ocean_splashdown_position() -> Vector3:

@@ -120,8 +120,113 @@ func run(owner: Node) -> void:
 	check(controller.simulation.state.inventories.player_earth==initial_bag
 		and controller.simulation.state.accounts.player==initial_cash,
 		"conversation, tutorial, and journal inputs never transact or reset player funds")
+	await _physical_entry_regression(nana)
 	await _market_fallback(nana,market)
 	await _finish()
+
+
+func _physical_entry_regression(nana: Node3D) -> void:
+	var world: World = main.world
+	var manager: ExpeditionManager = world.expedition_manager
+	var saved_nana_position := nana.global_position
+	var saved_model_position: Array = controller.simulation.state.citizens.nana.position.duplicate()
+	var vehicle_names := ["motorcycle", "jeep", "airboat", "jet"]
+	for kind in [Vehicle.Kind.BIKE, Vehicle.Kind.JEEP,
+			Vehicle.Kind.BOAT, Vehicle.Kind.JET]:
+		controller.ui.close()
+		var id := "interaction-entry-%s" % vehicle_names[kind]
+		var spawn := saved_nana_position + Vector3(0.0, 0.0, -0.7)
+		var ride := world.spawn_vehicle(kind, id, spawn, 0.0)
+		ride.freeze = true
+		await _frames(2)
+		var entry := ride.interaction_position()
+		var approach := entry + Vector3(1.2, 0.0, 0.0)
+		approach.y = Gen.height(approach.x, approach.z) + 0.15
+		player.admin_teleport(approach)
+		# Put a real social target inside the same interaction radius. The old
+		# dispatch order opened Nana and made every advertised vehicle inert.
+		nana.global_position = Vector3(approach.x, Gen.height(approach.x,
+			approach.z), approach.z + 0.8)
+		controller.simulation.state.citizens.nana.position = [
+			nana.global_position.x, nana.global_position.z]
+		player.supply_notice_remaining = 0.0
+		await _frames(3)
+		var social := controller.nearest_interaction()
+		var physical := world.nearby_physical_interaction(player)
+		controller._refresh_overlays()
+		manager._update_proximity_prompt()
+		main.hud._process(0.0)
+		check(social.get("id", "") == "nana"
+			and physical.get("kind", "") == "vehicle"
+			and physical.get("target") == ride
+			and world.nearby_vehicle(player) == ride,
+			"%s uses its actual seat entrance even beside an eligible NPC" \
+				% vehicle_names[kind])
+		check(not controller._prompt.visible and not manager._mission_panel.visible
+			and main.hud.hint.text.contains(ride.display_name()),
+			"%s HUD and overlays advertise only the physical E target" \
+				% vehicle_names[kind])
+		await _tap(KEY_E)
+		check(player.vehicle == ride and ride.driver == player
+			and not controller.ui.visible,
+			"one gameplay E tap boards the %s without opening Nana's menu" \
+				% vehicle_names[kind])
+		player.exit_vehicle(false)
+		world.vehicles.erase(id)
+		ride.queue_free()
+		await _frames(2)
+
+	# Manager presentation, local Player dispatch and server validation all use
+	# the same fitted Earth transform, including its terrain-following basis.
+	check(manager.rocket.earth_launch_transform.is_equal_approx(
+		Net._earth_rocket_transform()),
+		"rendered Earth rocket and authoritative hatch share one grounded transform")
+	controller.ui.close()
+	var hatch := manager.rocket.boarding_global_position()
+	var hatch_approach := hatch + manager.rocket.global_basis.x * 1.1
+	player.admin_teleport(hatch_approach)
+	nana.global_position = hatch + manager.rocket.global_basis.x * 1.6
+	controller.simulation.state.citizens.nana.position = [
+		nana.global_position.x, nana.global_position.z]
+	await _frames(3)
+	var rocket_target := world.nearby_physical_interaction(player)
+	controller._refresh_overlays()
+	manager._update_proximity_prompt()
+	check(controller.nearest_interaction().get("id", "") == "nana"
+		and rocket_target.get("kind", "") == "rocket"
+		and rocket_target.get("position", Vector3.INF).distance_to(
+			Net._rocket_boarding_position(Net.PlayerRealm.EARTH)) < 0.001
+		and not controller._prompt.visible and manager._mission_panel.visible
+		and manager._mission_label.text.contains("E TO BOARD"),
+		"rocket hatch prompt and action agree even when an NPC is also in range")
+	await _tap(KEY_E)
+	manager._update_proximity_prompt()
+	check(manager.is_local_player_aboard() and player.expedition_locked
+		and not controller.ui.visible and manager._mission_panel.visible
+		and manager._mission_label.text.contains("E TO DISEMBARK")
+		and manager._mission_label.text.contains("L TO LAUNCH")
+		and manager._mission_label.text.contains("C CABIN / EXTERIOR"),
+		"one gameplay E tap boards the rocket without a competing social action")
+	var left_rocket := manager.request_disembark()
+	await _frames(3)
+	check(left_rocket and not manager.is_local_player_aboard()
+		and not player.expedition_locked,
+		"rocket E lifecycle still disembarks without immediately reboarding")
+
+	# Production input deliberately goes neutral while any menu owns the cursor.
+	controller.ui.open(nana.interaction())
+	player.test_mode = false
+	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
+	Input.action_press("grab")
+	var blocked_input: Dictionary = player._gather()
+	Input.action_release("grab")
+	check(not bool(blocked_input.grab) and not bool(blocked_input.interact_just)
+		and player.vehicle == null and not manager.is_local_player_aboard(),
+		"an open menu blocks E before vehicle or rocket dispatch")
+	player.test_mode = true
+	controller.ui.close()
+	nana.global_position = saved_nana_position
+	controller.simulation.state.citizens.nana.position = saved_model_position
 
 func _market_fallback(nana: Node3D,market: Dictionary) -> void:
 	controller.ui.close()

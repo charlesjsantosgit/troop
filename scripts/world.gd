@@ -810,7 +810,7 @@ func is_supply_hut_opened(hut_id: String) -> bool:
 ## Nearest unopened supply chest within the hut's interaction radius. This is a
 ## direct registry lookup rather than a physics overlap, so outer-ring collision
 ## budgeting can never make an interactable flicker for one frame.
-func nearby_supply_chest(player: Node3D) -> SupplyHut:
+func _raw_nearby_supply_chest(player: Node3D) -> SupplyHut:
 	if not player or not is_instance_valid(player):
 		return null
 	var nearest: SupplyHut
@@ -837,11 +837,27 @@ func nearby_supply_chest(player: Node3D) -> SupplyHut:
 	return nearest
 
 
+## Public HUD query. A chest deliberately keeps its established precedence
+## over machines while its latch is within reach; try_physical_interaction()
+## consumes that exact same target.
+func nearby_supply_chest(player: Node3D) -> SupplyHut:
+	if player is MonkeyPlayer and ((player as MonkeyPlayer).vehicle \
+			or (player as MonkeyPlayer).expedition_locked):
+		return null
+	return _raw_nearby_supply_chest(player)
+
+
 ## Claim and animate the nearest chest. Solo play preserves the immediate path;
 ## multiplayer waits for the host's winning claim before mutating inventory.
 func try_open_supply_chest(player: Node3D) -> bool:
 	var hut := nearby_supply_chest(player)
 	if not hut:
+		return false
+	return _open_supply_chest_target(player, hut)
+
+
+func _open_supply_chest_target(player: Node3D, hut: SupplyHut) -> bool:
+	if not is_instance_valid(hut) or hut.is_queued_for_deletion():
 		return false
 	if opened_supply_huts.has(hut.hut_id):
 		hut.set_opened(true, false)
@@ -867,7 +883,7 @@ func try_expedition_interact(player: MonkeyPlayer) -> bool:
 		return true
 	return expedition_manager != null \
 		and is_instance_valid(expedition_manager) \
-		and expedition_manager.try_interact(player)
+		and expedition_manager.try_non_rocket_interact(player)
 
 
 func _on_supply_chest_claimed(hut_id: String, claimant_id: int) -> void:
@@ -1036,7 +1052,7 @@ func vehicle_by_id(vid: String) -> Vehicle:
 
 
 ## Nearest enterable vehicle in arm's reach — a registry lookup like chests.
-func nearby_vehicle(player: Node3D) -> Vehicle:
+func _raw_nearby_vehicle(player: Node3D) -> Vehicle:
 	if not player or not is_instance_valid(player):
 		return null
 	var nearest: Vehicle = null
@@ -1062,11 +1078,73 @@ func nearby_vehicle(player: Node3D) -> Vehicle:
 	return nearest
 
 
+## One entry selector shared by Player, HUD and interaction overlays. Supply
+## chests retain their explicit HUD priority. Otherwise the closest real entry
+## point wins between an ordinary vehicle seat and the rocket hatch.
+func nearby_physical_interaction(player: Node3D) -> Dictionary:
+	if not player or not is_instance_valid(player):
+		return {}
+	if player is MonkeyPlayer and ((player as MonkeyPlayer).vehicle \
+			or (player as MonkeyPlayer).expedition_locked):
+		return {}
+	var hut := _raw_nearby_supply_chest(player)
+	if hut:
+		var latch := hut.chest_interaction_position()
+		return {"kind": "supply_chest", "target": hut, "position": latch,
+			"distance_squared": player.global_position.distance_squared_to(latch)}
+	var nearest: Dictionary = {}
+	var ride := _raw_nearby_vehicle(player)
+	if ride:
+		var seat := ride.interaction_position()
+		nearest = {"kind": "vehicle", "target": ride, "position": seat,
+			"distance_squared": player.global_position.distance_squared_to(seat)}
+	if expedition_manager and is_instance_valid(expedition_manager) \
+			and expedition_manager.has_method("rocket_interaction_candidate"):
+		var rocket_candidate: Dictionary = expedition_manager.rocket_interaction_candidate(player)
+		if not rocket_candidate.is_empty() and (nearest.is_empty() \
+				or float(rocket_candidate.get("distance_squared", INF)) \
+				< float(nearest.get("distance_squared", INF))):
+			nearest = rocket_candidate
+	return nearest
+
+
+func nearby_vehicle(player: Node3D) -> Vehicle:
+	var interaction := nearby_physical_interaction(player)
+	return interaction.get("target") as Vehicle \
+		if interaction.get("kind", "") == "vehicle" else null
+
+
+## Dispatch the already selected physical target once. Even if an online claim
+## loses a race on the host, the physical target still consumes this tap instead
+## of unexpectedly opening a social menu behind it.
+func try_physical_interaction(player: Node3D) -> bool:
+	var interaction := nearby_physical_interaction(player)
+	if interaction.is_empty():
+		return false
+	match str(interaction.get("kind", "")):
+		"supply_chest":
+			_open_supply_chest_target(player,
+				interaction.get("target") as SupplyHut)
+		"vehicle":
+			_enter_vehicle_target(player, interaction.get("target") as Vehicle)
+		"rocket":
+			if expedition_manager and is_instance_valid(expedition_manager):
+				expedition_manager.try_rocket_interact(player)
+	return true
+
+
 ## Mount the nearest free vehicle. Solo mounts instantly; online asks the host
 ## for the seat claim and mounts when it is granted.
 func try_enter_vehicle(player: Node3D) -> bool:
 	var v := nearby_vehicle(player)
 	if v == null or not player.has_method("enter_vehicle"):
+		return false
+	return _enter_vehicle_target(player, v)
+
+
+func _enter_vehicle_target(player: Node3D, v: Vehicle) -> bool:
+	if not is_instance_valid(v) or not v.can_enter(player) \
+			or not player.has_method("enter_vehicle"):
 		return false
 	if not Net.active:
 		player.call("enter_vehicle", v)

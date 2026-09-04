@@ -281,15 +281,17 @@ func _refresh_overlays() -> void:
 	if not is_instance_valid(world.local_player):
 		return
 	var active := Net.player_realm() != Net.PlayerRealm.TRANSIT
+	var physical_interaction: Dictionary = world.nearby_physical_interaction(
+		world.local_player) if world.has_method("nearby_physical_interaction") else {}
 	_status.visible = active and not ui.visible
-	_prompt.visible = active and not ui.visible
+	_prompt.visible = active and not ui.visible and physical_interaction.is_empty()
 	_waypoint_label.visible = false # The world-space marker already gives name and distance.
 	_waypoint_marker.visible = active and not ui.visible and not waypoint.is_empty()
 	_sky_credit.visible = Net.player_realm() == Net.PlayerRealm.MOON and not ui.visible
 	var credits := int(simulation.state.get("accounts", {}).get("player", 0))
 	_status.text = "%s  ·  %s credits  ·  B Journal" % [
 		str(current_town().get("name", "Town")).to_upper(), str(credits)]
-	var interaction := nearest_interaction()
+	var interaction := nearest_interaction() if physical_interaction.is_empty() else {}
 	_prompt.text = interaction_prompt(interaction)
 	_focus_resident(interaction if active and not ui.visible else {})
 	_waypoint_label.text = ""

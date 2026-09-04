@@ -7,6 +7,8 @@ extends Control
 
 signal closed
 
+const MenuTheme := preload("res://scripts/menu_theme.gd")
+
 const OFFERS := [
 	{"icon": "🍌🔫", "label": "12 Banana Rounds", "cost": 2, "kind": 0, "amount": 12},
 	{"icon": "🐚", "label": "8 Shotgun Shells", "cost": 3, "kind": 1, "amount": 8},
@@ -20,6 +22,8 @@ var player: MonkeyPlayer
 var _balance_label: Label
 var _offer_buttons: Array[Button] = []
 var _patter_label: Label
+var _receipt: Label
+var _panel: PanelContainer
 var _rng := RandomNumberGenerator.new()
 
 const PATTER := [
@@ -34,8 +38,10 @@ const PATTER := [
 func open_for(customer: MonkeyPlayer) -> void:
 	player = customer
 	visible = true
-	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
+	if DisplayServer.get_name() != "headless":
+		Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
 	_refresh()
+	_receipt.text = "Choose a supply below. Purchases go straight into your carried supplies."
 	_patter_label.text = "“%s”" % PATTER[_rng.randi() % PATTER.size()]
 
 
@@ -47,100 +53,84 @@ func close() -> void:
 
 
 func _ready() -> void:
+	theme = MenuTheme.build()
 	set_anchors_preset(Control.PRESET_FULL_RECT)
 	mouse_filter = Control.MOUSE_FILTER_STOP
 	visible = false
 	var scrim := ColorRect.new()
-	scrim.color = Color(0.03, 0.05, 0.03, 0.5)
+	scrim.color = Color(0.025, 0.045, 0.04, 0.16)
 	scrim.set_anchors_preset(Control.PRESET_FULL_RECT)
 	add_child(scrim)
-	var center := CenterContainer.new()
-	center.set_anchors_preset(Control.PRESET_FULL_RECT)
-	add_child(center)
-
-	var panel := PanelContainer.new()
-	var style := StyleBoxFlat.new()
-	style.bg_color = Color(0.09, 0.07, 0.035, 0.97)
-	style.border_color = Color(0.95, 0.78, 0.28)
-	style.set_border_width_all(3)
-	style.set_corner_radius_all(18)
-	style.set_content_margin_all(20)
-	panel.add_theme_stylebox_override("panel", style)
-	panel.custom_minimum_size = Vector2(520, 0)
-	center.add_child(panel)
-
+	_panel = PanelContainer.new()
+	_panel.minimum_size_changed.connect(_resize_panel, CONNECT_DEFERRED)
+	_panel.add_theme_stylebox_override("panel", MenuTheme.panel())
+	add_child(_panel)
 	var column := VBoxContainer.new()
-	column.add_theme_constant_override("separation", 10)
-	panel.add_child(column)
-
-	# Header: hand-drawn villager portrait + name + banana balance
+	column.add_theme_constant_override("separation", 14)
+	_panel.add_child(column)
 	var header := HBoxContainer.new()
-	header.add_theme_constant_override("separation", 12)
+	column.add_child(header)
 	var portrait := VillagerPortrait.new()
-	portrait.custom_minimum_size = Vector2(74, 74)
+	portrait.custom_minimum_size = Vector2(64, 64)
 	header.add_child(portrait)
 	var titles := VBoxContainer.new()
-	var name_label := Label.new()
-	name_label.text = "OOKBAR THE PROVISIONER"
-	name_label.add_theme_font_size_override("font_size", 21)
-	name_label.add_theme_color_override("font_color", Color(1.0, 0.84, 0.3))
-	titles.add_child(name_label)
-	_patter_label = Label.new()
-	_patter_label.add_theme_font_size_override("font_size", 13)
-	_patter_label.add_theme_color_override("font_color",
-		Color(0.82, 0.78, 0.62))
-	_patter_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	_patter_label.custom_minimum_size = Vector2(280, 0)
-	titles.add_child(_patter_label)
+	titles.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	titles.add_theme_constant_override("separation", 4)
 	header.add_child(titles)
-	var spacer := Control.new()
-	spacer.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	header.add_child(spacer)
-	_balance_label = Label.new()
-	_balance_label.add_theme_font_size_override("font_size", 24)
-	_balance_label.add_theme_color_override("font_color",
-		Color(1.0, 0.9, 0.35))
+	titles.add_child(MenuTheme.label("OOKBAR / PROVISIONER", 12, MenuTheme.ACCENT))
+	titles.add_child(MenuTheme.label("Field supplies", 28))
+	_patter_label = MenuTheme.label("", 14, MenuTheme.MUTED)
+	titles.add_child(_patter_label)
+	_balance_label = MenuTheme.label("", 20, MenuTheme.ACCENT)
+	_balance_label.autowrap_mode = TextServer.AUTOWRAP_OFF
+	_balance_label.size_flags_horizontal = Control.SIZE_SHRINK_END
+	_balance_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
 	header.add_child(_balance_label)
-	column.add_child(header)
-
-	var rule := ColorRect.new()
-	rule.color = Color(0.95, 0.78, 0.28, 0.35)
-	rule.custom_minimum_size = Vector2(0, 2)
-	column.add_child(rule)
-
-	# Offer grid
-	var grid := GridContainer.new()
-	grid.columns = 2
-	grid.add_theme_constant_override("h_separation", 10)
-	grid.add_theme_constant_override("v_separation", 10)
+	var scroll := ScrollContainer.new()
+	scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+	scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	scroll.follow_focus = true
+	column.add_child(scroll)
+	var offers := VBoxContainer.new()
+	offers.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	scroll.add_child(offers)
 	for index in range(OFFERS.size()):
 		var offer: Dictionary = OFFERS[index]
-		var card := Button.new()
-		card.custom_minimum_size = Vector2(232, 58)
-		card.text = "%s  %s\n🍌 %d" % [offer.icon, offer.label, offer.cost]
-		card.add_theme_font_size_override("font_size", 14)
-		var card_style := StyleBoxFlat.new()
-		card_style.bg_color = Color(0.13, 0.11, 0.05)
-		card_style.border_color = Color(0.62, 0.5, 0.22)
-		card_style.set_border_width_all(1)
-		card_style.set_corner_radius_all(12)
-		card_style.set_content_margin_all(9)
-		card.add_theme_stylebox_override("normal", card_style)
-		var hover := card_style.duplicate()
-		hover.bg_color = Color(0.22, 0.18, 0.07)
-		hover.border_color = Color(1.0, 0.84, 0.3)
-		card.add_theme_stylebox_override("hover", hover)
-		var offer_index := index
-		card.pressed.connect(func() -> void: _buy(offer_index))
-		grid.add_child(card)
-		_offer_buttons.append(card)
-	column.add_child(grid)
-
+		var row := HBoxContainer.new()
+		row.add_theme_constant_override("separation", 16)
+		offers.add_child(row)
+		var description := VBoxContainer.new()
+		description.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		description.add_theme_constant_override("separation", 2)
+		row.add_child(description)
+		description.add_child(MenuTheme.label(str(offer.label), 17))
+		var detail := "Random ammunition, with a chance of a bandage." if int(offer.kind) == -2 else "Added to your carried bandages." if int(offer.kind) == -1 else "Added to your weapon's reserve ammunition."
+		description.add_child(MenuTheme.label(detail, 13, MenuTheme.MUTED))
+		var button := Button.new()
+		button.text = "Buy · %d bananas" % int(offer.cost)
+		button.custom_minimum_size = Vector2(170, 46)
+		MenuTheme.style_button(button)
+		button.pressed.connect(func() -> void: _buy(index))
+		row.add_child(button)
+		_offer_buttons.append(button)
+	_receipt = MenuTheme.label("Choose a supply below. Purchases go straight into your carried supplies.", 14, MenuTheme.MUTED)
+	column.add_child(_receipt)
 	var leave := Button.new()
-	leave.text = "WAVE GOODBYE  ·  ESC"
-	leave.add_theme_font_size_override("font_size", 13)
+	leave.text = "Done trading · Esc"
+	MenuTheme.style_button(leave)
 	leave.pressed.connect(close)
 	column.add_child(leave)
+	get_viewport().size_changed.connect(_resize_panel)
+	_resize_panel()
+
+
+func _resize_panel() -> void:
+	if not _panel:
+		return
+	var screen := get_viewport_rect().size
+	var wanted := Vector2(minf(560, screen.x - 80), minf(520, screen.y - 80))
+	_panel.size = wanted
+	_panel.position = (screen - wanted) * 0.5
 
 
 func _input(event: InputEvent) -> void:
@@ -158,10 +148,11 @@ func bananas() -> int:
 
 
 func _refresh() -> void:
-	_balance_label.text = "🍌 %d" % bananas()
+	_balance_label.text = "%d bananas" % bananas()
 	for index in range(_offer_buttons.size()):
 		_offer_buttons[index].disabled = \
 			bananas() < int(OFFERS[index].cost)
+		_offer_buttons[index].tooltip_text = "Need %d more bananas." % maxi(int(OFFERS[index].cost) - bananas(), 0) if _offer_buttons[index].disabled else "Buy %s" % OFFERS[index].label
 
 
 func _buy(index: int) -> void:
@@ -174,6 +165,7 @@ func _buy(index: int) -> void:
 		return
 	Net.scores[Net.local_id()] = bananas() - cost
 	Net.score_changed.emit()
+	_receipt.text = "Purchased %s for %d bananas." % [str(offer.label), cost]
 	var kind := int(offer.kind)
 	if kind >= 0:
 		player.receive_supply_loot(kind, int(offer.amount), 0)

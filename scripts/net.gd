@@ -1499,20 +1499,28 @@ func _rocket_boarding_in_range(peer_id: int, realm: int) -> bool:
 
 
 func _rocket_boarding_position(realm: int) -> Vector3:
-	var pad := _earth_rocket_position() if realm == PlayerRealm.EARTH \
-		else Vector3(MoonWorld.LANDING_XZ.x, MOON_WORLD_ORIGIN_Y, MoonWorld.LANDING_XZ.y)
+	if realm == PlayerRealm.EARTH:
+		return _earth_rocket_transform() * LunarRocket.BOARDING_LOCAL_POSITION
+	var pad := Vector3(MoonWorld.LANDING_XZ.x, MOON_WORLD_ORIGIN_Y, MoonWorld.LANDING_XZ.y)
 	var hatch_from_pad := LunarRocket.BOARDING_LOCAL_POSITION \
 		+ Vector3.UP * LunarRocket.ORIGIN_ABOVE_LANDING_SURFACE
 	return pad + Basis(Vector3.UP, PI) * hatch_from_pad
 
 
 func _earth_rocket_position() -> Vector3:
+	var contact := _earth_rocket_transform()
+	return contact.origin - contact.basis.y * LunarRocket.ORIGIN_ABOVE_LANDING_SURFACE
+
+
+func _earth_rocket_transform() -> Transform3D:
+	var xz := Vector2(92.0, 76.0)
+	var nominal := Vector3(xz.x, Gen.height(xz.x, xz.y), xz.y)
 	if Gen.has_method("rocket_launch_position"):
 		var generated: Variant = Gen.call("rocket_launch_position")
 		if generated is Vector3 and _finite_vec(generated):
-			return generated
-	var xz := Vector2(92.0, 76.0)
-	return Vector3(xz.x, Gen.height(xz.x, xz.y) + 2.0, xz.y)
+			nominal = generated
+	return LunarRocket.grounded_landing_transform(nominal, Basis(Vector3.UP, PI),
+		func(x: float, z: float) -> float: return Gen.height(x, z))
 
 
 func _broadcast_expedition_state() -> void:

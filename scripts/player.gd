@@ -308,6 +308,15 @@ func _physics_process(dt: float) -> void:
 	if vehicle:
 		_st_vehicle(dt, inp)
 		return
+	# One physical target owns E for the complete tick. World resolves the
+	# actual chest latch, vehicle seat or rocket hatch before social menus, so a
+	# nearby citizen cannot steal a vehicle prompt and one tap cannot both open a
+	# chest and mount the machine beside it.
+	if inp.interact_just and state != S.SWING and is_local and world \
+			and world.has_method("try_physical_interaction") \
+			and world.try_physical_interaction(self):
+		inp.interact_just = false
+		inp.grab = false
 	if inp.interact_just and state != S.SWING and is_local and world \
 			and world.has_method("try_expedition_interact") \
 			and world.try_expedition_interact(self):
@@ -317,17 +326,6 @@ func _physics_process(dt: float) -> void:
 			and world.has_method("try_open_villager_trade") \
 			and world.try_open_villager_trade(self):
 		inp.interact_just = false
-		inp.grab = false
-	if inp.interact_just and state != S.SWING and world \
-			and world.has_method("try_open_supply_chest") \
-			and world.try_open_supply_chest(self):
-		# E remains vine grab everywhere else; a chest in arm's reach wins only
-		# for this tap so one input can stay cleanly contextual.
-		inp.grab = false
-	if inp.interact_just and state != S.SWING and world \
-			and world.has_method("try_enter_vehicle") \
-			and world.try_enter_vehicle(self):
-		# Mounting wins this tap the same way a chest does.
 		inp.grab = false
 	if inp.jump_just:
 		buffer_t = JUMP_BUFFER

@@ -138,6 +138,16 @@ jobs:
           python3 tests/run_join_entry.py --godot "$GODOT_BIN" --project . \
             --headless --warm-restart --max-frame-gap-ms 400
 
+      - name: Verify compact menus and terrain contact
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$GODOT_BIN" --headless --path . --script res://tests/menu_redesign_capture.gd
+          "$GODOT_BIN" --headless --path . --script res://tests/settings_menu_capture.gd
+          "$GODOT_BIN" --headless --path . --quit-after 3000 -- rocketgroundingtest \
+            2>&1 | tee "$RUNNER_TEMP/rocketgroundingtest.log"
+          grep -Eq '^ROCKETGROUNDINGTEST [0-9]+/[0-9]+ PASS$' "$RUNNER_TEMP/rocketgroundingtest.log"
+
       - name: Run planet, atlas, and lunar expedition regressions
         shell: bash
         run: |

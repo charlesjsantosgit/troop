@@ -1,5 +1,36 @@
 # TROOP changelog
 
+## 0.7.0 — MENUS & BOARDING
+
+### Menus with a clear purpose
+
+- Separate online play, the saved local career and practice destinations. Reach
+  settings, controls, player name and camera preferences directly from the title.
+- Use compact in-game windows so the town stays visible around conversations,
+  trading, inventory, the journal, pause menu and world map. Long pages scroll;
+  close controls and keyboard navigation remain reachable at small window sizes.
+- Put each resident's useful action first. Search and filter market goods, inspect
+  cargo counts and capacity, and find current tutorials, contracts and directions
+  in the journal. Lunar markets, colony work, contracts and exploration have
+  separate pages. Graphics, audio and controls share one readable settings layout.
+
+### Reliable boarding and grounded rockets
+
+- Use one contextual target for the nearby prompt and E action. Rockets and
+  vehicles no longer lose their advertised interaction to unrelated NPC menus.
+- Fit the Earth rocket's physical landing feet to the final terrain after town
+  and road grading. The server checks the same grounded boarding hatch position.
+  Launches, returns and later boarding reuse that contact frame.
+
+### Updating together
+
+- All clients and the public server use **0.7.0 / protocol 13**. Bootstrap **3**
+  supports the signed content update; versions older than **0.4.10** need the full
+  installer. Existing local saves and server town ownership are preserved.
+- Native visual verification uses an Apple M4. Windows runtime and other Mac
+  hardware are not covered by those results; existing renderer shutdown warnings
+  remain under investigation.
+
 ## 0.6.2 — NPC HEIGHTS & CONVERSATIONS
 
 ### Consistent character heights

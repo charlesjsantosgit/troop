@@ -47,6 +47,8 @@ const HULL_BOTTOM := -9.0
 const ENGINE_EXIT_Y := -10.6
 const ORIGIN_ABOVE_LANDING_SURFACE := 13.0
 const LANDING_STRUT_TRAVEL := 0.85
+const LANDING_FOOT_RADIUS := 5.55
+const LANDING_FOOT_SIZE := Vector3(2.0, 0.24, 1.5)
 const LANDING_PAD_RADIUS := 7.5
 const LANDING_GEAR_DEPLOY_START := 51.0
 const LANDING_GEAR_DEPLOY_END := 55.0
@@ -414,6 +416,75 @@ static func physical_bounds() -> AABB:
 		Vector3(13.0, HULL_TOP + ORIGIN_ABOVE_LANDING_SURFACE + LANDING_STRUT_TRAVEL, 13.0))
 
 
+## Fit the settled, fully compressed landing feet to the final terrain. The
+## generator's authored pad height can differ after town/road grading. Sharing
+## this contact frame with the authority keeps the visible hatch and its range
+## check at the same position on every client.
+static func grounded_landing_transform(nominal_surface: Vector3,
+		heading: Basis, height_at: Callable) -> Transform3D:
+	var frame := Transform3D(heading.orthonormalized(), nominal_surface
+		+ heading.y.normalized() * ORIGIN_ABOVE_LANDING_SURFACE)
+	var soles := landing_sole_points()
+	for iteration in range(4):
+		var samples: Array[Vector3] = []
+		var mean := Vector3.ZERO
+		for sole in soles:
+			var point := frame * sole
+			point.y = float(height_at.call(point.x, point.z))
+			samples.append(point)
+			mean += point
+		mean /= float(samples.size())
+		var xx := 0.0
+		var xz := 0.0
+		var zz := 0.0
+		var xy := 0.0
+		var zy := 0.0
+		for point in samples:
+			var offset := point - mean
+			xx += offset.x * offset.x
+			xz += offset.x * offset.z
+			zz += offset.z * offset.z
+			xy += offset.x * offset.y
+			zy += offset.z * offset.y
+		var determinant := xx * zz - xz * xz
+		if absf(determinant) < 0.000001:
+			break
+		var slope_x := (xy * zz - zy * xz) / determinant
+		var slope_z := (zy * xx - xy * xz) / determinant
+		var up := Vector3(-slope_x, 1.0, -slope_z).normalized()
+		frame.basis = _basis_with_up(up, heading.z)
+		var center_height := mean.y + slope_x * (nominal_surface.x - mean.x) \
+			+ slope_z * (nominal_surface.z - mean.z)
+		frame.origin = Vector3(nominal_surface.x, center_height, nominal_surface.z) \
+			+ up * ORIGIN_ABOVE_LANDING_SURFACE
+	# Account for curvature and small grading irregularities at every actual
+	# sole corner. A vertical correction preserves all sampled X/Z positions.
+	var contact_lift := -INF
+	for sole in soles:
+		var point := frame * sole
+		contact_lift = maxf(contact_lift, float(height_at.call(point.x, point.z)) - point.y)
+	frame.origin.y += contact_lift
+	return frame
+
+
+static func landing_sole_points() -> Array[Vector3]:
+	var points: Array[Vector3] = []
+	for direction in _landing_directions():
+		var yaw := Basis(Vector3.UP, atan2(direction.x, direction.z))
+		var center := direction * LANDING_FOOT_RADIUS \
+			+ Vector3.DOWN * ORIGIN_ABOVE_LANDING_SURFACE
+		for x in [-0.5, 0.5]:
+			for z in [-0.5, 0.5]:
+				points.append(center + yaw * Vector3(x * LANDING_FOOT_SIZE.x,
+					0.0, z * LANDING_FOOT_SIZE.z))
+	return points
+
+
+static func _landing_directions() -> Array[Vector3]:
+	return [Vector3(1, 0, 1).normalized(), Vector3(-1, 0, 1).normalized(),
+		Vector3(1, 0, -1).normalized(), Vector3(-1, 0, -1).normalized()]
+
+
 func crew_equipment(peer_id: int) -> Dictionary:
 	for member in crew:
 		if int(member.peer_id) == peer_id:
@@ -775,8 +846,8 @@ func _update_landing_mechanisms(pose: Dictionary) -> void:
 		var direction: Vector3 = leg.direction
 		var mount := direction * 3.38 + Vector3.DOWN * 6.3
 		var stowed_foot := direction * 3.52 + Vector3.DOWN * 8.2
-		var deployed_foot := direction * 5.55 \
-			+ Vector3.DOWN * (ORIGIN_ABOVE_LANDING_SURFACE - 0.12 + extension)
+		var deployed_foot := direction * LANDING_FOOT_RADIUS \
+			+ Vector3.DOWN * (ORIGIN_ABOVE_LANDING_SURFACE - LANDING_FOOT_SIZE.y * 0.5 + extension)
 		var foot_position := stowed_foot.lerp(deployed_foot, landing_gear_deployment)
 		var knee := mount.lerp(foot_position, 0.56)
 		_pose_landing_segment(leg.arm, mount, knee)
@@ -1579,9 +1650,7 @@ func _build_access_ladder(exterior: Node3D) -> void:
 
 
 func _build_landing_mechanisms() -> void:
-	for raw_direction in [Vector3(1, 0, 1), Vector3(-1, 0, 1),
-			Vector3(1, 0, -1), Vector3(-1, 0, -1)]:
-		var direction: Vector3 = raw_direction.normalized()
+	for direction in _landing_directions():
 		var index := landing_gear.size() + 1
 		var arm := _add_mesh("LandingStrut%d" % index, _landing_strut_mesh,
 			Vector3.ZERO, _dark_material)
@@ -1589,7 +1658,7 @@ func _build_landing_mechanisms() -> void:
 			Vector3.ZERO, _gold_material)
 		var brace := _add_mesh("LandingBrace%d" % index, _landing_piston_mesh,
 			Vector3.ZERO, _dark_material)
-		var foot_size := Vector3(2.0, 0.24, 1.5)
+		var foot_size := LANDING_FOOT_SIZE
 		var foot := _add_box("LandingFoot%d" % index, foot_size,
 			Vector3.ZERO, _dark_material)
 		var shape := BoxShape3D.new()
