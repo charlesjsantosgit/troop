@@ -8,7 +8,7 @@ TROOP has two update paths:
   `_init()`, before any other autoload or scene. A staged pack that does not
   survive the next boot's stability checkpoint is rolled back automatically.
 - Godot engine, updater-bootstrap, native-library, signing, icon, or
-  `project.godot` changes require the full Windows installer or macOS disk
+  non-version `project.godot` changes require the full Windows installer or macOS disk
   image. A full installer is also the recovery path if a content update cannot
   load.
 
