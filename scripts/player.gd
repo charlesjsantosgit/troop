@@ -52,7 +52,7 @@ const SWIM_SPEED := 4.8
 const SWIM_DEPTH := 0.85      # chest-deep water floats the monkey into a swim
 const SKID_TIME := 0.24
 const SKID_DECEL := 26.0
-const HAND_H := 1.05          # grip point height above the feet (arm reach)
+const HAND_H := (1.05 - MonkeyRig.REST_SOLE_Y) * MonkeyRig.PLAYER_SCALE
 const MIN_ROPE := 2.2
 const REEL_SPEED := 5.0
 const WHEEL_REEL_STEP := 0.65
@@ -199,14 +199,15 @@ var _healing_event_mask := 0
 
 
 func _ready() -> void:
+	var stature := MonkeyRig.npc_height(display_name) if is_ai else MonkeyRig.PLAYER_HEIGHT
 	var cs := CollisionShape3D.new()
 	var cap := CapsuleShape3D.new()
 	# capsule bottom sits exactly at the node origin (= the rig's feet),
 	# so the monkey stands flush on terrain, canopies, branches and rocks
 	cap.radius = 0.26
-	cap.height = 1.0
+	cap.height = stature
 	cs.shape = cap
-	cs.position = Vector3(0, 0.5, 0)
+	cs.position = Vector3(0, stature * 0.5, 0)
 	add_child(cs)
 	_collision_shape = cs
 	# stick to rolling terrain at gallop speed instead of launching off
@@ -229,6 +230,7 @@ func _ready() -> void:
 
 	rig = MonkeyRig.new()
 	rig.setup(display_name, is_ai)
+	rig.set_standing_height(stature)
 	add_child(rig)
 	# Combat zones follow the visible skeleton. Keeping these directly under the
 	# CharacterBody left an upright ghost head/torso during gallops, swimming and
@@ -476,7 +478,8 @@ func _flat_facing() -> Vector3:
 
 
 func hand_pos() -> Vector3:
-	return global_position + up_direction * HAND_H
+	return global_position + up_direction * HAND_H \
+		* (rig.standing_height / MonkeyRig.PLAYER_HEIGHT if rig else 1.0)
 
 
 ## Crosshair ray for vine targeting: camera position + full 3D look direction.
@@ -996,7 +999,8 @@ func begin_defeat(hit_zone := "body", impact_impulse := Vector3.ZERO) -> void:
 		death_ragdoll = MonkeyRagdoll.new()
 		death_ragdoll.configure(display_name, global_position,
 			rig.yaw_angle() if rig else rotation.y, death_velocity,
-			impact_impulse, hit_zone == "head", global_basis)
+			impact_impulse, hit_zone == "head", global_basis,
+			rig.standing_height if rig else MonkeyRig.PLAYER_HEIGHT)
 		spawn_parent.add_child(death_ragdoll)
 		if cam:
 			cam.begin_death_view(death_ragdoll.follow_target())

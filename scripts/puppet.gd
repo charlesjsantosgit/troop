@@ -112,6 +112,8 @@ func _ready() -> void:
 
 	rig = MonkeyRig.new()
 	rig.setup(display_name, true)
+	rig.set_standing_height(MonkeyRig.npc_height(display_name) if peer_id < 0 \
+		else MonkeyRig.PLAYER_HEIGHT)
 	add_child(rig)
 	# Match projectile/scope targeting to the replica's animated anatomy.
 	body_hitbox.reparent(rig.torso_p, false)
@@ -478,7 +480,7 @@ func begin_defeat(pos: Vector3, yaw: float, death_velocity: Vector3,
 			+ Vector3(0.0, Net.MOON_WORLD_ORIGIN_Y, 0.0)
 		death_basis = MoonWorld.surface_basis(pos - center)
 	death_ragdoll.configure(display_name, pos, yaw, death_velocity, impulse,
-		headshot, death_basis)
+		headshot, death_basis, rig.standing_height if rig else MonkeyRig.PLAYER_HEIGHT)
 	get_parent().add_child(death_ragdoll)
 	defeated_visual = true
 	_defeat_guard_t = 1.75

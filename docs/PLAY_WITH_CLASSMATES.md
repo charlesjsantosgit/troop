@@ -6,21 +6,21 @@ Do not disable school security controls to install or connect.
 
 ## Get the same version
 
-1. Open the [TROOP 0.6.1 download page](https://github.com/charlesjsantosgit/troop/releases/tag/v0.6.1)
+1. Open the [TROOP 0.6.2 download page](https://github.com/charlesjsantosgit/troop/releases/tag/v0.6.2)
    or check the [latest release](https://github.com/charlesjsantosgit/troop/releases/latest).
 2. Download the **Windows x86_64 Setup.exe** or **macOS universal.dmg** for your
    computer. The content `.pck` is for the updater, not a standalone game.
 3. If you already have **0.4.10 or newer**, apply the signed in-game update when offered
-   and restart, or use the full 0.6.1 installer. **Versions older than 0.4.10
+   and restart, or use the full 0.6.2 installer. **Versions older than 0.4.10
    require the full installer** to obtain updater bootstrap **3**. Close every
    running copy before installing. On a Mac, replace TROOP.app in Applications
    and launch that copy. Windows Setup installs for your user.
-4. Check that the installed game's menu shows **0.6.1**. Installing a new copy
+4. Check that the installed game's menu shows **0.6.2**. Installing a new copy
    does not update a different old copy left in Downloads or another folder;
    launch the updated installation when joining friends.
 
-The server and all classmates must run **0.6.1**. Older clients cannot join the
-0.6.1 server. This release uses multiplayer protocol **13**.
+The server and all classmates must run **0.6.2**. Older clients cannot join the
+0.6.2 server. This release uses multiplayer protocol **13**.
 
 No Godot installation, GitHub account, home server, or router port forwarding is
 needed. Windows on ARM, Chromebooks, browsers, and phones are not verified targets.
@@ -58,9 +58,9 @@ The macOS build includes Apple Silicon and Intel executables.
 
 - Check the menu version first. An update-required message means the client and
   server differ in game version or protocol. Apply the offered update and
-  confirm **0.6.1**; use the full installer if the update cannot apply. If your
+  confirm **0.6.2**; use the full installer if the update cannot apply. If your
   installation predates 0.4.10, restarting an old content pack cannot upgrade
-  its bootstrap: close TROOP and replace it with the full 0.6.1 installation.
+  its bootstrap: close TROOP and replace it with the full 0.6.2 installation.
 - The game needs outbound **UDP 30623**. Some school networks block game traffic;
   a successful browser download does not prove that multiplayer is allowed.
 - Ask school IT whether the game, its public host, and that outbound port are

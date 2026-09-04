@@ -14,6 +14,18 @@ const ARM_A := 0.26   # upper arm
 const ARM_B := 0.24   # forearm
 const LEG_A := 0.28   # thigh
 const LEG_B := 0.26   # shin
+# Anatomical height is measured sole to crown in the straight standing rest
+# pose, excluding hats, helmets and raised hands. Natural animated posture may
+# bend the knees/neck; it never changes the resident's underlying stature.
+const REST_SOLE_Y := HIP_Y - LEG_A - LEG_B - 0.075 * 0.55
+const REST_CROWN_Y := HIP_Y + 0.05 + 0.54 + 0.18
+const REST_HEIGHT := REST_CROWN_Y - REST_SOLE_Y
+const PLAYER_HEIGHT := 1.778
+const NPC_MIN_HEIGHT := 1.7018
+const NPC_MAX_HEIGHT := 1.8796
+const PLAYER_SCALE := PLAYER_HEIGHT / REST_HEIGHT
+const PLAYER_EYE_HEIGHT := (HIP_Y + 0.05 + 0.54 + 0.043 \
+	- REST_SOLE_Y) * PLAYER_SCALE
 const TAIL_SEGMENTS := 4
 const TAIL_JOINT_STEP := 0.15
 const TAIL_CORE_LENGTH := 0.22
@@ -46,6 +58,8 @@ static var _angel_feather_mesh: ArrayMesh
 static var _angel_feather_material: StandardMaterial3D
 
 var yaw_node: Node3D
+var stature_frame: Node3D
+var standing_height := PLAYER_HEIGHT
 var hips: Node3D
 var torso_p: Node3D
 var head_p: Node3D
@@ -149,8 +163,13 @@ func setup(display_name: String, show_tag: bool) -> void:
 	blush_m.albedo_color = Color(1.0, 0.43, 0.48)
 	blush_m.roughness = 0.72
 
+	# The anatomical scale lives below the vehicle/replica root. Seat transforms
+	# and reset_pose_state can replace that root without shrinking the occupant.
+	stature_frame = Node3D.new()
+	stature_frame.name = "Stature"
+	add_child(stature_frame)
 	yaw_node = Node3D.new()
-	add_child(yaw_node)
+	stature_frame.add_child(yaw_node)
 	hips = Node3D.new()
 	hips.position = Vector3(0, HIP_Y, 0)
 	yaw_node.add_child(hips)
@@ -312,7 +331,30 @@ func setup(display_name: String, show_tag: bool) -> void:
 	rope_mi.top_level = true
 	rope_mat = Visuals.vine_material(0.0)
 	add_child(rope_mi)
+	set_standing_height(standing_height)
 	_capture_pose_rest_transforms()
+
+
+static func npc_height(identity: String) -> float:
+	# Identity, never profession or network peer order, determines adult stature.
+	# Nana retains a modest older-resident silhouette; Pip and Tug anchor the
+	# requested adult range. Other residents vary deterministically between them.
+	var key := identity.to_lower()
+	if key == "nana" or key == "pip":
+		return NPC_MIN_HEIGHT
+	if key == "tug":
+		return NPC_MAX_HEIGHT
+	return lerpf(NPC_MIN_HEIGHT, NPC_MAX_HEIGHT,
+		float(posmod(key.hash(), 10001)) / 10000.0)
+
+
+func set_standing_height(metres: float) -> void:
+	standing_height = metres
+	if stature_frame:
+		stature_frame.scale = Vector3.ONE * (standing_height / REST_HEIGHT)
+		stature_frame.position = Vector3(0.0, -REST_SOLE_Y * stature_frame.scale.y, 0.0)
+	if tag:
+		tag.position.y = standing_height + 0.22
 
 
 ## Vehicle control IK solves in world space and therefore changes both the
@@ -625,6 +667,7 @@ func reset_pose_state(preserve_yaw := false) -> void:
 	top_level = false
 	physics_interpolation_mode = Node.PHYSICS_INTERPOLATION_MODE_INHERIT
 	transform = Transform3D.IDENTITY
+	set_standing_height(standing_height)
 	# World-space IK changes joint origins as well as bases. Restoring the exact
 	# local transforms is what fixes detached/random body parts after aircraft
 	# exit, death, and every subsequent respawn in the same session.
@@ -1312,6 +1355,13 @@ func update_motion(dt: float, anim: int, vel: Vector3, on_floor: bool, anchor: V
 	torso_p.rotation.y = lerp_angle(torso_p.rotation.y, p.torso_y, w)
 	torso_p.rotation.z = lerp_angle(torso_p.rotation.z, p.torso_z, w)
 	head_p.rotation.x = lerp_angle(head_p.rotation.x, p.head, w)
+	# Keep the pelvis on the authored cushion while a taller torso and longer
+	# limbs retain their true scale. No vehicle-specific size reset is needed.
+	if anim in [Anim.RIDE, Anim.PILOT, Anim.CABIN]:
+		stature_frame.position = (yaw_node.transform * hips.position) \
+			* (1.0 - stature_frame.scale.y)
+	else:
+		stature_frame.position = Vector3(0.0, -REST_SOLE_Y * stature_frame.scale.y, 0.0)
 	head_p.rotation.y = lerp_angle(head_p.rotation.y, p.head_y, w)
 	head_p.rotation.z = lerp_angle(head_p.rotation.z, p.head_z, w)
 	sh_l.rotation = sh_l.rotation.lerp(p.al, w)
@@ -1584,6 +1634,11 @@ func _advance_air_tilt(dt: float, target_pitch: float, target_roll: float,
 ## Analytic 2-bone IK: aims the shoulder and bends the elbow so the paw
 ## (elbow-local (0,-b,0)) lands exactly on `target`, elbow toward `pole`.
 func _ik_limb(shoulder: Node3D, elbow: Node3D, a: float, b: float, target: Vector3, pole: Vector3) -> void:
+	var local_upper := a
+	# Targets are in world metres; joint offsets remain in authored rig units.
+	var size := shoulder.global_basis.y.length()
+	a *= size
+	b *= size
 	var s_pos := shoulder.global_position
 	var v := target - s_pos
 	var dl := v.length()
@@ -1602,7 +1657,7 @@ func _ik_limb(shoulder: Node3D, elbow: Node3D, a: float, b: float, target: Vecto
 	var e_pos := s_pos + upper_dir * a
 	var fore_dir := (target - e_pos).normalized()
 	_set_joint_world_basis(shoulder, _limb_basis(upper_dir, axis))
-	elbow.position = Vector3(0.0, -a, 0.0)
+	elbow.position = Vector3(0.0, -local_upper, 0.0)
 	_set_joint_world_basis(elbow, _limb_basis(fore_dir, axis))
 
 

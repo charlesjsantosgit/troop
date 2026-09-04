@@ -257,26 +257,97 @@ func _verify_citizen_conversation(player: MonkeyPlayer) -> void:
 
 
 func _verify_refinery_market(player: MonkeyPlayer) -> void:
-	player.admin_teleport(_controller._interaction_position("refinery"))
-	var opened := _controller.try_interact(player)
-	await get_tree().process_frame
-	_check(opened and _controller.ui.context.get("id") == "refinery" \
+	var service := _controller._interaction_position("refinery")
+	var standing := service + Vector3(0,0,2)
+	standing.y = Gen.height(standing.x,standing.z)+0.15
+	player.admin_teleport(standing)
+	await _physics_frames(4)
+	# Dispatch the gameplay action through Player -> World -> Controller. The
+	# headless input seam is required because there is no captured mouse.
+	player.ti.interact_just = true
+	await _physics_frames(2)
+	_check(_controller.ui.visible and _controller.ui.context.get("id") == "petra" \
 		and _controller.ui.page == "Interaction" \
+		and _controller.ui._heading.text == "Petra" \
+		and _control_text(_controller.ui._body).contains("My trading desk") \
 		and _control_text(_controller.ui._body).contains("Crude Oil"),
-		"the refinery desk exposes real petroleum stock needed for fuel contracts")
+		"gameplay E at the staffed refinery opens Petra and her actual petroleum stock")
 	var simulation = _controller.simulation
-	var amount := 5
+	var amount := 10
 	_controller.ui._quantity = amount
 	var source_before := int(simulation.state.inventories.refinery.crude_oil)
 	var pack_before := int(simulation.state.inventories.player_earth.get("crude_oil", 0))
 	var cash_before := int(simulation.state.accounts.player)
+	var owner: String = simulation.state.locations.refinery.owner
+	var owner_before := int(simulation.state.accounts[owner])
 	var quote: int = simulation.quote("refinery", "crude_oil", amount, true)
 	var buy := _button_for_label(_controller.ui._body, "Crude Oil", "Buy")
 	if buy: buy.pressed.emit()
 	_check(buy != null and int(simulation.state.inventories.refinery.crude_oil) == source_before - amount \
 		and int(simulation.state.inventories.player_earth.get("crude_oil", 0)) == pack_before + amount \
-		and int(simulation.state.accounts.player) == cash_before - quote,
-		"a nearby refinery purchase button moves finite crude and charges the quoted price")
+		and int(simulation.state.accounts.player) == cash_before - quote \
+		and int(simulation.state.accounts[owner]) == owner_before + quote,
+		"Petra's purchase button moves finite crude and exact quoted credits to its owner")
+	var workplace_button := _button_with_text(_controller.ui._body, "Use Refinery · fuels and maintenance")
+	var had_workplace := workplace_button != null
+	player.admin_teleport(standing + Vector3(30,0,0))
+	if workplace_button: workplace_button.pressed.emit()
+	_check(had_workplace and _controller.ui.context.get("id") == "petra" \
+		and _controller.selected_interaction.get("id") == "petra",
+		"a stale workplace link cannot open remote machinery after the player moves away")
+	player.admin_teleport(standing)
+	player.expedition_locked = true
+	if workplace_button: workplace_button.pressed.emit()
+	_check(_controller.ui.context.get("id") == "petra" \
+		and not _controller.open_workplace("petra") and not _controller.open_workplace("lunar_greenhouse"),
+		"workplace entry rejects an expedition-locked player and preserves the conversation")
+	player.expedition_locked = false
+	_check(not _controller.open_workplace("petra") and not _controller.open_workplace("lunar_greenhouse"),
+		"workplace entry accepts only services on the player's current world")
+	if workplace_button: workplace_button.pressed.emit()
+	_check(had_workplace and _controller.ui.context.get("id") == "refinery" \
+		and _controller.selected_interaction.get("id") == "refinery" \
+		and _button_with_text(_controller.ui._body,"Maintain equipment") != null \
+		and _button_with_text(_controller.ui._body,"Start processing batch") != null \
+		and _control_text(_controller.ui._body).contains("Parked vehicle fuel service"),
+		"Petra's physical workplace button opens refinery machinery, maintenance and fuel controls with its exact action source")
+	var recipe: Dictionary = simulation.recipe_catalog().refine
+	var cargo: Dictionary = simulation.state.inventories.player_earth
+	var water_before := int(cargo.get("water",0))
+	var crude_before := int(cargo.get("crude_oil",0))
+	var gasoline_before := int(cargo.get("gasoline",0))
+	var energy_before := float(simulation.state.facilities.refinery.energy_kwh)
+	var batch_before: int = simulation.state.batches.size()
+	var process := _button_with_text(_controller.ui._body,"Start processing batch")
+	if process: process.pressed.emit()
+	_check(process != null and simulation.state.batches.size() == batch_before + 1 \
+		and int(cargo.get("crude_oil",0)) == crude_before - int(recipe.inputs.crude_oil) \
+		and int(cargo.get("water",0)) == water_before - int(recipe.inputs.water) \
+		and int(cargo.get("gasoline",0)) == gasoline_before \
+		and is_equal_approx(float(simulation.state.facilities.refinery.energy_kwh), energy_before - float(recipe.energy)),
+		"the exposed refinery batch button consumes purchased inputs and power before fuel is produced")
+	simulation._update_batches(12.0)
+	_check(simulation.state.batches.size() == batch_before \
+		and int(cargo.get("gasoline",0)) == gasoline_before + int(recipe.outputs.gasoline),
+		"the commissioned refining batch delivers its real gasoline after its work interval")
+	# Freeze only this worker at a different fixture location to prove the
+	# unstaffed desk remains reachable without bypassing interaction selection.
+	var petra: FrontierCitizen = _controller.earth_settlement.citizens.petra
+	var petra_data: Dictionary = simulation.state.citizens.petra
+	var saved_position: Array = petra_data.position.duplicate()
+	petra_data.position = [115.0,15.0]
+	petra._initialized = false
+	petra.update_citizen(0.0,Vector3.INF)
+	_controller.ui.close()
+	player.ti.interact_just = true
+	await _physics_frames(2)
+	_check(_controller.ui.visible and _controller.ui.context.get("id") == "refinery" \
+		and _button_with_text(_controller.ui._body,"Start processing batch") != null \
+		and _button_for_label(_controller.ui._body,"Crude Oil","Buy") != null,
+		"gameplay E opens the same functional refinery desk when Petra is away")
+	petra_data.position = saved_position
+	petra._initialized = false
+	petra.update_citizen(0.0,Vector3.INF)
 	_controller.ui.close()
 
 

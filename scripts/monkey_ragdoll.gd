@@ -8,6 +8,8 @@ const TORSO_CENTER := Vector3(0, 0.86, 0)
 const HEAD_CENTER := Vector3(0, 1.18, 0)
 const SHOULDER_Y := 1.06
 const HIP_Y := 0.58
+const REST_SOLE_Y := 0.17 - MonkeyRig.LEG_B * 0.52 - 0.075 * 0.55
+const REST_HEIGHT := HEAD_CENTER.y + 0.18 - REST_SOLE_Y
 
 var torso: RigidBody3D
 var head: RigidBody3D
@@ -22,11 +24,13 @@ var _initial_velocity := Vector3.ZERO
 var _impact_impulse := Vector3.ZERO
 var _configured := false
 var _bodies: Array[RigidBody3D] = []
+var standing_height := MonkeyRig.PLAYER_HEIGHT
 
 
 func configure(display_name: String, spawn_position: Vector3, spawn_yaw: float,
 		initial_velocity: Vector3, impact_impulse: Vector3,
-		detach_head: bool, surface_basis: Basis = Basis.IDENTITY) -> void:
+		detach_head: bool, surface_basis: Basis = Basis.IDENTITY,
+		height_metres: float = MonkeyRig.PLAYER_HEIGHT) -> void:
 	_display_name = display_name
 	_spawn_position = spawn_position
 	_spawn_yaw = spawn_yaw
@@ -34,6 +38,7 @@ func configure(display_name: String, spawn_position: Vector3, spawn_yaw: float,
 	_initial_velocity = initial_velocity
 	_impact_impulse = impact_impulse
 	head_detached = detach_head
+	standing_height = height_metres
 	_configured = true
 
 
@@ -44,6 +49,7 @@ func _ready() -> void:
 	global_transform = Transform3D(_surface_basis * Basis(Vector3.UP, _spawn_yaw),
 		_spawn_position)
 	_build()
+	_apply_stature()
 	_release_bodies()
 
 
@@ -171,6 +177,31 @@ func _build() -> void:
 func set_winter_scarf_visible(active: bool) -> void:
 	if winter_scarf:
 		winter_scarf.visible = active
+
+
+func _apply_stature() -> void:
+	# Physics bodies keep an orthonormal transform. Scale their actual shapes
+	# and visual children instead, so defeat does not shrink the character or
+	# leave small invisible collision bodies inside the taller visible limbs.
+	var factor := standing_height / REST_HEIGHT
+	for body: RigidBody3D in _bodies:
+		body.position = (body.position - Vector3.UP * REST_SOLE_Y) * factor
+		for child: Node in body.get_children():
+			if not child is Node3D:
+				continue
+			child.position *= factor
+			if child is CollisionShape3D:
+				child.shape = child.shape.duplicate()
+				if child.shape is CapsuleShape3D:
+					child.shape.height *= factor
+					child.shape.radius *= factor
+				elif child.shape is SphereShape3D:
+					child.shape.radius *= factor
+			else:
+				child.scale *= factor
+	for child: Node in get_children():
+		if child is Joint3D:
+			child.position = (child.position - Vector3.UP * REST_SOLE_Y) * factor
 
 
 func _release_bodies() -> void:

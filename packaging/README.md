@@ -76,10 +76,10 @@ either one.
 
 ## Publishing a release
 
-Version **0.6.1 — Town Surfaces & Online Fixes** uses protocol **13**, retains bootstrap
+Version **0.6.2 — NPC Heights & Conversations** uses protocol **13**, retains bootstrap
 **3** and Godot **4.7**, and declares `minimum_bootstrap=3` with
 `requires_installer=false`. The updater mounts the verified pack before Gen/Net
-load, so the paired ENet compression setting and protocol constant ship together.
+load, so avatar dimensions, camera changes and NPC conversations activate together.
 Run the native signed-update gate against the previous installed app before publishing.
 Installations older than 0.4.10 still require the full installer.
 
@@ -91,7 +91,7 @@ provisioned in the deployment region before deployment; automatic snapshots
 retain five days. Never replace a corrupt save with a fresh economy: startup
 must recover the backup or fail while preserving both files.
 
-The server and every client must activate **0.6.1 / protocol 13** together.
+The server and every client must activate **0.6.2 / protocol 13** together.
 Source/editor launches remain isolated from installed updater state. Local
 career saves are never imported into the public wallet/ownership registry.
 
@@ -158,7 +158,7 @@ Run the preflight and one actual-export postflight manually with:
 ```bash
 python3 packaging/bake_metal_cache.py --verify packaging/metal_cache
 python3 packaging/verify_packed_metal_cache.py --godot godot \
-  --pack build/release-0.6.1/windows/TROOP.pck
+  --pack build/release-0.6.2/windows/TROOP.pck
 python3 -m unittest discover -s tests -p 'test_*metal*cache.py'
 ```
 
@@ -199,7 +199,7 @@ exist:
 
 ```bash
 python3 packaging/make_update_manifest.py \
-  --version 0.6.1 \
+  --version 0.6.2 \
   --repository OWNER/REPOSITORY \
   --private-key /Users/charlessantos/.config/troop/update-signing-private.pem
 

@@ -22,6 +22,7 @@ var _sampled_height := 0.0
 var _sampled_up := Vector3.UP
 var _work_tool: Node3D
 var _work_active := false
+var _interaction_focused := false
 
 
 func configure(id: String, simulation: RefCounted, host: Node3D, planet: String) -> void:
@@ -41,14 +42,15 @@ func build() -> void:
 	rig.setup(str(data.get("name", citizen_id)), true)
 	rig._t = float(absi(citizen_id.hash()) % 173)*0.137
 	rig.set_melee_pose(false, false, 0.0, 0)
-	rig.scale = Vector3.ONE * 1.18
+	rig.set_standing_height(MonkeyRig.npc_height(citizen_id))
 	_clean_render(rig)
 	if rig.tag:
 		rig.tag.visible = false
 	_name_label = Label3D.new()
-	_name_label.position = Vector3(0, 2.0, 0)
-	_name_label.font_size = 26
-	_name_label.pixel_size = 0.009
+	_name_label.position = Vector3(0, rig.standing_height + 0.32, 0)
+	_name_label.font_size = 24
+	_name_label.pixel_size = 0.006
+	_name_label.visible = _interaction_focused
 	_name_label.modulate = Color(0.83, 0.96, 0.84)
 	_name_label.outline_size = 6
 	_name_label.outline_modulate = Color(0.05, 0.09, 0.08)
@@ -146,9 +148,15 @@ func update_citizen(dt: float, camera_position: Vector3) -> void:
 	var task := str(data.get("activity", data.get("task", "Enjoying the village")))
 	if task != _last_task:
 		_last_task = task
-		_name_label.text = "%s · %s\n%s" % [str(data.get("name", citizen_id)),
-			_job.replace("_", " ").capitalize(), task.left(46)]
+		_name_label.text = "%s · %s" % [str(data.get("name", citizen_id)),
+			_job.replace("_", " ").capitalize()]
 		_name_label.modulate = Color(1.0, 0.83, 0.45) if not str(data.get("blocker", "")).is_empty() else Color(0.83, 0.96, 0.84)
+
+
+func set_interaction_focus(focused: bool) -> void:
+	_interaction_focused = focused
+	if is_instance_valid(_name_label):
+		_name_label.visible = focused
 
 
 func interaction() -> Dictionary:
@@ -201,8 +209,7 @@ func _bind_vehicle() -> void:
 		_fuel_label = null
 		if rig != null:
 			rig.reset_pose_state()
-			rig.scale = Vector3.ONE * 1.18
-			_name_label.position.y = 2.0
+			_name_label.position.y = rig.standing_height + 0.32
 
 
 func _update_driver(dt: float, camera_position: Vector3, data: Dictionary) -> void:
@@ -214,8 +221,8 @@ func _update_driver(dt: float, camera_position: Vector3, data: Dictionary) -> vo
 	rig.visible = is_visible_in_tree() and not distant
 	_cargo.visible = false
 	_name_label.position.y = 2.8
-	_name_label.text = "%s · %s\n%s" % [data.get("name", citizen_id),
-		_job.replace("_", " ").capitalize(), str(data.get("activity", "Driving")).left(46)]
+	_name_label.text = "%s · %s" % [data.get("name", citizen_id),
+		_job.replace("_", " ").capitalize()]
 	if distant:
 		return
 	rig.physics_interpolation_mode = Node.PHYSICS_INTERPOLATION_MODE_OFF

@@ -19,6 +19,7 @@ var _notice: Label
 var _scroll: ScrollContainer
 var _nav: Dictionary = {}
 var _journal_nav: HFlowContainer
+var _journal_button: Button
 var _live_labels: Array = []
 var _refresh := 0.0
 var _quantity := 5
@@ -52,7 +53,7 @@ func _ready() -> void:
 	var top := _row(stack)
 	_heading = _line(top, "TRAVEL JOURNAL", 25, GOLD)
 	_heading.custom_minimum_size.x = 300
-	_button(top, "My journal", func(): open({}))
+	_journal_button = _button(top, "My journal", func(): open({}))
 	_button(top, "Close · B / Esc", close)
 	_balance = _line(stack, "", 15, GREEN)
 	_journal_nav = _row(stack)
@@ -197,6 +198,7 @@ func _rebuild(preserve_scroll := false) -> void:
 		child.queue_free()
 	_live_labels.clear()
 	_journal_nav.visible = context.is_empty()
+	_journal_button.visible = context.is_empty()
 	for key in _nav:
 		_nav[key].disabled = key == page
 	if context.is_empty():
@@ -305,6 +307,15 @@ func _citizen(id: String) -> void:
 		else:
 			_line(_body, "Meet me at the trading desk to exchange goods.", 15, MUTED)
 			_button(_body, "Locate trading desk", func(): controller.locate(trade))
+	# Workplaces have machinery, fuel service and maintenance beyond a person's
+	# trading inventory. Keep these reachable when the resident shares its desk.
+	var person_position: Vector3 = controller._interaction_position(id)
+	for workplace: Dictionary in controller.interactions():
+		if str(workplace.get("kind", "")) not in ["facility", "board"]:
+			continue
+		if person_position.distance_to(workplace.position) <= 2.0 and _near(id) and _near(str(workplace.id)):
+			_button(_body, "Use " + str(workplace.get("label", "workplace")),
+				func(): controller.open_workplace(str(workplace.id)))
 	if bool(citizen.get("can_manage", _manage())):
 		_line(_body, "Work together", 20, GOLD)
 		var jobs: Variant = controller.simulation.job_catalog()

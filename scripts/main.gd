@@ -104,7 +104,7 @@ func _ready() -> void:
 			expansion_test.call_deferred("run")
 		"frontier":
 			_start_frontier(_rand_name())
-		"frontierplaytest", "frontierbench", "frontierroutetest":
+		"frontierplaytest", "frontierbench", "frontierroutetest", "frontierinteractiontest":
 			_start_frontier("SocietyTester", false)
 			var society_test = load("res://tests/%s.gd" % args[0]).new()
 			add_child(society_test)

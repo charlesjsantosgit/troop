@@ -48,13 +48,14 @@ func _ready() -> void:
 	_collision.name = "FarmerBodyCollision"
 	var capsule := CapsuleShape3D.new()
 	capsule.radius = 0.29
-	capsule.height = 1.3
+	capsule.height = MonkeyRig.npc_height("Brie")
 	_collision.shape = capsule
-	_collision.position.y = 0.65
+	_collision.position.y = capsule.height * 0.5
 	add_child(_collision)
 	rig = MonkeyRig.new()
 	rig.name = "ArticulatedFarmerMonkey"
 	rig.setup("Brie", true)
+	rig.set_standing_height(MonkeyRig.npc_height("Brie"))
 	add_child(rig)
 	MoonMerchant._clear_hostile_outlines(rig)
 	rig.set_melee_pose(false, false, 0.0, 0)
@@ -257,7 +258,7 @@ func _build_livery() -> void:
 	MoonMerchant._mesh(_watering_can, "ApplicatorSpout", spout, Vector3(0, 0.035, -0.17), apron_material)
 	_watering_can.visible = false
 	status_label = Label3D.new()
-	status_label.position.y = 1.95
+	status_label.position.y = rig.standing_height + 0.35
 	status_label.font_size = 30
 	status_label.pixel_size = 0.004
 	status_label.modulate = Color(0.58, 1.0, 0.79)

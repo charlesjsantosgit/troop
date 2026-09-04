@@ -136,8 +136,8 @@ func _build_ui() -> void:
 	_prompt.set_anchors_preset(Control.PRESET_CENTER_BOTTOM)
 	_prompt.offset_left = -390
 	_prompt.offset_right = 390
-	_prompt.offset_top = -163
-	_prompt.offset_bottom = -132
+	_prompt.offset_top = -215
+	_prompt.offset_bottom = -183
 	_prompt.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	_layer.add_child(_prompt)
 	_waypoint_label = _overlay_label(16)
@@ -290,7 +290,8 @@ func _refresh_overlays() -> void:
 	_status.text = "%s  ·  %s credits  ·  B Journal" % [
 		str(current_town().get("name", "Town")).to_upper(), str(credits)]
 	var interaction := nearest_interaction()
-	_prompt.text = "E · " + str(interaction.get("label", "Interact")) if not interaction.is_empty() else "Talk to a resident or visit a workplace · B Journal"
+	_prompt.text = interaction_prompt(interaction)
+	_focus_resident(interaction if active and not ui.visible else {})
 	_waypoint_label.text = ""
 	if not waypoint.is_empty():
 		for candidate: Dictionary in interactions():
@@ -299,6 +300,11 @@ func _refresh_overlays() -> void:
 				break
 		var point: Vector3 = waypoint.position
 		var distance := world.local_player.global_position.distance_to(point)
+		# The close target already has an E prompt (and a resident has a
+		# nameplate). Keeping the navigation label here prints the same target
+		# again across the resident or the service door.
+		if distance <= INTERACTION_RANGE + 1.5:
+			_waypoint_marker.visible = false
 		_waypoint_label.text = "%s · %dm" % [str(waypoint.label), roundi(distance)]
 		if distance < 5.0:
 			_waypoint_label.text += " · E to interact"
@@ -335,23 +341,60 @@ func nearest_interaction() -> Dictionary:
 		return {}
 	var nearest: Dictionary = {}
 	var best := INTERACTION_RANGE * INTERACTION_RANGE
-	for candidate: Dictionary in interactions():
+	var candidates := interactions()
+	for candidate: Dictionary in candidates:
 		var position: Vector3 = candidate.get("position", Vector3.INF)
 		var distance := world.local_player.global_position.distance_squared_to(position)
 		if distance < best:
 			best = distance
 			nearest = candidate
+	# A merchant and their desk share a service point. The desk's slightly
+	# lower anchor used to win every distance tie, even while facing Nana.
+	# Prefer the resident at that desk, without stealing a different worksite.
+	if str(nearest.get("kind", "")) in ["market", "facility", "board"]:
+		var service_position: Vector3 = nearest.position
+		var resident_distance := minf(INTERACTION_RANGE, sqrt(best) + 1.25)
+		for candidate: Dictionary in candidates:
+			if candidate.get("kind") != "citizen":
+				continue
+			var position: Vector3 = candidate.position
+			var distance := world.local_player.global_position.distance_to(position)
+			if position.distance_to(service_position) <= 2.0 and distance < resident_distance:
+				resident_distance = distance
+				nearest = candidate
 	return nearest
+
+
+func interaction_prompt(item: Dictionary) -> String:
+	if item.is_empty():
+		return "Talk to a resident or visit a workplace · B Journal"
+	if item.get("kind") == "citizen":
+		var person: Dictionary = simulation.state.get("citizens", {}).get(str(item.get("id", "")), {})
+		return "E · Talk to %s" % str(person.get("name", item.get("label", "your neighbor")))
+	return "E · " + str(item.get("label", "Interact"))
+
+
+func _focus_resident(item: Dictionary) -> void:
+	var settlement := current_settlement()
+	if not is_instance_valid(settlement):
+		return
+	for id: String in settlement.citizens:
+		var citizen: Node3D = settlement.citizens[id]
+		if is_instance_valid(citizen):
+			citizen.set_interaction_focus(item.get("kind") == "citizen" and item.get("id") == id)
 
 
 func try_interact(player: MonkeyPlayer) -> bool:
 	if player != world.local_player or player.vehicle or player.expedition_locked:
 		return false
+	if ui.visible:
+		return true
 	var item := nearest_interaction()
 	if item.is_empty():
 		return false
 	selected_interaction = item
 	ui.open(item)
+	_refresh_overlays()
 	if tutorial:
 		tutorial.observe_interaction(str(item.get("id", "")))
 	return true
@@ -362,6 +405,29 @@ func open_board() -> void:
 		return
 	selected_interaction.clear()
 	ui.open({})
+
+
+func open_workplace(id: String) -> bool:
+	# A resident remains the default interaction at a shared service point.
+	# Their explicit workplace link still enters the same physical desk context
+	# used for authoritative action-source and proximity checks.
+	if Net.player_realm() == Net.PlayerRealm.TRANSIT or not is_instance_valid(world.local_player):
+		return false
+	var player: MonkeyPlayer = world.local_player
+	if player.vehicle or player.expedition_locked:
+		return false
+	for item: Dictionary in interactions():
+		if str(item.get("id", "")) != id or str(item.get("kind", "")) not in ["facility", "board", "market"]:
+			continue
+		if player.global_position.distance_to(item.position) > INTERACTION_RANGE:
+			return false
+		selected_interaction = item.duplicate(true)
+		ui.open(item)
+		_refresh_overlays()
+		if tutorial:
+			tutorial.observe_interaction(id)
+		return true
+	return false
 
 
 func request_action(kind: String, payload: Dictionary = {}) -> Dictionary:
