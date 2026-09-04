@@ -35,6 +35,9 @@
 - The public server and all clients must show **0.6.0**. Existing offline
   careers remain separate from shared society progress. See the
   [shared society guide](docs/SHARED_SOCIETIES.md) for controls and details.
+- Cold Metal shader compilation can still cause long first-entry pauses.
+  The strict native frame-time gate has not passed; testing here used Apple M4.
+  An existing exhaust renderer warning at shutdown remains under investigation.
 
 ## 0.5.0 — ROOTS & ROCKETS
 
