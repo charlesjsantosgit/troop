@@ -145,6 +145,10 @@ var sniper: SniperRifle
 var active_weapon: Node3D
 var weapon_slot := 1
 var melee_mode := false
+## Live, locally eligible RMB stance. Attacks snapshot this separately so a
+## release during the swing cannot change the damage already committed.
+var melee_primed := false
+var melee_attack_primed := false
 var fly_mode := false
 var vehicle: Vehicle = null
 var expedition_locked := false
@@ -162,6 +166,7 @@ var test_mode := false
 var ti := {"dir": Vector2.ZERO, "jump_just": false, "jump_held": false, "sprint": false,
 	"crouch_just": false, "crouch_held": false, "grab": false, "reel": 0.0,
 	"shoot_just": false, "shoot_held": false, "reload_just": false,
+	"aim_held": false,
 	"melee_toggle_just": false, "scope_zoom_just": false,
 	"interact_just": false, "use_bandage_just": false,
 	"vehicle_gear_just": false, "vehicle_flaps_just": false,
@@ -292,8 +297,12 @@ func _physics_process(dt: float) -> void:
 	supply_notice_remaining = maxf(supply_notice_remaining - dt, 0.0)
 	_invulnerable_t = maxf(_invulnerable_t - dt, 0.0)
 	if defeated:
+		if melee_primed or melee_attack_primed or melee_attack_remaining > 0.0:
+			cancel_melee_input()
 		return
 	if expedition_locked:
+		if melee_primed or melee_attack_primed or melee_attack_remaining > 0.0:
+			cancel_melee_input()
 		velocity = Vector3.ZERO
 		state = S.AIR
 		_replicate_expedition_pose(dt)
@@ -375,7 +384,8 @@ func _gather() -> Dictionary:
 			"sprint": ti.sprint, "crouch_just": ti.crouch_just, "crouch_held": ti.crouch_held,
 			"grab": ti.grab, "reel": ti.reel, "reel_delta": 0.0,
 			"shoot_just": ti.shoot_just, "shoot_held": ti.shoot_held,
-			"reload_just": ti.reload_just, "weapon_1_just": false,
+			"reload_just": ti.reload_just, "aim_held": ti.aim_held,
+			"weapon_1_just": false,
 			"weapon_2_just": false, "weapon_3_just": false,
 			"weapon_4_just": false, "scope_zoom_just": ti.scope_zoom_just,
 			"melee_toggle_just": ti.melee_toggle_just,
@@ -408,7 +418,7 @@ func _gather() -> Dictionary:
 			"sprint": false, "crouch_just": false, "crouch_held": false,
 			"grab": false, "reel": 0.0, "reel_delta": 0.0,
 			"shoot_just": false, "shoot_held": false,
-			"reload_just": false, "interact_just": false,
+			"reload_just": false, "aim_held": false, "interact_just": false,
 			"use_bandage_just": false, "melee_toggle_just": false,
 			"weapon_1_just": false, "weapon_2_just": false,
 			"weapon_3_just": false, "weapon_4_just": false,
@@ -428,6 +438,7 @@ func _gather() -> Dictionary:
 		"reel_delta": wheel_delta,
 		"shoot_just": captured and Input.is_action_just_pressed("shoot"),
 		"shoot_held": captured and Input.is_action_pressed("shoot"),
+		"aim_held": captured and Input.is_action_pressed("aim"),
 		"reload_just": Input.is_action_just_pressed("reload"),
 		"interact_just": Input.is_action_just_pressed("grab"),
 		"use_bandage_just": Input.is_action_just_pressed("use_bandage"),
@@ -450,6 +461,13 @@ func _input(event: InputEvent) -> void:
 		_wheel_reel_delta -= WHEEL_REEL_STEP * maxf(event.factor, 0.25)
 	elif event.is_action_pressed("reel_out"):
 		_wheel_reel_delta += WHEEL_REEL_STEP * maxf(event.factor, 0.25)
+
+
+func _notification(what: int) -> void:
+	# The OS can consume the matching RMB release while the window is inactive.
+	# Clear the guard immediately so focus cannot leave a hidden boosted stance.
+	if what == NOTIFICATION_APPLICATION_FOCUS_OUT:
+		cancel_melee_input()
 
 
 func _wish_dir(inp: Dictionary) -> Vector3:
@@ -500,6 +518,7 @@ func _combat(inp: Dictionary) -> void:
 	if inp.use_bandage_just:
 		start_bandage()
 	if is_healing():
+		set_melee_primed(false)
 		if state != S.GROUND or is_all_fours():
 			_cancel_bandage()
 		else:
@@ -514,6 +533,10 @@ func _combat(inp: Dictionary) -> void:
 		equip_weapon(3)
 	elif inp.weapon_4_just:
 		equip_weapon(4)
+	if _melee_control_eligible():
+		set_melee_primed(bool(inp.get("aim_held",false)))
+	else:
+		cancel_melee_input()
 	var weapon = active_weapon
 	if not weapon:
 		return
@@ -586,21 +609,28 @@ func _combat(inp: Dictionary) -> void:
 func _update_melee(dt: float) -> void:
 	_melee_combo_timeout = maxf(_melee_combo_timeout - dt, 0.0)
 	if melee_attack_remaining <= 0.0:
+		melee_attack_primed = false
 		if _melee_combo_timeout <= 0.0:
 			_next_melee_combo = 0
 		return
+	if not _melee_control_eligible():
+		cancel_melee_input()
+		return
 	melee_attack_remaining = maxf(melee_attack_remaining - dt, 0.0)
-	var progress := melee_attack_progress()
+	var progress := 1.0 - melee_attack_remaining / MELEE_ATTACK_DURATION
 	if not _melee_hit_done and progress >= MELEE_HIT_PROGRESS:
 		_melee_hit_done = true
 		_perform_melee_hit()
+	if melee_attack_remaining <= 0.0:
+		melee_attack_primed = false
 
 
 func _start_melee_attack() -> bool:
 	if not melee_mode or melee_attack_remaining > 0.0 \
-			or state in [S.SWING, S.SWIM] or defeated:
+			or not _melee_control_eligible():
 		return false
 	melee_attack_combo = _next_melee_combo
+	melee_attack_primed = melee_primed
 	_next_melee_combo = (_next_melee_combo + 1) % 3
 	_melee_combo_timeout = MELEE_COMBO_RESET_TIME
 	melee_attack_remaining = MELEE_ATTACK_DURATION
@@ -614,6 +644,36 @@ func melee_attack_progress() -> float:
 		1.0 - melee_attack_remaining / MELEE_ATTACK_DURATION
 
 
+func _melee_control_eligible() -> bool:
+	return melee_mode and not defeated and vehicle == null \
+		and not expedition_locked and not rocket_cabin_view and not fly_mode \
+		and state not in [S.SWING,S.SWIM] and not is_all_fours() \
+		and not is_healing() \
+		and (not active_weapon or active_weapon.reload_remaining <= 0.0) \
+		and (not cam or not cam.front_view) \
+		and (test_mode or not is_local \
+			or Input.mouse_mode == Input.MOUSE_MODE_CAPTURED)
+
+
+func set_melee_primed(requested: bool) -> void:
+	var next := requested and _melee_control_eligible()
+	if melee_primed == next:
+		return
+	melee_primed = next
+	if is_local and not is_ai:
+		Net.set_melee_primed(next)
+
+
+## Menus and hard movement-mode changes cancel the local strike. An ordinary
+## RMB release calls set_melee_primed(false) instead, preserving the latched
+## attack through its authored contact frame.
+func cancel_melee_input() -> void:
+	set_melee_primed(false)
+	melee_attack_remaining = 0.0
+	melee_attack_primed = false
+	_melee_hit_done = false
+
+
 func _perform_melee_hit() -> void:
 	if not world:
 		return
@@ -624,9 +684,11 @@ func _perform_melee_hit() -> void:
 	direction = direction.normalized()
 	var origin := global_position + up_direction * 0.78
 	if Net.active and is_local:
-		Net.melee_attack(origin, direction, melee_attack_combo)
+		Net.melee_attack(origin, direction, melee_attack_combo,
+			melee_attack_primed)
 	elif world.has_method("perform_melee"):
-		world.perform_melee(self, origin, direction, melee_attack_combo)
+		world.perform_melee(self, origin, direction, melee_attack_combo \
+			+ (3 if melee_attack_primed else 0))
 
 
 ## Half-angle used by both projectile direction and the HUD. A truly still
@@ -688,7 +750,7 @@ static func spread_direction(forward: Vector3, half_angle_degrees: float,
 func equip_weapon(slot: int) -> void:
 	if melee_mode:
 		melee_mode = false
-		melee_attack_remaining = 0.0
+		cancel_melee_input()
 	var next_slot := clampi(slot, 1, 4)
 	if weapon_slot == next_slot and active_weapon:
 		_sync_weapon_presentation(true)
@@ -733,6 +795,9 @@ func set_rocket_cabin_view(enabled: bool) -> void:
 	if rocket_cabin_view == enabled:
 		return
 	rocket_cabin_view = enabled
+	if enabled:
+		melee_mode = false
+		cancel_melee_input()
 	if enabled and cam:
 		cam.set_aiming(false)
 	if rig:
@@ -749,9 +814,12 @@ func set_melee_mode(enabled: bool) -> void:
 		return
 	melee_mode = enabled
 	if not enabled:
-		melee_attack_remaining = 0.0
+		cancel_melee_input()
 		_next_melee_combo = 0
 		_melee_combo_timeout = 0.0
+	else:
+		# A fresh Q toggle never inherits an attack or held network stance.
+		cancel_melee_input()
 	_sync_weapon_presentation(true)
 	Sfx.play_at("weapon_switch", global_position + up_direction, -11.0)
 
@@ -886,7 +954,7 @@ func start_bandage() -> bool:
 	_healing_applied = false
 	_healing_event_mask = 0
 	melee_mode = false
-	melee_attack_remaining = 0.0
+	cancel_melee_input()
 	_sync_weapon_presentation(true)
 	Sfx.play_at("bandage_unroll", global_position + up_direction * 0.85,
 		-5.0, 1.0, 28.0)
@@ -974,6 +1042,8 @@ func begin_defeat(hit_zone := "body", impact_impulse := Vector3.ZERO) -> void:
 	if _defeat_presentation_started:
 		return
 	_defeat_presentation_started = true
+	melee_mode = false
+	cancel_melee_input()
 	if vehicle:
 		exit_vehicle(true)
 	if rig:
@@ -1049,7 +1119,7 @@ func revive_at(pos: Vector3) -> void:
 	wallsliding = false
 	galloping = false
 	melee_mode = false
-	melee_attack_remaining = 0.0
+	cancel_melee_input()
 	healing_remaining = 0.0
 	_healing_applied = false
 	_healing_event_mask = 0
@@ -1103,6 +1173,7 @@ func set_environment_gravity(acceleration_mps2: float) -> void:
 
 
 func reset_environment_gravity() -> void:
+	cancel_melee_input()
 	lunar_world = null
 	_lunar_camera_ready = false
 	up_direction = Vector3.UP
@@ -1112,6 +1183,8 @@ func reset_environment_gravity() -> void:
 
 
 func set_lunar_world(moon: MoonWorld) -> void:
+	melee_mode = false
+	cancel_melee_input()
 	lunar_world = moon
 	if not is_instance_valid(moon):
 		reset_environment_gravity()
@@ -1285,6 +1358,8 @@ func apply_planet_wrap(canonical_xz: Vector2, yaw_delta: float) -> void:
 func set_expedition_locked(locked: bool) -> void:
 	var changed := expedition_locked != locked
 	if locked:
+		melee_mode = false
+		cancel_melee_input()
 		if changed:
 			if vehicle:
 				exit_vehicle()
@@ -1551,6 +1626,7 @@ func _water_depth() -> float:
 
 
 func _enter_swim() -> void:
+	cancel_melee_input()
 	state = S.SWIM
 	galloping = false
 	quad_t = 0.0
@@ -1762,6 +1838,7 @@ func _post(dt: float, inp: Dictionary, pre_floor: bool, pre_vy: float) -> void:
 
 
 func _attach(t: Dictionary) -> void:
+	cancel_melee_input()
 	state = S.SWING
 	swing_anchor = t.anchor
 	swing_vine_id = t.id
@@ -1947,7 +2024,8 @@ func _process(dt: float) -> void:
 	var show_melee_pose := melee_mode and state != S.SWING \
 		and vehicle == null
 	rig.set_melee_pose(show_melee_pose, melee_attack_remaining > 0.0,
-		melee_attack_progress(), melee_attack_combo)
+		melee_attack_progress(), melee_attack_combo,
+		melee_attack_primed if melee_attack_remaining > 0.0 else melee_primed)
 	rig.set_healing_pose(is_healing(), bandage_progress())
 	if vehicle and is_instance_valid(vehicle):
 		# Seated: the whole monkey adopts the machine's attitude — the rig
@@ -2029,6 +2107,8 @@ func enter_vehicle(v: Vehicle) -> void:
 		_release(false)
 	if fly_mode:
 		set_fly_mode(false)
+	melee_mode = false
+	cancel_melee_input()
 	vehicle = v
 	v.begin_drive(self)
 	if not v.driver_impact.is_connected(_on_vehicle_impact):
@@ -2157,6 +2237,9 @@ func set_fly_mode(active: bool) -> void:
 		return
 	if active and state == S.SWING:
 		_release(false)
+	if active:
+		melee_mode = false
+		cancel_melee_input()
 	fly_mode = active
 	if active:
 		state = S.AIR
@@ -2191,6 +2274,7 @@ func admin_heal() -> void:
 
 
 func admin_teleport(destination: Vector3) -> void:
+	cancel_melee_input()
 	if vehicle:
 		exit_vehicle()
 	if state == S.SWING:

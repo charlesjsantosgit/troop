@@ -77,6 +77,7 @@ const STREAM_DETAIL_ENQUEUED_META := &"stream_detail_enqueued_usec"
 const DEFEAT_VIEW_TIME := 2.35
 const MELEE_RADIUS := 0.88
 const MELEE_DAMAGE := [24.0, 29.0, 38.0]
+const MELEE_PRIMED_DAMAGE_MULTIPLIER := 1.5
 const LIGHTING_UPDATE_STEP := 0.05
 const SKY_UPDATE_STEP := 0.50
 const CLOCK_RESYNC_STEP := 1.0
@@ -1482,10 +1483,21 @@ func perform_melee(shooter: Node3D, origin: Vector3, direction: Vector3,
 	var combo_index := posmod(combo, MELEE_DAMAGE.size())
 	var impulse := strike_direction * (5.0 + combo_index * 1.25) \
 		+ Vector3.UP * (1.1 + combo_index * 0.45)
-	best_target.take_damage(MELEE_DAMAGE[combo_index], shooter, impulse)
+	best_target.take_damage(melee_damage_for_combo(combo), shooter, impulse)
 	Sfx.play_at("melee_hit",
 		best_target.global_position + Vector3.UP * 0.75, -3.0)
 	return best_target
+
+
+## Network strikes encode the authoritative primed bit in combos 3..5. Values
+## outside that canonical range remain ordinary combos instead of gaining an
+## accidental damage bonus from malformed input.
+static func melee_damage_for_combo(encoded_combo: int) -> float:
+	var combo_index := posmod(encoded_combo, MELEE_DAMAGE.size())
+	var primed := encoded_combo >= MELEE_DAMAGE.size() \
+		and encoded_combo < MELEE_DAMAGE.size() * 2
+	return MELEE_DAMAGE[combo_index] * (MELEE_PRIMED_DAMAGE_MULTIPLIER \
+		if primed else 1.0)
 
 
 func _on_network_bullet(shooter_id: int, origin: Vector3,

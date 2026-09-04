@@ -1775,6 +1775,9 @@ func _close_menu() -> void:
 func _open_pause_menu(open_settings := false) -> void:
 	if pause_menu or menu or not world or not is_instance_valid(world):
 		return
+	if world.local_player:
+		# Offline pause stops the next physics tick, so release combat input now.
+		world.local_player.cancel_melee_input()
 	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
 	if world.local_player and world.local_player.cam:
 		world.local_player.cam.set_aiming(false)

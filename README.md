@@ -499,9 +499,9 @@ Fly and GitHub setup.
 | CTRL | slide on ground (keeps momentum, accelerates downhill) / **dive** in air |
 | E | interact: open a supply chest; mount a vehicle; board/disembark the rocket; refill oxygen at the Moon rocket; trade at the Moon Cheese shop; or hold to grab the vine you're **looking at** within realistic arm range (~1-3m) |
 | LMB | fire (hold for full-auto with the SMG) |
-| RMB (hold) | aim in first person; the sniper enters its magnified optic |
+| RMB (hold) | aim with a weapon; in melee, raise your fists to prime attacks for 50% more damage |
 | Z | cycle the sniper optic through 2.5× / 5× / 10× |
-| Q | toggle melee mode — stow the weapon on the back; LMB chains a straight, hook, and two-paw hammer strike |
+| Q | toggle melee mode — arms relax until you attack or hold RMB to prime; LMB chains a straight, hook, and two-paw hammer strike |
 | C | toggle first person / collision-safe right-shoulder camera; aboard the rocket, switch between the first-person cabin and exterior view |
 | 1 / 2 / 3 / 4 | switch between the banana gun, six-shell pump shotgun, 20-round SMG, and five-round sniper rifle |
 | R | reload with a weapon-specific trick animation |
@@ -773,7 +773,9 @@ hold SHIFT for a stronger stroke.
   propulsion surges per cycle while buoyancy follows the rendered wave surface.
 - Sprinting and swimming automatically stow the equipped weapon on the back. Q
   uses the same mount for a timed three-hit melee mode with first- and
-  third-person attack animation.
+  third-person attack animation. Arms rest naturally between attacks. Holding
+  RMB raises a ready stance; starting a strike while primed adds 50% damage.
+  Releasing RMB lowers the arms after the current strike finishes.
 - Grabbing hides the static vine and draws a live rope anchor→hand (replicated).
 - The camera layers speed-scaled stride bob, lateral weight shift, acceleration
   inertia, airborne lag, vine pendulum banking, freestyle stroke heave, and a

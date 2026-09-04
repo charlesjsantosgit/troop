@@ -35,6 +35,7 @@ var _defeat_guard_t := 0.0
 var _active_weapon_kind := Net.WEAPON_REVOLVER
 var _melee_remaining := 0.0
 var _melee_combo := 0
+var _melee_attack_primed := false
 var _weapon_hand_transforms: Dictionary = {}
 var _remote_weapon_stowed := false
 var _state_weapon_stowed := false
@@ -68,6 +69,8 @@ func set_externally_driven(driven: bool) -> void:
 	_vehicle_id = ""
 	_vehicle_aux = Vector3.ZERO
 	_swinging = false
+	_melee_remaining = 0.0
+	_melee_attack_primed = false
 	var current_position := global_position
 	_target = current_position
 	if not driven:
@@ -158,6 +161,7 @@ func on_shot(direction: Vector3, weapon_kind := Net.WEAPON_REVOLVER) -> void:
 	_state_weapon_stowed = false
 	_state_melee_mode = false
 	_melee_remaining = 0.0
+	_melee_attack_primed = false
 	_sync_remote_weapon_mount(false)
 	_gun_direction = direction.normalized()
 	_gun_aim_t = 0.22
@@ -181,6 +185,7 @@ func on_melee(direction: Vector3, combo: int) -> void:
 	_cancel_remote_reloads()
 	_gun_direction = direction.normalized()
 	_melee_combo = posmod(combo, 3)
+	_melee_attack_primed = combo >= 3
 	_melee_remaining = MonkeyPlayer.MELEE_ATTACK_DURATION
 	_sync_remote_weapon_mount(true)
 
@@ -250,7 +255,10 @@ func _process(dt: float) -> void:
 	smg.tick(dt)
 	sniper.tick(dt)
 	_gun_aim_t = maxf(_gun_aim_t - dt, 0.0)
+	var melee_was_active := _melee_remaining > 0.0
 	_melee_remaining = maxf(_melee_remaining - dt, 0.0)
+	if melee_was_active and _melee_remaining <= 0.0:
+		_melee_attack_primed = false
 	var should_stow := _externally_driven or _state_weapon_stowed \
 		or _melee_remaining > 0.0
 	_sync_remote_weapon_mount(should_stow)
@@ -266,6 +274,8 @@ func _process(dt: float) -> void:
 		if world and world.has_method("vehicle_by_id"):
 			riding_vehicle = world.call("vehicle_by_id", _vehicle_id)
 	if riding_vehicle:
+		_melee_remaining = 0.0
+		_melee_attack_primed = false
 		# Seated: hard-follow the interpolated vehicle's saddle and adopt its
 		# full attitude; the RIDE/PILOT anim arrives in the state stream.
 		global_position = riding_vehicle.seat_render_global()
@@ -335,8 +345,10 @@ func _process(dt: float) -> void:
 		reload_weapon.get("_reload_hand_grip") if reload_hand_active else null)
 	var melee_progress := 1.0 - _melee_remaining \
 		/ MonkeyPlayer.MELEE_ATTACK_DURATION if melee_active else 0.0
+	var melee_primed := _melee_attack_primed if melee_active \
+		else Net.is_melee_primed(peer_id)
 	rig.set_melee_pose(_state_melee_mode or melee_active, melee_active,
-		melee_progress, _melee_combo)
+		melee_progress, _melee_combo, melee_primed)
 	rig.set_healing_pose(_state_healing_progress > 0.0,
 		_state_healing_progress)
 	var presentation_anim := MonkeyRig.Anim.CABIN if _externally_driven else _anim
@@ -484,6 +496,8 @@ func begin_defeat(pos: Vector3, yaw: float, death_velocity: Vector3,
 	get_parent().add_child(death_ragdoll)
 	defeated_visual = true
 	_defeat_guard_t = 1.75
+	_melee_remaining = 0.0
+	_melee_attack_primed = false
 	body_hitbox.set_active(false)
 	head_hitbox.set_active(false)
 	rig.reset_pose_state(true)

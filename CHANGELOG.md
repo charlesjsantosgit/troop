@@ -48,6 +48,14 @@
   Camera eye level, remote avatars and seated limb poses use the same scale.
   Individual adult NPC heights remain 5 feet 7 inches to 6 feet 2 inches.
 
+### Relaxed melee and stronger primed attacks
+
+- Let arms rest naturally in melee mode. Hold **RMB** to raise your fists into a
+  ready stance; **LMB** keeps the straight, hook and hammer combo.
+- Attacks started while primed deal **50% more damage**. The HUD shows the bonus,
+  other players see the ready stance, and releasing RMB lowers the arms after
+  the current strike. Switching modes clears the stance.
+
 ### Updating together
 
 - Install the full **0.7.1** Mac or Windows package. The network channel change
