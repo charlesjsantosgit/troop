@@ -101,6 +101,6 @@ persistent storage with an atomic checkpoint and previous backup. Local
 **Offline career** saves stay separate. Tutorial progress is local to your
 installation and can be replayed without resetting your game.
 
-Install or apply **0.6.0** and restart before joining. Every client and the
-server must use **0.6.0 / protocol 12**. Old clients receive an update message.
+Install or apply **0.6.1** and restart before joining. Every client and the
+server must use **0.6.1 / protocol 13**. Restart after updating; an older running copy cannot connect.
 Players with installations older than 0.4.10 need the full installer.

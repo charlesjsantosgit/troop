@@ -104,6 +104,8 @@ jobs:
           "$GODOT_BIN" --headless --path . --script res://tests/voicetest.gd
           "$GODOT_BIN" --headless --path . --script res://tests/netsecuritytest.gd
           "$GODOT_BIN" --headless --path . --script res://tests/netrostertest.gd
+          "$GODOT_BIN" --headless --path . --script res://tests/enetbandwidthtest.gd
+          python3 tests/run_frontier_mtu.py --godot "$GODOT_BIN" --project .
           "$GODOT_BIN" --headless --path . --quit-after 1200 -- renderbackendtest
           python3 tests/run_dedicated_relay.py --godot "$GODOT_BIN" --project .
           "$GODOT_BIN" --headless --path . res://scenes/main.tscn \
@@ -199,7 +201,7 @@ jobs:
             grep -Eq "^${TEST_PREFIX} (result=)?[0-9]+/[0-9]+ PASS$" "$TEST_LOG"
             ! grep -q 'SCRIPT ERROR:' "$TEST_LOG"
           done
-          for MODE in frontiersocietiestest frontiervisualtest frontiertowngeographytest frontierreliabilitytest spacephototest; do
+          for MODE in frontiersocietiestest frontiervisualtest frontiertowngeographytest frontierreliabilitytest spacephototest frontierpavingtest; do
             TEST_LOG="$RUNNER_TEMP/troop-$MODE.log"
             TEST_PREFIX="$(printf '%s' "$MODE" | tr '[:lower:]' '[:upper:]')"
             "$GODOT_BIN" --headless --path . --quit-after 30000 \

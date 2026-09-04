@@ -110,8 +110,10 @@ textures for readable globe and voyage views.
 
 ## What's new in 0.6 — SHARED SOCIETIES
 
-Current source version: **0.6.0**, using **multiplayer protocol 12**.
+Current source version: **0.6.1**, using **multiplayer protocol 13**.
 Clients and server must use the same game version and multiplayer protocol.
+The 0.6.1 hotfix removes overlapping town pavement and corrects shared-town
+synchronization and voice traffic over the public UDP connection.
 
 Roots & Rockets is now shared online: six claimable towns, private player bags,
 one wallet across societies, finite markets, funded requests and persistent
@@ -215,7 +217,7 @@ public economy. Read the [shared society guide](docs/SHARED_SOCIETIES.md).
   bananas each, only when it fits in the pack.
 - **Planet and expedition state are multiplayer-authoritative.** The server owns
   the four-seat manifest, exact voyage clock, realm changes, banana spending,
-  and late-join state under **network protocol 12**. Local and remote monkeys also
+  and late-join state under **network protocol 13**. Local and remote monkeys also
   reset every authored joint and transient look, recoil, hand, and vehicle solver
   after vehicle exit, defeat, and revive, so a seated or death pose cannot leak
   into ordinary movement on another peer. Admins can use `/moon [player]` or
@@ -273,7 +275,7 @@ while solo play is paused, while you are away from the Moon, or while the game i
 closed. Test/capture modes use fresh state without reading or writing your colony.
 Network colonies are personal, host-owned session ledgers: harvests, spending,
 range checks, and one-time rewards are validated by the host. This source build
-uses network protocol 12; the public server and every client must run the same
+uses network protocol 13; the public server and every client must run the same
 game version and protocol.
 
 ```bash
@@ -531,8 +533,8 @@ Bananas float along swing arcs; collect them for score (synced).
 
 For download and connection instructions, see
 [Playing with classmates](docs/PLAY_WITH_CLASSMATES.md). Every player and the
-public server must run **0.6.0 / protocol 12**. On bootstrap 3 (0.4.10 or newer),
-apply the signed in-game update and restart, or install the full 0.6.0 package.
+public server must run **0.6.1 / protocol 13**. On bootstrap 3 (0.4.10 or newer),
+apply the signed in-game update and restart, or install the full 0.6.1 package.
 Older installations need the full installer. Close TROOP before replacing an
 installation; on a Mac, launch the replacement in Applications.
 
@@ -553,9 +555,9 @@ stutter on quick repeated presses. Voice volume and the PTT binding are configur
 
 ## Player installers & updates
 
-Download [TROOP 0.6.0](https://github.com/charlesjsantosgit/troop/releases/tag/v0.6.0):
-[Windows Setup](https://github.com/charlesjsantosgit/troop/releases/download/v0.6.0/TROOP-0.6.0-Windows-x86_64-Setup.exe)
-or [macOS universal DMG](https://github.com/charlesjsantosgit/troop/releases/download/v0.6.0/TROOP-0.6.0-macOS-universal.dmg).
+Download [TROOP 0.6.1](https://github.com/charlesjsantosgit/troop/releases/tag/v0.6.1):
+[Windows Setup](https://github.com/charlesjsantosgit/troop/releases/download/v0.6.1/TROOP-0.6.1-Windows-x86_64-Setup.exe)
+or [macOS universal DMG](https://github.com/charlesjsantosgit/troop/releases/download/v0.6.1/TROOP-0.6.1-macOS-universal.dmg).
 The [latest release page](https://github.com/charlesjsantosgit/troop/releases/latest)
 always lists the current packages. The content PCK is used by the updater.
 
@@ -601,7 +603,7 @@ resource pack, are re-verified on every boot, and take effect on the next
 launch. Updates that change Godot itself, the updater bootstrap, native code, or
 non-version project settings instead offer the full Windows installer or macOS disk image.
 The game remains fully playable when GitHub is offline.
-Version 0.6.0 retains bootstrap **3**, introduced by the 0.4.10 full installer.
+Version 0.6.1 retains bootstrap **3**, introduced by the 0.4.10 full installer.
 Installations older than 0.4.10 must replace the app to obtain that bootstrap;
 compatible content updates on bootstrap 3 can apply automatically.
 

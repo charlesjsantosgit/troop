@@ -38,6 +38,8 @@ var _building := false
 var _build_jobs: Array[Callable] = []
 var _crop_jobs: Array[String] = []
 var _surface_batches: Dictionary = {}
+const Paving = preload("res://scripts/frontier_paving.gd")
+var _paving = Paving.new()
 const ServicePoints = preload("res://scripts/frontier_service_points.gd")
 var citizens: Dictionary = {}
 var plot_roots: Dictionary = {}
@@ -94,6 +96,11 @@ func build_step(budget_ms := 2.0) -> bool:
 	while not _build_jobs.is_empty():
 		var job: Callable = _build_jobs.pop_front()
 		job.call()
+		if Time.get_ticks_usec() >= deadline:
+			return false
+	while _paving.pending():
+		for piece: Dictionary in _paving.next():
+			_emit_paving(piece)
 		if Time.get_ticks_usec() >= deadline:
 			return false
 	if not _surface_batches.is_empty():
@@ -236,8 +243,10 @@ func _build_roads() -> void:
 
 func _build_square() -> void:
 	_set_frame(_location("town_square"))
-	_props.cylinder(Vector3(0, 0.035, 0), 8.4, 0.08, Color(0.68, 0.58, 0.39))
-	_props.cylinder(Vector3(0, 0.085, 0), 2.9, 0.12, Color(0.75, 0.68, 0.48))
+	# The plaza shares the street elevation; its footprint is trimmed around
+	# roads before tessellation, so beige and asphalt never fight for a pixel.
+	_build_surface_pad(_location("town_square"),8.4,Color(0.68,0.58,0.39),20,0.075)
+	_build_surface_pad(_location("town_square"),2.9,Color(0.75,0.68,0.48),21,0.075)
 	# A small community tree is the village's visual anchor; its base stays
 	# outside the arrival square used by citizens and the player spawn.
 	_props.cylinder(Vector3(0, 0.6, 4.8), 1.4, 1.2, Color(0.39, 0.37, 0.26), true)
@@ -415,7 +424,7 @@ func _build_oil_rig() -> void:
 
 func _build_refinery() -> void:
 	_set_frame(_location("refinery") + Vector2(0, -6))
-	_props.box(Vector3(0, 0.08, 0), Vector3(18, 0.16, 12), Color(0.48, 0.48, 0.41))
+	_queue_ground_rectangle(_location("refinery")+Vector2(0,-6),Vector2(18,12),Color(0.48,0.48,0.41),0.075)
 	for index in range(3):
 		var x := -5.5 + index * 5.0
 		_props.cylinder(Vector3(x, 2.7, -1.2), 2.0, 5.4, STEEL, true, Vector3.ZERO, 0.4)
@@ -430,7 +439,7 @@ func _build_refinery() -> void:
 
 func _build_gas_station() -> void:
 	_set_frame(_location("gas_station") + Vector2(0, -6))
-	_props.box(Vector3(0, 0.04, 0), Vector3(19, 0.08, 11), Color(0.44, 0.45, 0.4))
+	_queue_ground_rectangle(_location("gas_station")+Vector2(0,-6),Vector2(19,11),Color(0.44,0.45,0.4),0.075)
 	_props.box(Vector3(0, 4.7, 0), Vector3(17, 0.45, 10), CREAM)
 	_props.box(Vector3(0, 4.7, 5.04), Vector3(17, 0.5, 0.12), TEAL)
 	for x in [-6.7, 6.7]:
@@ -446,7 +455,7 @@ func _build_gas_station() -> void:
 
 func _build_airfield() -> void:
 	_set_frame(_location("airfield"))
-	_props.box(Vector3(0, 0.025, 16), Vector3(24, 0.05, 36), Color(0.28, 0.3, 0.29))
+	_queue_ground_rectangle(_location("airfield")+Vector2(0,16),Vector2(24,36),Color(0.28,0.3,0.29),0.05)
 	for index in range(6):
 		_props.box(Vector3(0, 0.057, 3 + index * 5.7), Vector3(0.45, 0.02, 2.5), CREAM)
 	for x in [-10.8, 10.8]:
@@ -731,50 +740,76 @@ func _path(points: Array, width: float) -> void:
 	_build_surface_path(points, width, road, planet=="earth")
 
 
-func _build_surface_path(points: Array, width: float, color: Color, clip_roads := false) -> void:
-	var vertices := PackedVector3Array()
-	var indices := PackedInt32Array()
-	for segment in range(points.size() - 1):
+func _build_surface_path(points: Array, width: float, color: Color, footpath := false) -> void:
+	if _collision_only: return
+	for segment in range(points.size()-1):
 		var start: Vector2 = points[segment]
-		var finish: Vector2 = points[segment + 1]
-		var direction := (finish - start).normalized()
-		var side := Vector2(direction.y, -direction.x) * width * 0.5
-		var steps := maxi(ceili(start.distance_to(finish) / 0.8), 1)
-		var offset := vertices.size()
-		for step in range(steps + 1):
-			var xz := start.lerp(finish, step / float(steps))
-			vertices.append(_point(xz - side, 0.075))
-			vertices.append(_point(xz + side, 0.075))
-			if step < steps:
-				var end_xz := start.lerp(finish,(step+1)/float(steps))
-				var clear := true
-				if clip_roads:
-					for corner: Vector2 in [xz-side,xz+side,end_xz-side,end_xz+side]:
-						if _road_distance(corner)<4.02: clear = false
-				if clear:
-					var index := offset + step * 2
-					indices.append_array(PackedInt32Array([index, index + 2, index + 1, index + 1, index + 2, index + 3]))
-			if planet == "moon" and step % 14 == 0:
-				_props.piece("sphere", _point(xz + side, 0.22), Vector3(0.17, 0.25, 0.17), Color(0.45, 0.85, 0.84), Vector3.ZERO, 0, 0.25)
-	_surface_mesh("ConformingServiceWalkway", vertices, indices, color)
+		var finish: Vector2 = points[segment+1]
+		var direction := (finish-start).normalized()
+		var side := Vector2(direction.y,-direction.x)*width*0.5
+		var steps := maxi(ceili(start.distance_to(finish)/0.8),1) if planet=="moon" else 1
+		for step in range(steps):
+			var a := start.lerp(finish,float(step)/steps)
+			var b := start.lerp(finish,float(step+1)/steps)
+			_paving.add(PackedVector2Array([a-side,a+side,b+side,b-side]),color,0.075,
+				10 if footpath or planet=="moon" else 50,"footpath" if footpath else "street")
+			if planet=="moon" and step%14==0:
+				_props.piece("sphere",_point(a+side,0.22),Vector3(0.17,0.25,0.17),Color(0.45,0.85,0.84),Vector3.ZERO,0,0.25)
 
 
-func _build_surface_pad(center: Vector2, radius: float, color := NAVY) -> void:
-	if _collision_only:
-		return
+func _build_surface_pad(center: Vector2, radius: float, color := NAVY,
+		priority := 25, lift := 0.09) -> void:
+	if _collision_only: return
+	var polygon := PackedVector2Array()
+	for sector in range(48):
+		var angle := sector*TAU/48.0
+		polygon.append(center+Vector2(cos(angle),sin(angle))*radius)
+	_paving.add(polygon,color,lift,priority,"pad")
+
+
+func _queue_ground_rectangle(center: Vector2, size: Vector2, color: Color, lift: float) -> void:
+	if _collision_only: return
+	var half := size*0.5
+	_paving.add(PackedVector2Array([center-half,center+Vector2(half.x,-half.y),
+		center+half,center+Vector2(-half.x,half.y)]),color,lift,20,"forecourt")
+
+
+func _emit_paving(piece: Dictionary) -> void:
 	var vertices := PackedVector3Array()
+	var polygon: PackedVector2Array = piece.polygon
+	if planet=="moon" and polygon.size()>7:
+		var center := Vector2.ZERO
+		for point in polygon: center += point
+		center /= polygon.size()
+		for index in range(polygon.size()):
+			_append_ground_triangle(vertices,center,polygon[(index+1)%polygon.size()],polygon[index],float(piece.lift))
+	else:
+		for index in range(1,polygon.size()-1):
+			_append_ground_triangle(vertices,polygon[0],polygon[index+1],polygon[index],float(piece.lift))
 	var indices := PackedInt32Array()
-	var sectors := 48
-	var rings := 12
-	for ring in range(rings + 1):
-		for sector in range(sectors):
-			var angle := sector * TAU / sectors
-			vertices.append(_point(center + Vector2(cos(angle), sin(angle)) * radius * ring / rings, 0.09))
-			if ring < rings:
-				var current := ring * sectors + sector
-				var next := ring * sectors + (sector + 1) % sectors
-				indices.append_array(PackedInt32Array([current, next, current + sectors, current + sectors, next, next + sectors]))
-	_surface_mesh("ConformingCargoApron", vertices, indices, color)
+	for index in range(vertices.size()): indices.append(index)
+	_surface_mesh("ExclusiveTownPaving",vertices,indices,piece.color)
+
+
+func _append_ground_triangle(vertices: PackedVector3Array, a: Vector2, b: Vector2,
+		c: Vector2, lift: float, depth := 0) -> void:
+	if absf((b-a).cross(c-a))<0.00001:
+		return
+	# Curved lunar ground retains tessellation after clipping. Earth towns are
+	# graded flat, so their exclusive polygons need no redundant interior grid.
+	if planet=="moon" and depth<6 and maxf(a.distance_to(b),maxf(b.distance_to(c),c.distance_to(a)))>1.4:
+		var ab := (a+b)*0.5
+		var bc := (b+c)*0.5
+		var ca := (c+a)*0.5
+		_append_ground_triangle(vertices,a,ab,ca,lift,depth+1)
+		_append_ground_triangle(vertices,ab,b,bc,lift,depth+1)
+		_append_ground_triangle(vertices,ca,bc,c,lift,depth+1)
+		_append_ground_triangle(vertices,ab,bc,ca,lift,depth+1)
+	else:
+		if (b-a).cross(c-a)>0.0:
+			vertices.append_array(PackedVector3Array([_point(a,lift),_point(c,lift),_point(b,lift)]))
+		else:
+			vertices.append_array(PackedVector3Array([_point(a,lift),_point(b,lift),_point(c,lift)]))
 
 
 func _surface_mesh(node_name: String, vertices: PackedVector3Array,
@@ -797,15 +832,22 @@ func _flush_surface_step() -> void:
 	var batch: Dictionary = _surface_batches[key]
 	var surface := SurfaceTool.new()
 	surface.begin(Mesh.PRIMITIVE_TRIANGLES)
+	var paving_surface: bool = str(batch.name)=="ExclusiveTownPaving"
 	for vertex in batch.vertices:
+		if paving_surface:
+			var normal := Vector3.UP
+			if _host.has_method("surface_normal"):
+				normal = _host.call("surface_normal",vertex.x,vertex.z)
+			surface.set_normal(normal)
 		surface.add_vertex(vertex)
 	for index in range(0,batch.indices.size(),3):
 		surface.add_index(batch.indices[index])
 		surface.add_index(batch.indices[index+2])
 		surface.add_index(batch.indices[index+1])
-	surface.generate_normals()
+	if not paving_surface:
+		surface.generate_normals()
 	var node := MeshInstance3D.new()
-	node.name = str(batch.name)
+	node.name = "%s_%s" % [str(batch.name),key]
 	node.mesh = surface.commit()
 	node.material_override = FrontierProps.material(batch.color)
 	node.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
@@ -880,7 +922,9 @@ func _build_street(start: Vector2, finish: Vector2, width: float) -> void:
 			var a := start.lerp(finish,float(step)/steps)+side*sign_value*(width*0.5+0.65)
 			var b := start.lerp(finish,float(step+1)/steps)+side*sign_value*(width*0.5+0.65)
 			if _props.has_ground_clearance((a+b)*0.5,0.75) and _road_distance((a+b)*0.5)>width*0.5+0.05:
-				_street_strip(a,b,1.1,Color(0.59,0.55,0.43),0.13)
+				var shoulder := side*0.55
+				_paving.add(PackedVector2Array([a-shoulder,a+shoulder,b+shoulder,b-shoulder]),
+					Color(0.59,0.55,0.43),0.13,40,"sidewalk")
 
 
 func _street_strip(start: Vector2, finish: Vector2, width: float, color: Color, lift: float) -> void:
