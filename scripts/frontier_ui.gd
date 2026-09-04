@@ -311,7 +311,11 @@ func _citizen(id: String) -> void:
 	# trading inventory. Keep these reachable when the resident shares its desk.
 	var person_position: Vector3 = controller._interaction_position(id)
 	for workplace: Dictionary in controller.interactions():
-		if str(workplace.get("kind", "")) not in ["facility", "board"]:
+		if str(workplace.get("kind", "")) not in ["facility", "board", "market"]:
+			continue
+		# Merchants already embed their own desk above. Other workers can stand
+		# here while delivering goods and must still offer the physical market.
+		if workplace.get("kind") == "market" and str(workplace.id) == trade:
 			continue
 		if person_position.distance_to(workplace.position) <= 2.0 and _near(id) and _near(str(workplace.id)):
 			_button(_body, "Use " + str(workplace.get("label", "workplace")),

@@ -46,6 +46,13 @@ func run(owner: Node) -> void:
 	if not is_instance_valid(nana):
 		await _finish()
 		return
+	var market: Dictionary = {}
+	for item: Dictionary in controller.interactions():
+		if item.get("id") == "earth_market": market = item
+	check(not market.is_empty(),"actual settlement exposes the market desk")
+	if market.is_empty():
+		await _finish()
+		return
 	# These are ordinary standing approaches, not the prior test's teleport
 	# onto the NPC's elevated interaction anchor (which hid the desk tie).
 	var approaches := [Vector2(0,2.5),Vector2(1.6,2.2),Vector2(-1.6,2.2)]
@@ -76,8 +83,9 @@ func run(owner: Node) -> void:
 		check(_visible_citizen_labels().is_empty(),
 			"open conversation hides nearby resident nameplates")
 		check(not _visible_button(controller.ui,"My journal")
-			and _text(controller.ui._body).contains("My trading desk"),
-			"Nana's panel exposes their trading desk without a competing journal shortcut")
+			and _text(controller.ui._body).contains("My trading desk")
+			and not _visible_button(controller.ui,"Use " + str(market.label)),
+			"Nana's panel exposes one trading desk without a duplicate market link or journal shortcut")
 		await _tap(KEY_E)
 		check(controller.ui.visible and controller.ui.context.get("id","")=="nana"
 			and controller.ui.page=="Interaction",
@@ -112,7 +120,65 @@ func run(owner: Node) -> void:
 	check(controller.simulation.state.inventories.player_earth==initial_bag
 		and controller.simulation.state.accounts.player==initial_cash,
 		"conversation, tutorial, and journal inputs never transact or reset player funds")
+	await _market_fallback(nana,market)
 	await _finish()
+
+func _market_fallback(nana: Node3D,market: Dictionary) -> void:
+	controller.ui.close()
+	# A packer servicing the market can be the closest person while the
+	# merchant is elsewhere. Keep model and physical presentation together;
+	# ordinary E must still select that person before their explicit desk link.
+	var packer: Node3D = controller.earth_settlement.citizens.get("pip")
+	check(is_instance_valid(packer),"market fallback uses the actual packer resident")
+	if not is_instance_valid(packer): return
+	var market_xz := Vector2(market.position.x,market.position.z)
+	for entry: Array in [[nana,"nana",market_xz+Vector2(16,0)],[packer,"pip",market_xz]]:
+		var at: Vector2 = entry[2]
+		controller.simulation.state.citizens[entry[1]].position = [at.x,at.y]
+		var resident: Node3D = entry[0]
+		resident.position = Vector3(at.x,Gen.height(at.x,at.y),at.y)
+	var approach := Vector3(market_xz.x,0,market_xz.y+2.5)
+	approach.y = Gen.height(approach.x,approach.z)+0.15
+	player.admin_teleport(approach)
+	await _frames(8)
+	check(controller.nearest_interaction().get("id")=="pip",
+		"nonmerchant at the desk wins the actual nearest-person selection")
+	await _tap(KEY_E)
+	var link := _find_button(controller.ui,"Use " + str(market.label))
+	check(controller.ui.context.get("id")=="pip" and link!=null
+		and not _text(controller.ui._body).contains("My trading desk"),
+		"E opens the packer's conversation with a physical Use market link")
+	if link==null: return
+	link.pressed.emit()
+	await _frames(2)
+	check(controller.ui.context.get("id")=="earth_market"
+		and controller.selected_interaction.get("id")=="earth_market"
+		and controller.ui._heading.text==str(controller.simulation.state.locations.earth_market.label),
+		"Use market executes the real callback and selects the authoritative physical desk")
+	var quantity: SpinBox = controller.ui._body.find_children("*","SpinBox",true,false)[0]
+	quantity.value = 1
+	var buy: Button
+	for label in controller.ui._body.find_children("*","Label",true,false):
+		if label.text == "Banana": buy = _find_button(label.get_parent(),"Buy")
+	check(buy!=null,"market reached from a nonmerchant has the real banana purchase control")
+	if buy==null: return
+	var old_bag: int = controller.simulation.stock("player_earth","banana")
+	var old_stock: int = controller.simulation.stock("earth_market","banana")
+	var old_cash: int = controller.simulation.balance("player")
+	var price: int = controller.simulation.quote("earth_market","banana",1,true)
+	buy.pressed.emit()
+	await _frames(2)
+	check(controller.simulation.stock("player_earth","banana")==old_bag+1
+		and controller.simulation.stock("earth_market","banana")==old_stock-1
+		and controller.simulation.balance("player")==old_cash-price,
+		"purchase through the fallback desk transfers one finite banana for the quoted credits")
+
+func _find_button(node: Node,value: String) -> Button:
+	if node is Button and node.text==value and node.is_visible_in_tree(): return node
+	for child in node.get_children():
+		var result := _find_button(child,value)
+		if result!=null: return result
+	return null
 
 func _tap(code: Key) -> void:
 	var event:=_key(code,true)
