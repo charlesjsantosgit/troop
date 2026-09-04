@@ -10,6 +10,7 @@ const RoutesScript = preload("res://scripts/frontier_routes.gd")
 const VERSION := 1
 const PEDESTRIAN_RADIUS := 0.34
 const PEDESTRIAN_SPACING := 0.86
+const OCCUPIED_WAYPOINT_CAPTURE_RADIUS := 1.0
 const WALK_SPEED := 2.0
 const DAY_SECONDS := 1200.0
 const LUNAR_DAY_SECONDS := 4800.0
@@ -697,6 +698,16 @@ func _update_citizen(worker: Dictionary, dt: float) -> void:
 	var position := Vector2(float(worker.position[0]),float(worker.position[1]))
 	var waypoint: Array = worker.route[0] if not worker.route.is_empty() else worker.destination
 	var destination := Vector2(float(waypoint[0]),float(waypoint[1]))
+	# Road junctions and service centers are shared navigation points, not work
+	# positions. If another body occupies an intermediate waypoint, capture it
+	# from just outside personal space so the route can continue around them.
+	# The final work/cargo destination remains strict and collision-reserved.
+	var arrival_radius := 0.1
+	var waypoint_distance := position.distance_to(destination)
+	if not bool(worker.get("physical_transport",false)) and worker.route.size()>1 \
+			and waypoint_distance<=OCCUPIED_WAYPOINT_CAPTURE_RADIUS \
+			and not _pedestrian_segment_clear(worker,destination,destination):
+		arrival_radius=OCCUPIED_WAYPOINT_CAPTURE_RADIUS
 	if bool(worker.get("physical_transport",false)):
 		var motion: Dictionary=state.get("traffic",{}).get(worker.id,{})
 		var ready := int(motion.get("epoch",-1))==int(worker.get("motion_epoch",0)) \
@@ -709,7 +720,7 @@ func _update_citizen(worker: Dictionary, dt: float) -> void:
 			return
 		worker.route.clear()
 		worker.blocker=""
-	elif position.distance_to(destination)>0.1:
+	elif waypoint_distance>arrival_radius:
 		var obstruction := str(worker.get("route_blocked",""))
 		if not obstruction.is_empty():
 			worker.blocker=obstruction
@@ -1556,6 +1567,7 @@ func pedestrian_step(worker: Dictionary, from: Vector2, target: Vector2, dt: flo
 		var forward := (target-position).normalized()
 		var best := position
 		var best_score := -INF
+		var retreated := false
 		for angle in [0.0, 0.52, -0.52, 1.05, -1.05, 1.57, -1.57]:
 			var step := forward.rotated(angle) * stride
 			var candidate := position + step
@@ -1566,10 +1578,27 @@ func pedestrian_step(worker: Dictionary, from: Vector2, target: Vector2, dt: flo
 				best = candidate
 				best_score = score
 			if angle == 0.0: break # An unobstructed forward stride is always best.
+		# A worker leaving a tightly occupied service bay may need one step away
+		# from the destination before a safe passing lane opens. Evaluate rearward
+		# arcs only when every forward/side option is blocked.
+		if best == position:
+			for angle in [2.09, -2.09, 2.62, -2.62, PI]:
+				var step := forward.rotated(angle) * stride
+				var candidate := position + step
+				if not _pedestrian_segment_clear_against(position, candidate, nearby):
+					continue
+				# Angles are ordered by forward progress, keeping right on ties.
+				best = candidate
+				retreated = true
+				break
 		if best == position:
 			break
 		position = best
 		remaining -= stride
+		# Replan after one deliberate retreat instead of spending the rest of this
+		# tick oscillating around the same packed group.
+		if retreated:
+			return position
 	return position
 
 

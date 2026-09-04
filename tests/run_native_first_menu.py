@@ -117,7 +117,8 @@ def evaluate_output(output: str, status: int, user_dir: Path,
     events = parse_events(output)
     errors = [line for line in output.splitlines()
               if "SCRIPT ERROR:" in line or line.startswith("ERROR:")
-              or "ObjectDB instances leaked" in line or "resources still in use" in line]
+              or ("ObjectDB instances" in line and "leaked" in line)
+              or "resources still in use" in line]
     errors += [str(event.get("message", "observer failure")) for event in events
                if event["event"] == "FAIL"]
     if status != 0:

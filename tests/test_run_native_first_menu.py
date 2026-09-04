@@ -100,6 +100,7 @@ class FirstMenuMetricsTest(unittest.TestCase):
     def test_errors_and_nonzero_exit_are_not_filtered(self):
         for error in ("ERROR: shader failure", "SCRIPT ERROR: invalid method",
                       "WARNING: ObjectDB instances leaked at exit.",
+                      "WARNING: 8 ObjectDB instances were leaked at exit (run with `--verbose` for details).",
                       "ERROR: 3 RID allocations of type 'DummyShader' were leaked at exit."):
             with self.subTest(error=error):
                 self.assertFalse(evaluate(clean_output() + error)["passed"])

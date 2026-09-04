@@ -21,6 +21,26 @@ func _freeze(sim) -> void:
 func _advance(sim, seconds: int) -> void:
 	for _i in range(seconds): sim.tick(1.0)
 
+func _worker_completion_budget(worker: Dictionary) -> int:
+	var cursor := Vector2(float(worker.position[0]),float(worker.position[1]))
+	var distance := 0.0
+	for waypoint in worker.get("route",[]):
+		var next := Vector2(float(waypoint[0]),float(waypoint[1]))
+		distance+=cursor.distance_to(next)
+		cursor=next
+	# Each route point gets one arrival/pop tick and one bounded passing tick.
+	# Work time is authoritative model state, so this deadline scales with the
+	# actual route and task instead of assuming the former walking speed.
+	return ceili(distance/float(SimScript.WALK_SPEED) \
+		+float(worker.get("work_remaining",0.0))+float(worker.get("route",[]).size()*2)+2.0)
+
+func _advance_until_reserve_changes(sim, reserve: int, deadline: int) -> int:
+	for elapsed in range(1,deadline+1):
+		sim.tick(1.0)
+		if int(sim.state.facilities.oil_rig.reserve)<reserve:
+			return elapsed
+	return -1
+
 func run(_main = null) -> void:
 	run_checks()
 	print("FRONTIERTEST result=%d/%d %s"%[passed,checks,"PASS" if passed==checks else "FAIL"])
@@ -158,8 +178,14 @@ func run_checks() -> bool:
 	var reserve: int = sim.state.facilities.oil_rig.reserve
 	_advance(sim,5)
 	_check(int(sim.state.facilities.oil_rig.reserve)==reserve,"distant rigger cannot produce before arrival")
-	_advance(sim,110)
-	_check(int(sim.state.facilities.oil_rig.reserve)<reserve and int(sim.state.metrics.crude_extracted)>0,"rigger travels then performs actual extraction")
+	var extraction_target := Vector2(float(sim.state.citizens.derrick.destination[0]),float(sim.state.citizens.derrick.destination[1]))
+	var extraction_budget := _worker_completion_budget(sim.state.citizens.derrick)
+	var extraction_seconds := _advance_until_reserve_changes(sim,reserve,extraction_budget)
+	var extraction_position := Vector2(float(sim.state.citizens.derrick.position[0]),float(sim.state.citizens.derrick.position[1]))
+	_check(extraction_seconds>0 and extraction_seconds<=extraction_budget \
+		and extraction_position.distance_to(extraction_target)<=0.1 \
+		and sim._pedestrian_segment_clear(sim.state.citizens.derrick,extraction_position,extraction_position) \
+		and int(sim.state.metrics.crude_extracted)>0,"rigger reaches its clear work position then extracts within route and work budget")
 	sim.state.inventories.oil_rig.diesel=0
 	sim.state.citizens.derrick._job={}
 	sim.state.citizens.derrick.cooldown=0.0
@@ -260,13 +286,22 @@ func run_checks() -> bool:
 	blocked_worker.position=[0,4]
 	blocked_worker.route_blocked="Road blocked by construction"
 	_advance(sim,1)
+	var blocked_position: Array = blocked_worker.position.duplicate()
+	var neighbor: Dictionary = sim.state.citizens.momo
+	var starts_clear := Vector2(float(blocked_position[0]),float(blocked_position[1])).distance_to( \
+		Vector2(float(neighbor.position[0]),float(neighbor.position[1])))>=float(SimScript.PEDESTRIAN_SPACING)-0.001
 	var remaining_before: float = blocked_worker.work_remaining
 	var reserve_before: int = sim.state.facilities.oil_rig.reserve
+	var recovery_target := Vector2(float(blocked_worker.destination[0]),float(blocked_worker.destination[1]))
 	_advance(sim,10)
-	_check(blocked_worker.position==[0,4] and float(blocked_worker.work_remaining)==remaining_before and int(sim.state.facilities.oil_rig.reserve)==reserve_before,"physical obstruction stops movement and task commits without losing cargo")
+	_check(starts_clear and blocked_worker.position==blocked_position and float(blocked_worker.work_remaining)==remaining_before and int(sim.state.facilities.oil_rig.reserve)==reserve_before,"physical obstruction stops a safely separated worker and task commits without losing cargo")
 	blocked_worker.route_blocked=""
-	_advance(sim,110)
-	_check(int(sim.state.facilities.oil_rig.reserve)<reserve_before,"clearing route resumes arrival and actual production")
+	var recovery_budget := _worker_completion_budget(blocked_worker)
+	var recovery_seconds := _advance_until_reserve_changes(sim,reserve_before,recovery_budget)
+	var recovery_position := Vector2(float(blocked_worker.position[0]),float(blocked_worker.position[1]))
+	_check(recovery_seconds>0 and recovery_seconds<=recovery_budget \
+		and recovery_position.distance_to(recovery_target)<=0.1 \
+		and sim._pedestrian_segment_clear(blocked_worker,recovery_position,recovery_position),"clearing route resumes arrival and actual production from a clear work position within budget")
 	var electrical = _world()
 	electrical.state.facilities.solar_array.panels=12
 	var electrical_room: Dictionary = electrical.state.facilities.lunar_greenhouse

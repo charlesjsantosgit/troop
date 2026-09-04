@@ -42,6 +42,8 @@
 
 - Give town residents capsule collisions, separated work positions and pedestrian
   avoidance. Workers move to their work and use poses specific to their jobs.
+- Let workers pass occupied route points and step out of crowded service bays.
+  Production and deliveries still wait for arrival at the actual workplace.
 - Set the player's actual standing mesh and body height to **6 feet (1.8288 m)**.
   Camera eye level, remote avatars and seated limb poses use the same scale.
   Individual adult NPC heights remain 5 feet 7 inches to 6 feet 2 inches.
