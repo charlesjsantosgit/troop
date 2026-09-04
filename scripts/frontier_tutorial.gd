@@ -6,8 +6,8 @@ extends Node
 const CHAPTERS := ["basics", "farming", "industry", "moon"]
 const LESSONS := {
 	"basics": [
-		["Meet Nana", "Follow the marker to Nana, the market keeper. Walk with WASD, look with the mouse, then press E beside him.", "nana", "meet", "nana"],
-		["Buy a banana", "Nana's menu belongs to Nana. At his trading desk, find Banana and buy 1. You can see your price and bag before buying.", "earth_market", "buy", "banana"],
+		["Meet Nana", "Follow the marker to Nana, the market keeper. Walk with WASD, look with the mouse, then press E beside them.", "nana", "meet", "nana"],
+		["Buy a banana", "Nana's menu belongs to Nana. At their trading desk, find Banana and buy 1. You can see your price and bag before buying.", "earth_market", "buy", "banana"],
 		["Visit the community board", "Close the menu and follow the marker. Press E at the board. B opens your personal journal; it also lets you find people and places.", "town_square", "meet", "town_square"],
 		["Accept a neighbor's request", "Accept 'A welcome for the neighborhood'. The request needs 8 bananas. Your starting bag and purchase cover it; accepting alone does not pay you.", "town_square", "accept_quest", "first_harvest"],
 		["Give the bananas", "Visit the market desk, press E, and give the 8 bananas for your active request. The bananas leave your bag and you receive the stated reward.", "earth_market", "deliver_quest", "first_harvest"]],

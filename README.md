@@ -110,10 +110,12 @@ textures for readable globe and voyage views.
 
 ## What's new in 0.6 — SHARED SOCIETIES
 
-Current source version: **0.6.1**, using **multiplayer protocol 13**.
+Current source version: **0.6.2**, using **multiplayer protocol 13**.
 Clients and server must use the same game version and multiplayer protocol.
-The 0.6.1 hotfix removes overlapping town pavement and corrects shared-town
-synchronization and voice traffic over the public UDP connection.
+The 0.6.2 update gives the player a standing height of 5 feet 10 inches, with
+adult NPCs ranging from 5 feet 7 inches to 6 feet 2 inches. E beside Nana opens
+their conversation and trading desk; compact labels keep nearby text readable.
+The previous town-pavement and public-network fixes are included.
 
 Roots & Rockets is now shared online: six claimable towns, private player bags,
 one wallet across societies, finite markets, funded requests and persistent
@@ -533,8 +535,8 @@ Bananas float along swing arcs; collect them for score (synced).
 
 For download and connection instructions, see
 [Playing with classmates](docs/PLAY_WITH_CLASSMATES.md). Every player and the
-public server must run **0.6.1 / protocol 13**. On bootstrap 3 (0.4.10 or newer),
-apply the signed in-game update and restart, or install the full 0.6.1 package.
+public server must run **0.6.2 / protocol 13**. On bootstrap 3 (0.4.10 or newer),
+apply the signed in-game update and restart, or install the full 0.6.2 package.
 Older installations need the full installer. Close TROOP before replacing an
 installation; on a Mac, launch the replacement in Applications.
 
@@ -555,9 +557,9 @@ stutter on quick repeated presses. Voice volume and the PTT binding are configur
 
 ## Player installers & updates
 
-Download [TROOP 0.6.1](https://github.com/charlesjsantosgit/troop/releases/tag/v0.6.1):
-[Windows Setup](https://github.com/charlesjsantosgit/troop/releases/download/v0.6.1/TROOP-0.6.1-Windows-x86_64-Setup.exe)
-or [macOS universal DMG](https://github.com/charlesjsantosgit/troop/releases/download/v0.6.1/TROOP-0.6.1-macOS-universal.dmg).
+Download [TROOP 0.6.2](https://github.com/charlesjsantosgit/troop/releases/tag/v0.6.2):
+[Windows Setup](https://github.com/charlesjsantosgit/troop/releases/download/v0.6.2/TROOP-0.6.2-Windows-x86_64-Setup.exe)
+or [macOS universal DMG](https://github.com/charlesjsantosgit/troop/releases/download/v0.6.2/TROOP-0.6.2-macOS-universal.dmg).
 The [latest release page](https://github.com/charlesjsantosgit/troop/releases/latest)
 always lists the current packages. The content PCK is used by the updater.
 
@@ -603,7 +605,7 @@ resource pack, are re-verified on every boot, and take effect on the next
 launch. Updates that change Godot itself, the updater bootstrap, native code, or
 non-version project settings instead offer the full Windows installer or macOS disk image.
 The game remains fully playable when GitHub is offline.
-Version 0.6.1 retains bootstrap **3**, introduced by the 0.4.10 full installer.
+Version 0.6.2 retains bootstrap **3**, introduced by the 0.4.10 full installer.
 Installations older than 0.4.10 must replace the app to obtain that bootstrap;
 compatible content updates on bootstrap 3 can apply automatically.
 

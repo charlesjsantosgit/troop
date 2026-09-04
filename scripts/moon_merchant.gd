@@ -65,13 +65,14 @@ func _ready() -> void:
 	_collision.name = "MerchantBodyCollision"
 	var capsule := CapsuleShape3D.new()
 	capsule.radius = 0.29
-	capsule.height = 1.3
+	capsule.height = MonkeyRig.npc_height(DISPLAY_NAME)
 	_collision.shape = capsule
-	_collision.position.y = 0.65
+	_collision.position.y = capsule.height * 0.5
 	add_child(_collision)
 	rig = MonkeyRig.new()
 	rig.name = "ArticulatedLunarMonkey"
 	rig.setup(DISPLAY_NAME, true)
+	rig.set_standing_height(MonkeyRig.npc_height(DISPLAY_NAME))
 	add_child(rig)
 	_clear_hostile_outlines(rig)
 	rig.set_melee_pose(false, false, 0.0, 0)
@@ -84,8 +85,8 @@ func _ready() -> void:
 	_build_merchant_livery()
 	_hitbox = CombatHitbox.new()
 	_hitbox.name = "MerchantHitbox"
-	_hitbox.setup_capsule(self, "body", 0.29, 1.1)
-	_hitbox.position.y = 0.65
+	_hitbox.setup_capsule(self, "body", 0.29, capsule.height)
+	_hitbox.position.y = capsule.height * 0.5
 	add_child(_hitbox)
 	if is_instance_valid(_shop):
 		home = _ground_point(_shop.to_global(HOME_OFFSET))
@@ -348,7 +349,7 @@ func _build_merchant_livery() -> void:
 	cheese_sample.visible = false
 	status_label = Label3D.new()
 	status_label.name = "MerchantDialogue"
-	status_label.position.y = 1.92
+	status_label.position.y = rig.standing_height + 0.35
 	status_label.font_size = 30
 	status_label.pixel_size = 0.005
 	status_label.modulate = Color(1.0, 0.88, 0.48)

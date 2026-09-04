@@ -26,11 +26,11 @@ the next launch. TROOP verifies the signature, exact file size, and SHA-256
 digest before it loads any downloaded code. Engine or installer-level changes
 still require the normal Windows installer or macOS disk-image flow.
 
-TROOP 0.6.1 fixes town surface flicker and shared-town network traffic. Installations
+TROOP 0.6.2 corrects player/NPC heights, Nana conversations and nearby text. Installations
 on bootstrap 3 (0.4.10 or newer) can apply the signed content update and restart.
 Older installations need the full installer. Close every running copy before
 replacing the app. On a Mac, replace TROOP.app in Applications and launch that
-copy. Confirm 0.6.1 on the menu before joining the protocol-13 server.
+copy. Confirm 0.6.2 on the menu before joining the protocol-13 server.
 
 Choose PLAY ONLINE - SHARED TOWNS for six Earth/Moon towns, claimable communities,
 finite markets, farming, job-specific workers and physical delivery vehicles.

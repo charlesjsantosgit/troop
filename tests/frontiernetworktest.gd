@@ -173,11 +173,23 @@ func _position(point: Vector3) -> void:
 		await create_timer(0.06).timeout
 
 func _view(town: String) -> void:
-	var before: int = service._view_sequence
+	# A view for the currently watched town can still be in flight after an
+	# action. A global sequence change therefore does not prove that this town's
+	# requested personalized snapshot arrived; wait for its actual signal.
+	# Dictionaries are reference values, so the signal closure can publish its
+	# observation back to this coroutine on every supported Godot build.
+	var receipt := {"received": false}
+	var observer := func(changed_town: String):
+		if changed_town == town:
+			receipt.received = true
+	service.state_changed.connect(observer)
 	service.watch_town(town)
 	var deadline := Time.get_ticks_msec() + 4000
-	while service._view_sequence == before and Time.get_ticks_msec() < deadline:
+	while not receipt.received and Time.get_ticks_msec() < deadline:
 		await process_frame
+	service.state_changed.disconnect(observer)
+	if not receipt.received:
+		check(false, "server sent requested " + town + " view")
 
 func _wait_file(name: String) -> void:
 	while not FileAccess.file_exists(directory.path_join(name)):

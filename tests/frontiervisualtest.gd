@@ -18,6 +18,11 @@ class TestController extends Node:
 	func current_planet() -> String: return realm
 	func current_town() -> Dictionary: return simulation.state.town
 	func interactions() -> Array: return []
+	func _interaction_position(target: String) -> Vector3:
+		for candidate: Dictionary in interactions():
+			if str(candidate.get("id", "")) == target:
+				return candidate.position
+		return Vector3.INF
 	func locate(_id: String) -> void: pass
 	func locate_rocket() -> void: pass
 	func locate_town(_id: String) -> void: pass
