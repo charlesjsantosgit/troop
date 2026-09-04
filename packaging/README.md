@@ -77,12 +77,13 @@ either one.
 ## Publishing a release
 
 Version **0.5.0 — Roots & Rockets** retains bootstrap **3**, protocol **11**,
-and `minimum_bootstrap=3`. The candidate uses `requires_installer=false` for a
-compatible content update from the **0.4.10** installed bootstrap. **Before
-publishing, verify the 0.5.0 content pack in the actual 0.4.10 release engine.**
-That compatibility gate is pending; set `requires_installer=true` and revise
-player instructions if a full installation is required. Do not change the
-bootstrap or protocol merely to bypass this gate.
+`minimum_bootstrap=3`, and `requires_installer=false`. An isolated copy of the
+actual **0.4.10** installed app verified the signed candidate, staged and mounted
+it, confirmed a stable boot, and retained it on restart. New global classes,
+the normal menu, astronomy resources, and the live offline career loaded from
+the pack; its effective network version became 0.5.0. No new engine, native
+library, updater bootstrap, wire schema, or non-version project setting is
+required. Repeat this native update gate for later releases.
 
 Installations older than 0.4.10 need the full 0.5.0 installer because the
 renderer and updater startup migration requires bootstrap 3. The server and
