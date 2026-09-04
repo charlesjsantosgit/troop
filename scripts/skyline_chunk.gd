@@ -82,7 +82,8 @@ func _build_terrain_and_water() -> void:
 	terrain_instance.mesh = terrain.commit()
 	terrain_instance.material_override = Visuals.skyline_ground_material()
 	terrain_instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-	terrain_instance.visibility_range_end = Gen.SKYLINE_DISTANCE + SECTOR_SIZE
+	# Fragment ownership follows resident terrain, independent of camera altitude.
+	# A center-distance cull could remove the chosen owner under a chase camera.
 	terrain_instance.extra_cull_margin = 40.0
 	add_child(terrain_instance)
 

@@ -26,11 +26,16 @@ the next launch. TROOP verifies the signature, exact file size, and SHA-256
 digest before it loads any downloaded code. Engine or installer-level changes
 still require the normal Windows installer or macOS disk-image flow.
 
-TROOP 0.4.10 requires the FULL INSTALLER once, including when updating 0.4.9.
-Download the offered 0.4.10 installer, close every running copy of TROOP, and
-install it. On a Mac, replace the old TROOP.app in Applications, then launch
-that copy. Confirm 0.4.10 on the menu. This installs the startup fixes and
-updater bootstrap 3; future compatible content updates remain automatic.
+TROOP 0.5.0 adds Roots & Rockets and fixes planetary terrain. Existing 0.4.10
+installations can apply the signed content update and restart. Installations
+older than 0.4.10 need the full 0.5.0 installer for updater bootstrap 3. Close
+every running copy before replacing the app. On a Mac, replace TROOP.app in
+Applications and launch that copy. Confirm 0.5.0 on the menu before joining.
+
+Choose ROOTS & ROCKETS or MOON EXPEDITION for the saved offline society:
+farming, jobs, finite markets, oil delivery, and lunar solar power. E talks or
+works nearby; B opens the Society board. Public multiplayer retains classic
+combat, vehicles, and the shared lunar expedition.
 
 The startup changes were measured on an M4 Mac, not an M1. M1/Tahoe acceptance
 is still pending, and occasional startup/menu hitches remain under investigation.

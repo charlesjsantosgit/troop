@@ -34,18 +34,13 @@ const SHOP_XZ := Vector2(58.0, -32.0)
 const ROCKET_ORIGIN_ABOVE_PAD := 13.0
 const LANDING_PLATFORM_RADIUS := 7.5
 const LANDING_PLATFORM_THICKNESS := 0.45
-const LUNAR_STAR_COUNT := 360
 const LUNAR_ROCK_COUNT := 96
 
 static var _surface_shader: Shader
 var _horizon_material: ShaderMaterial
-static var _vacuum_material: StandardMaterial3D
-static var _lunar_star_material: StandardMaterial3D
-static var _lunar_star_mesh: BoxMesh
 static var _lunar_rock_material: StandardMaterial3D
 static var _lunar_rock_mesh: SphereMesh
 static var _lunar_rock_vertices := PackedVector3Array()
-static var _earth_halo_material: StandardMaterial3D
 static var LUNAR_MICRODETAIL: Texture2D:
 	get:
 		return SharedTextureCache.get_texture(SharedTextureCache.MICRODETAIL_PATH)
@@ -64,11 +59,14 @@ uniform vec3 playable_center = vec3(0.0);
 uniform float playable_radius = 1.0;
 uniform vec3 scaled_surface_local = vec3(0.0);
 uniform float scaled_moon_radius = 1.0;
+uniform vec3 lunar_sun_direction = vec3(-0.29, 0.78, -0.55);
 varying vec3 ground_position;
 varying vec3 ground_world_position;
 varying vec3 surface_normal;
 varying vec3 radial_normal;
 varying vec4 mineral_tint;
+varying vec3 sun_local;
+varying float relief_depth;
 
 void vertex() {
     vec3 radial = normalize(VERTEX - playable_center);
@@ -76,7 +74,9 @@ void vertex() {
     surface_normal = NORMAL;
     radial_normal = radial;
     mineral_tint = COLOR;
+    sun_local = normalize(inverse(mat3(MODEL_MATRIX)) * lunar_sun_direction);
     float relief = length(VERTEX - playable_center) - playable_radius;
+    relief_depth = max(0.0, -relief - 0.8);
     vec3 scaled_centre = scaled_surface_local
         - vec3(0.0, scaled_moon_radius, 0.0);
     float inward_bias = smoothstep(0.80, 1.0, scaled_cap_retraction)
@@ -122,14 +122,29 @@ void fragment() {
     vec3 regolith = mix(vec3(0.38, 0.365, 0.345), macro_colour, 0.06);
     vec3 local_colour = regolith * mix(0.92, 1.06, grain) * mineral_tint.rgb;
     float orbital_weight = smoothstep(0.10, 0.75, scaled_cap_retraction);
-    // Gameplay receives real directional/contact shadows. Only the compressed
-    // orbital presentation emits its atlas colour to match the distant proxy.
-    ALBEDO = local_colour * (1.0 - orbital_weight);
-    EMISSION = macro_colour * orbital_weight;
+    // The physical sphere deliberately does not cast onto itself (cascade acne).
+    // Preserve long-distance crater relief independently of those short shadows:
+    // opposing walls retain their slope lighting and low-Sun bowls retain shade.
+    vec3 terrain_normal = normalize(surface_normal);
+    vec3 local_sun = normalize(sun_local);
+    float radial_solar = dot(radial, local_sun);
+    float terrain_solar = dot(terrain_normal, local_sun);
+    float wall_contrast = clamp((terrain_solar - radial_solar) * 3.6, -0.56, 0.28);
+    float cavity = smoothstep(0.3, 7.5, relief_depth);
+    float crater_horizon = relief_depth / 34.0;
+    float bowl_shadow = smoothstep(crater_horizon - 0.025,
+        crater_horizon + 0.075, radial_solar);
+    float relief_light = (1.0 + wall_contrast) * mix(1.0,
+        mix(0.31, 0.88, bowl_shadow), cavity);
+    ALBEDO = local_colour * relief_light * (1.0 - orbital_weight);
+    // Orbital compression also retains a terminator and crater relief instead
+    // of turning the entire lunar surface into a uniformly emissive photograph.
+    float orbital_sun = 0.055 + 0.945 * smoothstep(-0.015, 0.45, terrain_solar);
+    EMISSION = macro_colour * relief_light * orbital_sun * orbital_weight;
     ROUGHNESS = mix(0.92, 0.99, grain);
     SPECULAR = 0.08;
-    AO = mix(0.91, 1.0, grain);
-    AO_LIGHT_AFFECT = 0.12;
+    AO = mix(0.91, 1.0, grain) * (1.0 - cavity * 0.30);
+    AO_LIGHT_AFFECT = 0.36;
 }
 """
 
@@ -142,6 +157,9 @@ var lunar_visual_horizon: MeshInstance3D
 var lunar_far_surface_fill: MeshInstance3D
 var gravity_area: Area3D
 var lunar_environment: Environment
+var lunar_sky: LunarSky
+var _sunlight: DirectionalLight3D
+var _lunar_sun_direction := Vector3(-0.29, 0.78, -0.55).normalized()
 var cheese_shop: MoonCheeseShop
 var colony_world: MoonColonyWorld
 var _built := false
@@ -520,11 +538,19 @@ func _ensure_craters() -> void:
 		var direction := _fibonacci_direction(index, SPHERE_CRATER_COUNT)
 		direction = Basis(Vector3.UP, float(moon_seed % 8191) * 0.001) * direction
 		var radius := lerpf(18.0, 65.0, float(hashed & 0xffff) / 65535.0)
+		# Three broad, low-slope landmark rims sit beyond the flattened arrival
+		# zone. On a compact sphere ordinary shallow craters disappear below its
+		# very close horizon; these actual collidable rims break that flat outline.
+		if index < 3:
+			var landmark_offsets := [Vector2(-150.0, -80.0), Vector2(-135.0, 100.0), Vector2(45.0, 185.0)]
+			var offset: Vector2 = landmark_offsets[index]
+			direction = Vector3(offset.x, PLAYABLE_RADIUS_METERS, offset.y).normalized()
+			radius = 90.0
 		_crater_directions.append(direction)
 		_crater_radii.append(radius)
 		_crater_depths.append(lerpf(2.0, 8.5,
 			float((hashed >> 16) & 0xffff) / 65535.0))
-		_crater_cutoffs.append(1.0 - pow(radius * 1.32
+		_crater_cutoffs.append(1.0 - pow(radius * (1.8 if index < 3 else 1.32)
 			/ PLAYABLE_RADIUS_METERS, 2.0) * 0.5)
 
 
@@ -536,6 +562,7 @@ func _surface_relief(direction: Vector3) -> float:
 	var relief := sin(point.x * 0.010 + float(moon_seed % 31)) * 0.9
 	relief += sin(point.y * 0.012 + point.z * 0.007) * 1.1
 	relief += cos(point.z * 0.014 - point.x * 0.005) * 0.7
+	var landmark_rim := 0.0
 	for index in range(_crater_directions.size()):
 		var alignment := direction.dot(_crater_directions[index])
 		if alignment <= _crater_cutoffs[index]:
@@ -546,9 +573,14 @@ func _surface_relief(direction: Vector3) -> float:
 		if normalized < 1.0:
 			var bowl := 1.0 - normalized * normalized
 			relief -= bowl * bowl * _crater_depths[index]
-		else:
+		elif index >= 3:
 			relief += sin((normalized - 1.0) / 0.32 * PI) \
 				* _crater_depths[index] * 0.22
+		if index < 3:
+			var rim := exp(-pow((normalized - 1.03) / 0.38, 2.0))
+			landmark_rim = maxf(landmark_rim,
+				9.5 * rim * (1.0 - smoothstep(1.60, 1.80, normalized)))
+	relief += landmark_rim
 	for pad in [LANDING_XZ, SHOP_XZ]:
 		var pad_direction := Vector3(pad.x - LANDING_XZ.x,
 			PLAYABLE_RADIUS_METERS, pad.y - LANDING_XZ.y).normalized()
@@ -827,7 +859,7 @@ func _build_landing_platform() -> void:
 func _build_rock_field() -> void:
 	# One draw scatters ejecta over the entire sphere. The close landing field is
 	# denser; every large visible boulder has a matching convex contact shape.
-	_ensure_lunar_sky_resources()
+	_ensure_lunar_rock_resources()
 	var rocks := MultiMeshInstance3D.new()
 	rocks.name = "LunarEjectaBoulders"
 	var multimesh := MultiMesh.new()
@@ -916,7 +948,7 @@ func _build_gravity_volume() -> void:
 func _build_lighting() -> void:
 	var sunlight := DirectionalLight3D.new()
 	sunlight.name = "HarshLunarSunlight"
-	sunlight.light_color = Color(1.0, 0.94, 0.82)
+	sunlight.light_color = Color(1.0, 0.985, 0.97)
 	sunlight.light_energy = 1.15
 	# One short-range lunar shadow pass anchors boots, kiosk supports, rocks and
 	# the lander. The parent realm toggle retires Earth's directional lights.
@@ -929,10 +961,12 @@ func _build_lighting() -> void:
 	sunlight.shadow_normal_bias = 0.04
 	sunlight.rotation_degrees = Vector3(-52.0, -28.0, 0.0)
 	add_child(sunlight)
+	_sunlight = sunlight
+	_lunar_sun_direction = sunlight.basis.z.normalized()
 	var fill := DirectionalLight3D.new()
 	fill.name = "SoftLunarSuitFill"
 	fill.light_color = Color(0.78, 0.86, 1.0)
-	fill.light_energy = 0.20
+	fill.light_energy = 0.09
 	fill.shadow_enabled = false
 	fill.rotation_degrees = Vector3(-28.0, 150.0, 0.0)
 	add_child(fill)
@@ -943,7 +977,7 @@ func _build_lighting() -> void:
 	lunar_environment.background_color = Color(0.0015, 0.0020, 0.004)
 	lunar_environment.ambient_light_source = Environment.AMBIENT_SOURCE_COLOR
 	lunar_environment.ambient_light_color = Color(0.61, 0.65, 0.72)
-	lunar_environment.ambient_light_energy = 0.36
+	lunar_environment.ambient_light_energy = 0.24
 	lunar_environment.ssao_enabled = true
 	lunar_environment.ssao_radius = 0.7
 	lunar_environment.ssao_intensity = 1.0
@@ -952,79 +986,39 @@ func _build_lighting() -> void:
 
 
 func _build_lunar_sky() -> void:
-	_ensure_lunar_sky_resources()
-	# An inward-facing dark shell replaces Earth's atmospheric sky only while the
-	# MoonWorld is visible. One bounded MultiMesh supplies sharp airless stars.
-	var vacuum_mesh := SphereMesh.new()
-	vacuum_mesh.radius = 12_000.0
-	vacuum_mesh.height = 24_000.0
-	vacuum_mesh.radial_segments = 48
-	vacuum_mesh.rings = 24
-	var vacuum := MeshInstance3D.new()
-	vacuum.name = "AirlessBlackSky"
-	vacuum.mesh = vacuum_mesh
-	vacuum.position = PLAYABLE_CENTER
-	vacuum.material_override = _vacuum_material
-	vacuum.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-	add_child(vacuum)
+	# A camera sky has no parallax, clipping shell or seeded counterfeit stars.
+	# Real constellation figures and the photographic sky use one Galactic frame.
+	lunar_sky = LunarSky.new()
+	var sky := Sky.new()
+	sky.sky_material = lunar_sky.get_material()
+	sky.process_mode = Sky.PROCESS_MODE_INCREMENTAL
+	sky.radiance_size = Sky.RADIANCE_SIZE_32
+	lunar_environment.background_mode = Environment.BG_SKY
+	lunar_environment.sky = sky
+	set_lunar_sun_direction(_lunar_sun_direction)
 
-	var stars := MultiMeshInstance3D.new()
-	stars.name = "LunarStarField"
-	var multimesh := MultiMesh.new()
-	multimesh.transform_format = MultiMesh.TRANSFORM_3D
-	multimesh.use_colors = true
-	multimesh.mesh = _lunar_star_mesh
-	multimesh.instance_count = LUNAR_STAR_COUNT
-	for index in range(LUNAR_STAR_COUNT):
-		var direction := _fibonacci_direction(index, LUNAR_STAR_COUNT)
-		var hash := _hash_u32(moon_seed + index * 3571 + 211)
-		var radius := 8_000.0 + float(hash & 0xffff) / 65535.0 * 2_000.0
-		var sparkle := 0.65 + float((hash >> 16) & 0xff) / 255.0 * 1.6
-		multimesh.set_instance_transform(index, Transform3D(
-			Basis.IDENTITY.scaled(Vector3.ONE * sparkle),
-			PLAYABLE_CENTER + direction * radius))
-		multimesh.set_instance_color(index, Color(
-			0.72 + sparkle * 0.10, 0.82 + sparkle * 0.06, 1.0))
-	stars.multimesh = multimesh
-	stars.material_override = _lunar_star_material
-	stars.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-	add_child(stars)
 
-	# A textured Earth hangs above the landing site. It is intentionally a little
-	# larger than strict angular scale so players can read continents and cloud
-	# bands without a telescope.
-	var earth_mesh := SphereMesh.new()
-	# At roughly 1.5 km in this bounded sky, a 26 m render radius gives the
-	# Earth's real ~1.9 degree lunar-surface angular diameter.
-	earth_mesh.radius = 26.0
-	earth_mesh.height = 52.0
-	earth_mesh.radial_segments = 48
-	earth_mesh.rings = 24
-	var earth_material := StandardMaterial3D.new()
-	earth_material.albedo_color = Color.WHITE
-	earth_material.albedo_texture = SpaceVoyageVisuals.shared_earth_texture()
-	earth_material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-	earth_material.disable_fog = true
-	var earth := MeshInstance3D.new()
-	earth.name = "EarthAboveTheMoon"
-	earth.mesh = earth_mesh
-	earth.material_override = earth_material
-	earth.position = Vector3(-760.0, 560.0, -1210.0)
-	earth.rotation.y = -0.45
-	earth.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-	add_child(earth)
-	var halo_mesh := SphereMesh.new()
-	halo_mesh.radius = 28.0
-	halo_mesh.height = 56.0
-	halo_mesh.radial_segments = 40
-	halo_mesh.rings = 20
-	var halo := MeshInstance3D.new()
-	halo.name = "EarthAtmosphereHalo"
-	halo.mesh = halo_mesh
-	halo.material_override = _earth_halo_material
-	halo.position = earth.position
-	halo.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-	add_child(halo)
+func set_lunar_sun_direction(direction: Vector3) -> void:
+	if direction.length_squared() < 0.0001:
+		return
+	_lunar_sun_direction = direction.normalized()
+	if is_instance_valid(_sunlight):
+		var up := Vector3.UP if absf(_lunar_sun_direction.y) < 0.98 else Vector3.RIGHT
+		# DirectionalLight emits along -Z: its +Z points toward the visible Sun.
+		_sunlight.basis = Basis.looking_at(-_lunar_sun_direction, up)
+	if _horizon_material:
+		_horizon_material.set_shader_parameter("lunar_sun_direction", _lunar_sun_direction)
+	if lunar_sky:
+		lunar_sky.set_sun_direction(_lunar_sun_direction)
+
+
+func lunar_sun_direction() -> Vector3:
+	return _lunar_sun_direction
+
+
+func set_observation_mode(enabled: bool) -> void:
+	if lunar_sky:
+		lunar_sky.set_observation_mode(enabled)
 
 
 static func _fibonacci_direction(index: int, count: int) -> Vector3:
@@ -1034,25 +1028,9 @@ static func _fibonacci_direction(index: int, count: int) -> Vector3:
 	return Vector3(cos(angle) * radial, y, sin(angle) * radial)
 
 
-static func _ensure_lunar_sky_resources() -> void:
-	if _vacuum_material:
+static func _ensure_lunar_rock_resources() -> void:
+	if _lunar_rock_material:
 		return
-	_vacuum_material = StandardMaterial3D.new()
-	_vacuum_material.albedo_color = Color(0.0015, 0.0025, 0.007)
-	_vacuum_material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-	_vacuum_material.cull_mode = BaseMaterial3D.CULL_FRONT
-	_vacuum_material.disable_receive_shadows = true
-	_vacuum_material.disable_fog = true
-	_lunar_star_mesh = BoxMesh.new()
-	_lunar_star_mesh.size = Vector3(1.6, 1.6, 1.6)
-	_lunar_star_material = StandardMaterial3D.new()
-	_lunar_star_material.albedo_color = Color.WHITE
-	_lunar_star_material.emission_enabled = true
-	_lunar_star_material.emission = Color(0.72, 0.84, 1.0)
-	_lunar_star_material.emission_energy_multiplier = 4.2
-	_lunar_star_material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-	_lunar_star_material.vertex_color_use_as_albedo = true
-	_lunar_star_material.disable_fog = true
 	_lunar_rock_mesh = SphereMesh.new()
 	_lunar_rock_mesh.radius = 0.5
 	_lunar_rock_mesh.height = 1.0
@@ -1066,17 +1044,6 @@ static func _ensure_lunar_sky_resources() -> void:
 	_lunar_rock_material.roughness = 1.0
 	_lunar_rock_material.vertex_color_use_as_albedo = true
 	_lunar_rock_material.disable_fog = true
-	_earth_halo_material = StandardMaterial3D.new()
-	_earth_halo_material.albedo_color = Color(0.12, 0.48, 1.0, 0.16)
-	_earth_halo_material.emission_enabled = true
-	_earth_halo_material.emission = Color(0.08, 0.30, 0.88)
-	_earth_halo_material.emission_energy_multiplier = 1.8
-	_earth_halo_material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
-	_earth_halo_material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-	# Render only the far side of the shell. The opaque Earth hides the centre,
-	# leaving a thin atmospheric limb instead of a blue bubble over continents.
-	_earth_halo_material.cull_mode = BaseMaterial3D.CULL_FRONT
-	_earth_halo_material.disable_fog = true
 
 
 func _on_body_entered(body: Node3D) -> void:

@@ -23,6 +23,19 @@ textures for readable globe and voyage views.
 
 ## Highlights
 
+- **Roots & Rockets society career** — choose **ROOTS & ROCKETS · LIVING SOCIETY**
+  from the menu for persistent Earth farms, a working hut town, 24 residents,
+  practical professions, funded quests, finite markets, oil production and fuel
+  deliveries. Expand a sealed lunar farm with solar generation, battery storage
+  and freight. **E** talks or works nearby; **B** opens the society board. This
+  is an offline career alongside the existing public multiplayer game.
+  See the [gameplay guide and implementation scope](docs/ROOTS_AND_ROCKETS.md).
+- **Photographic lunar astronomy** — a credited ESO sky panorama, NASA Earth
+  imagery and constellation guides, with seven planetary targets and an
+  observation exposure mode. The visible Sun also drives lunar lighting;
+  distance-independent crater relief remains readable beyond nearby shadows.
+  [Image sources and astronomical limits](assets/astronomy/ATTRIBUTION.md).
+
 -  **A complete Earth-like world, twelve biomes deep** — a connected Pangaea
   supercontinent on a 40,077,312 m circumference sphere, offshore islands, huge
   oceans, freshwater lakes, rainforest, bamboo, wetlands, highlands,
@@ -95,18 +108,26 @@ textures for readable globe and voyage views.
   frame-rate cap, ordered with Unlimited first, 480 FPS second, lower presets,
   and a validated Custom setting.
 
-## What's new in 0.4 — ONE SMALL STEP
+## What's new in 0.5 — ROOTS & ROCKETS
 
-Current source version: **0.4.10**, using **multiplayer protocol 11**.
+Current source version: **0.5.0**, using **multiplayer protocol 11**.
 Clients and server must use the same game version and multiplayer protocol.
 
-The 0.4.10 patch precompiles Metal engine shaders, defers shared gameplay
-textures until after the menu draws, and keeps stalled update requests and
-loading cancellation responsive. It requires the **full installer once**,
-including for 0.4.9 users. Local M4/macOS 27 cold-menu time fell from 29.43 s to
-2.51 s in engine timing (4.35 s launch-to-menu wall time); warm engine timing was
-1.23 s. A roughly 535 ms menu hitch remains, so not all
-native responsiveness gates have passed. M1/Tahoe acceptance is still pending.
+The new offline society career brings 24 crops, 24 citizens in 19 occupations,
+finite markets, funded quests, oil refining and deliveries, saved vehicle fuel,
+and lunar farming powered by expandable solar panels and batteries. Start with
+**ROOTS & ROCKETS · LIVING SOCIETY** or **MOON EXPEDITION**. **E** interacts;
+**B** opens your Society board. Read the
+[gameplay guide](docs/ROOTS_AND_ROCKETS.md) for resources, work and recovery.
+
+Shared visual fixes remove overlapping Earth terrain and inconsistent distant
+debug ground. The Moon gains photographic astronomy and persistent crater
+relief. Public multiplayer keeps the classic combat and shared expedition
+modes; offline society progress is separate. See the
+[0.5.0 release](https://github.com/charlesjsantosgit/troop/releases/tag/v0.5.0)
+and [validation report](docs/ROOTS_AND_ROCKETS_VALIDATION.md).
+
+## Planet and expedition features from 0.4 — ONE SMALL STEP
 
 - **The generated wilderness is now a circumnavigable planet.** TROOP's
   deterministic playable sphere is **40,077,312 m around**, within a few
@@ -512,12 +533,14 @@ Bananas float along swing arcs; collect them for score (synced).
 
 For a quick download, setup, and connection checklist, see
 [Playing with classmates](docs/PLAY_WITH_CLASSMATES.md). The current release is
-**0.4.10 / protocol 11**. All older installations, including 0.4.9, need the
-**0.4.10 full installer** once. Download it, close TROOP, and replace the old app;
-on a Mac, launch the replacement in Applications. Confirm **0.4.10** before
-joining the 0.4.10 server. All classmates must activate the same version, even
-though the protocol is unchanged. School networks may block outbound UDP 30623;
-use only school-approved devices and networks.
+**0.5.0 / protocol 11**. On 0.4.10, apply the offered signed in-game update and
+restart, or install the full 0.5.0 package. Older installations need the full
+installer for bootstrap 3. Close TROOP before replacing an installation; on a
+Mac, launch the replacement in Applications. Confirm **0.5.0** before joining
+the matching server. All classmates must activate the same version, even though
+the protocol is unchanged. Public multiplayer retains classic combat and lunar
+expeditions; the Roots & Rockets society career stays offline. School networks
+may block outbound UDP 30623; use school-approved devices and networks.
 
 Worldwide multiplayer uses a headless ENet authority on UDP **30623**. Clients
 rebuild identical jungle geometry from its seed while the server validates and
@@ -528,6 +551,12 @@ The input device stays warm for up to 850 ms before capture closes to avoid
 stutter on quick repeated presses. Voice volume and the PTT binding are configurable.
 
 ## Player installers & updates
+
+Download [TROOP 0.5.0](https://github.com/charlesjsantosgit/troop/releases/tag/v0.5.0):
+[Windows Setup](https://github.com/charlesjsantosgit/troop/releases/download/v0.5.0/TROOP-0.5.0-Windows-x86_64-Setup.exe)
+or [macOS universal DMG](https://github.com/charlesjsantosgit/troop/releases/download/v0.5.0/TROOP-0.5.0-macOS-universal.dmg).
+The [latest release page](https://github.com/charlesjsantosgit/troop/releases/latest)
+always lists the current packages. The content PCK is used by the updater.
 
 Versioned Windows and macOS player packages are written to `dist/`. On a Mac
 with exact Godot `4.7.stable.official.5b4e0cb0f`, matching export templates,
@@ -569,11 +598,11 @@ Release builds check a small RSA-signed manifest on GitHub Releases. Ordinary
 script, scene, shader, and generated-content updates download as a compact Godot
 resource pack, are re-verified on every boot, and take effect on the next
 launch. Updates that change Godot itself, the updater bootstrap, native code, or
-project settings instead offer the full Windows installer or macOS disk image.
+non-version project settings instead offer the full Windows installer or macOS disk image.
 The game remains fully playable when GitHub is offline.
-Version 0.4.10 raises the minimum updater bootstrap to **3** because the updater
-autoload and renderer initialize before hot PCK mounting can apply these fixes.
-Compatible content updates after that migration can remain automatic.
+Version 0.5.0 retains bootstrap **3**, introduced by the 0.4.10 full installer.
+Installations older than 0.4.10 must replace the app to obtain that bootstrap;
+compatible content updates on bootstrap 3 can apply automatically.
 
 <details>
 <summary><b>🍃 Day, night, seasons, and weather</b></summary>

@@ -199,16 +199,24 @@ func run(main) -> void:
 	Settings.set_player_name(original_name)
 	Settings.save()
 
-	# 13 — a version-mismatch rejection tears down to the menu and immediately
-	# arms the updater (we assert the flow starts, not the network result)
+	# 13 — a version-mismatch rejection returns to the menu. Installed builds
+	# check for updates; source builds explain the mismatch without making any
+	# updater requests or touching the installed game's update state.
 	main._on_net_error("Server is running TROOP 9.9.9; your game is 0.0.1")
 	await get_tree().process_frame
 	_check(main.menu != null and main.world == null,
 		"version rejection returns to the menu")
+	var response_text := str(main.status_label.text).to_lower()
 	var armed: bool = Updater.status in ["checking", "available",
 			"downloading", "current", "error", "staged"] \
-		or str(main.status_label.text).contains("version")
-	_check(armed, "version rejection triggers an update check")
+		or response_text.contains("version")
+	if OS.has_feature("editor"):
+		armed = Updater.status == "source" \
+			and response_text.contains("version") \
+			and response_text.contains("source build does not self-update") \
+			and not is_instance_valid(Updater._manifest_request) \
+			and not is_instance_valid(Updater._download_request)
+	_check(armed, "version rejection checks updates or preserves source-build isolation")
 
 	print("DEBUGTEST %d/%d %s" % [passed, total,
 		"PASS" if passed == total else "FAIL"])

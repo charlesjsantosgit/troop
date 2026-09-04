@@ -385,6 +385,14 @@ func _build_terrain(coarse := false) -> void:
 	var st := SurfaceTool.new()
 	st.begin(Mesh.PRIMITIVE_TRIANGLES)
 	_terrain_has_water = false
+	var points := PackedVector3Array()
+	var colors := PackedColorArray()
+	points.resize((cells + 1) * (cells + 1))
+	colors.resize(points.size())
+	# The fine lattice contains every 12 m Horizon corner. Retain those original
+	# samples so the visual handoff needs no additional generator evaluations.
+	var parent_subdivisions := Gen.CELLS / HorizonChunk.TERRAIN_CELLS_PER_CHUNK
+	var parent_samples: Dictionary = {}
 	# Both resolutions include their exact chunk boundaries. A coarse 2x2 flight
 	# lattice therefore hands off without cracks and upgrades to the indexed 17x17
 	# gameplay lattice before landing.
@@ -396,12 +404,40 @@ func _build_terrain(coarse := false) -> void:
 			var h := float(visual.elevation)
 			_terrain_has_water = _terrain_has_water \
 				or h < Gen.WATER_Y + 0.05
-			st.set_color(visual.color)
 			var point := Vector3(x, h, z)
-			st.add_vertex(point)
+			var vertex_index := iz * (cells + 1) + ix
+			points[vertex_index] = point
+			colors[vertex_index] = visual.color
+			if not coarse and ix % parent_subdivisions == 0 \
+					and iz % parent_subdivisions == 0:
+				var color: Color = visual.color
+				# ArrayMesh stores COLOR as UNORM8. Quantize before interpolation,
+				# exactly as the parent's uploaded corner colors are quantized.
+				color = _terrain_uploaded_color(color)
+				parent_samples[Vector2i(ix / parent_subdivisions,
+					iz / parent_subdivisions)] = Vector4(h, color.r, color.g, color.b)
 			# Match TriangleMesh::create's snapping and indexed face order.
-			_terrain_collision_vertices[iz * (cells + 1) + ix] = point.snappedf(
+			_terrain_collision_vertices[vertex_index] = point.snappedf(
 				TERRAIN_COLLISION_SNAP)
+	for iz in range(cells + 1):
+		for ix in range(cells + 1):
+			var vertex_index := iz * (cells + 1) + ix
+			var point := points[vertex_index]
+			var color := colors[vertex_index]
+			# Flight-only coarse quads cannot represent the finer parent lattice.
+			# Their identity target prevents any unwanted vertex displacement.
+			var parent: Vector4
+			if coarse:
+				var uploaded_color := _terrain_uploaded_color(color)
+				parent = Vector4(point.y, uploaded_color.r, uploaded_color.g,
+					uploaded_color.b)
+			else:
+				parent = _terrain_parent_sample(ix, iz, parent_subdivisions,
+					parent_samples)
+			st.set_color(color)
+			st.set_uv(Vector2(parent.y, parent.z))
+			st.set_uv2(Vector2(parent.x, parent.w))
+			st.add_vertex(point)
 	for iz in range(cells):
 		for ix in range(cells):
 			var p00 := iz * (cells + 1) + ix
@@ -422,6 +458,30 @@ func _build_terrain(coarse := false) -> void:
 	_terrain_instance.mesh = mesh
 	_terrain_instance.material_override = _mat_ground
 	add_child(_terrain_instance)
+
+
+## Parent height and tint use Horizon's p00/p10/p11, p00/p11/p01 triangles.
+## Local integer coordinates avoid rounding changes at negative world tiles.
+static func _terrain_parent_sample(ix: int, iz: int, subdivisions: int,
+		parent_samples: Dictionary) -> Vector4:
+	var parent_cells := HorizonChunk.TERRAIN_CELLS_PER_CHUNK
+	var px := mini(ix / subdivisions, parent_cells - 1)
+	var pz := mini(iz / subdivisions, parent_cells - 1)
+	var fx := float(ix) / float(subdivisions) - float(px)
+	var fz := float(iz) / float(subdivisions) - float(pz)
+	var p00: Vector4 = parent_samples[Vector2i(px, pz)]
+	var p11: Vector4 = parent_samples[Vector2i(px + 1, pz + 1)]
+	if fx >= fz:
+		var p10: Vector4 = parent_samples[Vector2i(px + 1, pz)]
+		return p00 * (1.0 - fx) + p10 * (fx - fz) + p11 * fz
+	var p01: Vector4 = parent_samples[Vector2i(px, pz + 1)]
+	return p00 * (1.0 - fz) + p01 * (fz - fx) + p11 * fx
+
+
+static func _terrain_uploaded_color(color: Color) -> Color:
+	return Color(floorf(clampf(color.r, 0.0, 1.0) * 255.0) / 255.0,
+		floorf(clampf(color.g, 0.0, 1.0) * 255.0) / 255.0,
+		floorf(clampf(color.b, 0.0, 1.0) * 255.0) / 255.0, color.a)
 
 
 func _build_water(coarse := false) -> void:

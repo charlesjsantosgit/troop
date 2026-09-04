@@ -225,7 +225,7 @@ func _run() -> void:
 	var earth_pose := Transform3D(Basis.IDENTITY,
 		Vector3(0.0, LunarRocket.ORIGIN_ABOVE_LANDING_SURFACE + 0.6, 0.0))
 	var moon_pose := moon.global_transform * moon.landing_transform()
-	rocket.configure_route(earth_pose, moon_pose, earth_pose)
+	rocket.configure_route(earth_pose, moon_pose, earth_pose, moon)
 	_check(rocket.seat_nodes.size() == LunarRocket.MAX_CREW \
 			and rocket.model_primitive_count() >= 15 \
 			and rocket.get_node_or_null("LowerPressureHull") is CollisionShape3D \
@@ -256,41 +256,71 @@ func _run() -> void:
 		"spherical dust uses one bounded cached disk")
 	var min_dust_altitude := INF
 	var max_dust_altitude := -INF
+	var min_dust_centroid_altitude := INF
+	var max_dust_centroid_altitude := -INF
 	# The dust helper now serves both planets. Select its real lunar approach
 	# phase before testing spherical ground; the parked Earth state is flat.
 	rocket.state = LunarRocket.State.LUNAR_APPROACH
 	for strength in [0.03, 0.15, 0.5, 1.0]:
 		rocket._update_lunar_dust_sheet(strength)
-		for vertex in dust_vertices:
+		var current_vertices := rocket.lunar_dust_sheet_vertices()
+		for vertex in current_vertices:
 			var altitude := moon.altitude_at(
 				rocket.lunar_dust_sheet.global_transform * vertex)
 			min_dust_altitude = minf(min_dust_altitude, altitude)
 			max_dust_altitude = maxf(max_dust_altitude, altitude)
-	# The Moon's coarser collision triangles sit slightly inside the analytic
-	# sphere; the translucent dust layer must remain under 30 cm above them.
+		for face in range(0, dust_indices.size(), 3):
+			var centroid := (current_vertices[dust_indices[face]]
+				+ current_vertices[dust_indices[face + 1]]
+				+ current_vertices[dust_indices[face + 2]]) / 3.0
+			var altitude := moon.altitude_at(
+				rocket.lunar_dust_sheet.global_transform * centroid)
+			min_dust_centroid_altitude = minf(min_dust_centroid_altitude, altitude)
+			max_dust_centroid_altitude = maxf(max_dust_centroid_altitude, altitude)
+	# Crater relief can put facets above or below an analytic sphere. Preserve
+	# the original 10-30 cm clearance requirement against the actual terrain.
 	_check(min_dust_altitude >= 0.10 and max_dust_altitude <= 0.30,
 		"dust expansion hugs the actual curved landing terrain at every strength",
 		"clearance=%.4f..%.4f m" % [min_dust_altitude, max_dust_altitude])
-	var tilted_landing := moon_pose
-	tilted_landing.basis = Basis(Vector3(0.7, 0.2, 0.5).normalized(), 1.4) \
-		* moon_pose.basis
-	rocket.moon_landing_transform = tilted_landing
+	_check(min_dust_centroid_altitude >= 0.10 and max_dust_centroid_altitude <= 0.30,
+		"dust triangle interiors preserve clearance across actual landing-pad facet edges",
+		"clearance=%.4f..%.4f m" % [min_dust_centroid_altitude, max_dust_centroid_altitude])
 	var max_dust_radial_error := 0.0
-	var tangent_origin := tilted_landing.origin - tilted_landing.basis.y \
-		* LunarRocket.ORIGIN_ABOVE_LANDING_SURFACE
-	for strength in [0.15, 0.5, 1.0]:
-		rocket._update_lunar_dust_sheet(strength)
-		for vertex in dust_vertices:
-			var local := tilted_landing.basis.inverse() * (
-				rocket.lunar_dust_sheet.global_transform * vertex - tangent_origin)
-			var surface_y := sqrt(MoonWorld.PLAYABLE_RADIUS_METERS ** 2 \
-				- local.x * local.x - local.z * local.z) \
-				- MoonWorld.PLAYABLE_RADIUS_METERS
-			max_dust_radial_error = maxf(max_dust_radial_error,
-				absf(local.y - surface_y - LunarRocket.DUST_SHEET_SURFACE_CLEARANCE))
+	for direction in [Vector3(0.7, 0.8, 0.5).normalized(),
+			Vector3(-0.6, 0.25, 0.7).normalized()]:
+		# Tilt the entire landing frame onto real off-pole/cratered terrain,
+		# rather than rotating an imaginary sphere around the original pad.
+		rocket.moon_landing_transform = moon.global_transform * Transform3D(
+			MoonWorld.surface_basis(direction), moon.surface_position(direction,
+				LunarRocket.ORIGIN_ABOVE_LANDING_SURFACE))
+		for strength in [0.15, 0.5, 1.0]:
+			rocket._update_lunar_dust_sheet(strength)
+			for vertex in rocket.lunar_dust_sheet_vertices():
+				var altitude := moon.altitude_at(
+					rocket.lunar_dust_sheet.global_transform * vertex)
+				max_dust_radial_error = maxf(max_dust_radial_error,
+					absf(altitude - LunarRocket.DUST_SHEET_SURFACE_CLEARANCE))
 	_check(max_dust_radial_error < 0.01,
-		"dust curvature follows the landing frame's radial up when tilted",
+		"dust follows actual off-pole crater facets when the landing frame is tilted",
 		"max_error=%.5f m" % max_dust_radial_error)
+	if DisplayServer.get_name() == "headless":
+		# Dummy rendering intentionally ignores region uploads. Check the exact
+		# interleaved float32 stream here; a native run reads actual GPU vertices.
+		var floats := rocket._dust_sheet_vertex_bytes.to_float32_array()
+		var bytes_match := floats.size() == dust_vertices.size() * 3
+		var current_vertices := rocket.lunar_dust_sheet_vertices()
+		for index in range(current_vertices.size()):
+			bytes_match = bytes_match and Vector3(floats[index * 3],
+				floats[index * 3 + 1], floats[index * 3 + 2]) == current_vertices[index]
+		_check(bytes_match, "dust upload bytes encode the retained collision-conforming positions")
+	else:
+		var uploaded_dust: PackedVector3Array = dust_mesh.surface_get_arrays(0)[Mesh.ARRAY_VERTEX]
+		_check(uploaded_dust == rocket.lunar_dust_sheet_vertices(),
+			"published GPU dust vertices match the retained collision-conforming positions")
+	print("LUNAR_DUST_CLEARANCE min=%.6f max=%.6f centroid_min=%.6f centroid_max=%.6f tilted_error=%.6f vertices=%d upload_bytes=%d" % [
+		min_dust_altitude, max_dust_altitude, min_dust_centroid_altitude,
+		max_dust_centroid_altitude, max_dust_radial_error, dust_vertices.size(),
+		rocket._dust_sheet_vertex_bytes.size()])
 	var dust_fade_preserved := is_equal_approx(
 		rocket.lunar_dust_sheet.transparency, 0.14)
 	rocket.moon_landing_transform = moon_pose
@@ -299,6 +329,18 @@ func _run() -> void:
 	_check(dust_fade_preserved and not rocket.lunar_dust_sheet.visible \
 			and rocket.lunar_dust_sheet.mesh == dust_mesh,
 		"dust preserves its fade and reuses geometry throughout expansion")
+	rocket._update_lunar_dust_sheet(1.0)
+	var earth_dust_error := 0.0
+	for vertex in rocket.lunar_dust_sheet_vertices():
+		var point := rocket.lunar_dust_sheet.global_transform * vertex
+		earth_dust_error = maxf(earth_dust_error, absf(point.y - 0.6
+			- LunarRocket.DUST_SHEET_SURFACE_CLEARANCE))
+	_check(earth_dust_error < 0.002 and not rocket._dust_sheet_conforming,
+		"returning the same dust mesh to Earth restores its flat landing tangent")
+	_check(rocket._dust_sheet_vertex_bytes.size() == dust_vertices.size() * 12
+			and rocket.lunar_dust_sheet.mesh == dust_mesh,
+		"dust expansion reuses its bounded position upload buffer and mesh resource")
+	rocket._update_lunar_dust_sheet(0.0)
 	var outbound_ascent_end := float(LunarRocket.OUTBOUND_PHASE_TIMES[0])
 	var outbound_cruise_start := float(LunarRocket.OUTBOUND_PHASE_TIMES[1])
 	var outbound_descent_start := float(LunarRocket.OUTBOUND_PHASE_TIMES[2])

@@ -179,6 +179,7 @@ var _stream_shells_built := 0
 var _stream_cancelled_jobs := 0
 var local_player: MonkeyPlayer
 var expedition_manager: ExpeditionManager
+var frontier: Node
 var puppets: Dictionary = {}         # peer id -> Puppet
 var vehicles: Dictionary = {}        # stable vehicle id -> Vehicle node
 var _pending_vehicle_entry := ""     # vid awaiting the host's seat claim
@@ -398,6 +399,7 @@ func build_last_step_usec() -> int:
 
 
 func _build_shared_resources() -> void:
+	Visuals.reset_terrain_residency()
 	RenderingServer.directional_shadow_atlas_set_size(2048, true)
 	_prepare_combat_fx()
 	BananaBullet.prepare_resources()
@@ -851,6 +853,8 @@ func try_open_supply_chest(player: Node3D) -> bool:
 
 
 func try_expedition_interact(player: MonkeyPlayer) -> bool:
+	if is_instance_valid(frontier) and frontier.try_interact(player):
+		return true
 	return expedition_manager != null \
 		and is_instance_valid(expedition_manager) \
 		and expedition_manager.try_interact(player)
@@ -2154,6 +2158,13 @@ func _stream() -> void:
 	# Shell construction is bounded, so a descent handoff may become ready on any
 	# frame. Retract successor coverage only after the just-built tier is complete.
 	_update_altitude_lod_handoffs()
+	_update_terrain_residency()
+
+
+func _update_terrain_residency() -> void:
+	var focus := _stream_focus_position()
+	Visuals.set_terrain_residency(Vector2(focus.x, focus.z), chunks,
+		horizon_chunks, skyline_chunks, stratos_chunks)
 
 
 func _run_shell_work(cc: Vector2i, hc: Vector2i, sc: Vector2i,
@@ -2970,6 +2981,7 @@ func warm(radius: int) -> void:
 			var sk := sc + Vector2i(dx, dz)
 			if not skyline_chunks.has(sk):
 				_build_skyline_chunk(sk)
+	_update_terrain_residency()
 
 
 ## Fast online entry: publish one fully playable chunk — the one under the
@@ -2981,6 +2993,7 @@ func warm_online_entry(peer_id := 1) -> void:
 	var pos := spawn_position(peer_id)
 	var cc := Vector2i(floori(pos.x / Gen.CHUNK), floori(pos.z / Gen.CHUNK))
 	_warm_chunk(cc, true)
+	_update_terrain_residency()
 
 
 func _missing_square(loaded: Dictionary, center: Vector2i, radius: int) -> int:

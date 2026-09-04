@@ -115,7 +115,7 @@ func _simulate(dt: float) -> void:
 	# W feeds the fan, releasing it gives a natural rundown, and S performs a
 	# fast throttle chop. It is intentionally not a magic water brake or reverse:
 	# the planing hull and aerodynamic drag do the actual deceleration.
-	var spool_target := input_throttle if driver else 0.0
+	var spool_target := input_throttle if driver and has_drive_fuel() else 0.0
 	var spool_rate := SPOOL_RISE_RATE if spool_target > spool \
 		else SPOOL_COAST_RATE
 	if driver == null or input_brake > 0.05:
@@ -141,6 +141,8 @@ func _simulate(dt: float) -> void:
 	# plowing the nose into mud or grass.
 	var thrust := THRUST_MAX * spool \
 		* clampf(1.0 - forward_speed() / 55.0, 0.0, 1.0)
+	if not has_drive_fuel():
+		thrust = 0.0
 	apply_force(global_basis.z * thrust,
 		global_basis * Vector3(0, -0.16, -HULL_HALF_LENGTH))
 	# Hull attitude damping runs on land too (the engine default damp is

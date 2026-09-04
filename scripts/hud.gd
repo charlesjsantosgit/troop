@@ -820,6 +820,10 @@ func _update_vehicle_cluster() -> void:
 			if v is SafariJeep and (v as SafariJeep).low_range:
 				extra += " · LOW RANGE"
 			vehicle_extra_label.text = extra
+	if v.frontier_simulation:
+		vehicle_extra_label.text += "\n" + v.fuel_readout()
+		if not v.has_drive_fuel():
+			vehicle_extra_label.text += " · REFUEL AT A DEPOT"
 
 
 func _vehicle_hint(v: Vehicle) -> String:

@@ -63,6 +63,7 @@ class RiderRenderPose:
 var vid := ""
 var kind := Kind.JEEP
 var world: Node3D
+var frontier_simulation: RefCounted
 var wheels: Array[VehicleWheel] = []
 var engine := VehicleEngine.new()
 var driver: Node3D = null              # local MonkeyPlayer while driven
@@ -167,6 +168,36 @@ func setup(vehicle_id: String, owner_world: Node3D) -> void:
 
 func display_name() -> String:
 	return KIND_NAMES[kind]
+
+
+func configure_frontier_fuel(simulation: RefCounted) -> void:
+	frontier_simulation = simulation
+	frontier_simulation.register_vehicle(vid, kind)
+
+
+func has_drive_fuel() -> bool:
+	if not frontier_simulation:
+		return true
+	return float(frontier_simulation.state.vehicle_fuel.get(vid, {}).get("fuel_l", 0.0)) > 0.000001
+
+
+func fuel_readout() -> String:
+	if not frontier_simulation:
+		return ""
+	var tank: Dictionary = frontier_simulation.state.vehicle_fuel.get(vid, {})
+	return "FUEL %.1f / %.0f L" % [float(tank.get("fuel_l", 0)), float(tank.get("capacity_l", 0))]
+
+
+func _use_frontier_fuel(dt: float) -> void:
+	if not frontier_simulation or not driver:
+		return
+	var load := maxf(input_throttle, input_brake if engine.gear == -1 else 0.0)
+	var rate := 0.006 + 0.032 * load
+	if kind == Kind.JET:
+		rate = 0.12 + 0.52 * float(get("spool")) + (0.45 if input_aux else 0.0)
+	elif kind == Kind.BOAT:
+		rate = 0.015 + 0.055 * load
+	frontier_simulation.consume_vehicle_fuel(vid, rate * maxf(0.0, dt))
 
 
 ## Rebase a locally-flat vehicle onto the equivalent planetary chart image.
@@ -509,6 +540,7 @@ func _physics_process(dt: float) -> void:
 			return
 	else:
 		_idle_timer = 0.0
+	_use_frontier_fuel(dt)
 	_simulate(dt)
 	if _sanity_clamp():
 		return
@@ -587,6 +619,8 @@ func _simulate(dt: float) -> void:
 		throttle *= clampf(1.0 - (worst_slip - traction_slip_limit) * 3.2,
 			0.18, 1.0)
 	var drive := engine.step(dt, throttle, driven_speed, forward_speed())
+	if not has_drive_fuel():
+		drive = 0.0
 	_active_brake = brake
 	_distribute_drivetrain(drive, dt)
 	_step_wheels(dt)

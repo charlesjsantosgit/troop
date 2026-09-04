@@ -107,6 +107,7 @@ static var _flame_glow_material: StandardMaterial3D
 static var _flame_mesh: SphereMesh
 static var _dust_mesh: QuadMesh
 static var _dust_sheet_mesh: ArrayMesh
+static var _dust_sheet_template_vertices := PackedVector3Array()
 static var _landing_strut_mesh: CylinderMesh
 static var _landing_piston_mesh: CylinderMesh
 static var _batch_cpu_meshes: Dictionary = {}
@@ -149,6 +150,13 @@ var launch_plume: GPUParticles3D
 var reentry_flames: GPUParticles3D
 var lunar_dust: GPUParticles3D
 var lunar_dust_sheet: MeshInstance3D
+var _dust_surface: MoonWorld
+var _dust_sheet_vertices := PackedVector3Array()
+var _dust_sheet_vertex_bytes := PackedByteArray()
+var _dust_sheet_conforming := false
+var _dust_sheet_target_radius := -1.0
+var _dust_sheet_target_frame := Transform3D.IDENTITY
+var _dust_sheet_surface_transform := Transform3D.IDENTITY
 var exhaust_flame_core: MeshInstance3D
 var exhaust_flame_glow: MeshInstance3D
 ## Shared mechanical nodes are direct children of the replicated rocket. They
@@ -268,10 +276,12 @@ func build_setup_step(budget_usec: int = 2000) -> bool:
 
 
 func configure_route(earth_launch: Transform3D, moon_landing: Transform3D,
-		ocean_splashdown: Transform3D) -> void:
+		ocean_splashdown: Transform3D, lunar_surface: MoonWorld = null) -> void:
 	earth_launch_transform = earth_launch
 	moon_landing_transform = moon_landing
 	ocean_splashdown_transform = ocean_splashdown
+	_dust_surface = lunar_surface
+	_dust_sheet_target_radius = -1.0
 	_outbound_attitude_frames.clear()
 	_ensure_outbound_attitude_frames()
 	if voyage_visuals:
@@ -1241,12 +1251,57 @@ func _update_lunar_dust_sheet(strength: float, radius_strength: float = -1.0) ->
 	var contact := frame.origin - frame.basis.y.normalized() \
 		* (ORIGIN_ABOVE_LANDING_SURFACE - DUST_SHEET_SURFACE_CLEARANCE)
 	var lunar_contact := state in [State.LUNAR_APPROACH, State.RETURN_ASCENT]
-	# Shared Moon dust follows the sphere; Earth pad dust uses the same bounded
-	# mesh flattened to its landing tangent. No ocean or passenger-only effect.
-	var sag_scale := radius_scale * radius_scale if lunar_contact else 0.001
-	lunar_dust_sheet.global_transform = Transform3D(frame.basis.scaled_local(
-		Vector3(radius_scale, sag_scale, radius_scale)), contact)
+	if lunar_contact and is_instance_valid(_dust_surface):
+		# The crater mesh's collision facets are not an analytic sphere, even
+		# near a graded pad. Project the expanding disk onto those exact facets.
+		var tangent := Transform3D(frame.basis, frame.origin
+			- frame.basis.y.normalized() * ORIGIN_ABOVE_LANDING_SURFACE)
+		if not _dust_sheet_conforming or not is_equal_approx(radius,
+				_dust_sheet_target_radius) or tangent != _dust_sheet_target_frame \
+				or _dust_surface.global_transform != _dust_sheet_surface_transform:
+			var inverse := tangent.affine_inverse()
+			for index in range(_dust_sheet_template_vertices.size()):
+				var point := _dust_sheet_template_vertices[index]
+				point = tangent * Vector3(point.x * radius_scale, 0.0,
+					point.z * radius_scale)
+				_dust_sheet_vertices[index] = inverse * _dust_surface.surface_position_at(
+					point, DUST_SHEET_SURFACE_CLEARANCE)
+			_upload_dust_sheet_vertices()
+			_dust_sheet_target_radius = radius
+			_dust_sheet_target_frame = tangent
+			_dust_sheet_surface_transform = _dust_surface.global_transform
+			_dust_sheet_conforming = true
+		lunar_dust_sheet.global_transform = tangent
+	else:
+		# Earth retains its flat landing-tangent effect. Standalone rocket
+		# fixtures without a Moon surface retain the analytic spherical fallback.
+		if _dust_sheet_conforming:
+			for index in range(_dust_sheet_template_vertices.size()):
+				_dust_sheet_vertices[index] = _dust_sheet_template_vertices[index]
+			_upload_dust_sheet_vertices()
+			_dust_sheet_conforming = false
+		var sag_scale := radius_scale * radius_scale if lunar_contact else 0.001
+		lunar_dust_sheet.global_transform = Transform3D(frame.basis.scaled_local(
+			Vector3(radius_scale, sag_scale, radius_scale)), contact)
 	lunar_dust_sheet.transparency = 1.0 - visual_strength * 0.86
+
+
+func _upload_dust_sheet_vertices() -> void:
+	# The unshaded disk has a position-only vertex stream. Its mesh, indices,
+	# UVs and upload storage are allocated once; only 289*12 bytes change.
+	for index in range(_dust_sheet_vertices.size()):
+		var point := _dust_sheet_vertices[index]
+		var offset := index * 12
+		_dust_sheet_vertex_bytes.encode_float(offset, point.x)
+		_dust_sheet_vertex_bytes.encode_float(offset + 4, point.y)
+		_dust_sheet_vertex_bytes.encode_float(offset + 8, point.z)
+	(lunar_dust_sheet.mesh as ArrayMesh).surface_update_vertex_region(0, 0,
+		_dust_sheet_vertex_bytes)
+
+
+func lunar_dust_sheet_vertices() -> PackedVector3Array:
+	# Physics/debug consumers use the retained upload lattice, never GPU readback.
+	return _dust_sheet_vertices
 
 
 func _emit_crew_poses() -> void:
@@ -1353,7 +1408,11 @@ func _build_dust_effects() -> void:
 	add_child(lunar_dust)
 	lunar_dust_sheet = MeshInstance3D.new()
 	lunar_dust_sheet.name = "LandingRadialDustSheet"
-	lunar_dust_sheet.mesh = _dust_sheet_mesh
+	lunar_dust_sheet.mesh = _dust_sheet_mesh.duplicate()
+	_dust_sheet_vertices = _dust_sheet_template_vertices.duplicate()
+	_dust_sheet_vertex_bytes.resize(_dust_sheet_vertices.size() * 12)
+	# Facet relief can rise above or below the original analytic disk bounds.
+	lunar_dust_sheet.custom_aabb = AABB(Vector3(-28, -32, -28), Vector3(56, 64, 56))
 	lunar_dust_sheet.top_level = true
 	lunar_dust_sheet.physics_interpolation_mode = Node.PHYSICS_INTERPOLATION_MODE_OFF
 	lunar_dust_sheet.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
@@ -1968,7 +2027,6 @@ static func _build_curved_dust_sheet_mesh() -> ArrayMesh:
 	# One cached 289-vertex disk follows the spherical landing pad. The old quad
 	# hovered almost a metre above the 450 m Moon at its fully expanded rim.
 	var vertices := PackedVector3Array([Vector3.ZERO])
-	var normals := PackedVector3Array([Vector3.UP])
 	var uvs := PackedVector2Array([Vector2(0.5, 0.5)])
 	var indices := PackedInt32Array()
 	var moon_radius := MoonWorld.PLAYABLE_RADIUS_METERS
@@ -1979,7 +2037,6 @@ static func _build_curved_dust_sheet_mesh() -> ArrayMesh:
 			var angle := TAU * float(segment) / DUST_SHEET_SEGMENTS
 			var point := Vector3(cos(angle) * radius, sag, sin(angle) * radius)
 			vertices.append(point)
-			normals.append((point + Vector3.UP * moon_radius).normalized())
 			uvs.append(Vector2(point.x, point.z) / (DUST_SHEET_MAX_RADIUS * 2.0)
 				+ Vector2(0.5, 0.5))
 	for segment in range(DUST_SHEET_SEGMENTS):
@@ -1994,11 +2051,12 @@ static func _build_curved_dust_sheet_mesh() -> ArrayMesh:
 	var arrays := []
 	arrays.resize(Mesh.ARRAY_MAX)
 	arrays[Mesh.ARRAY_VERTEX] = vertices
-	arrays[Mesh.ARRAY_NORMAL] = normals
 	arrays[Mesh.ARRAY_TEX_UV] = uvs
 	arrays[Mesh.ARRAY_INDEX] = indices
 	var mesh := ArrayMesh.new()
-	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
+	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays, [], {},
+		Mesh.ARRAY_FLAG_USE_DYNAMIC_UPDATE)
+	_dust_sheet_template_vertices = vertices
 	return mesh
 
 

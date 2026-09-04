@@ -30,6 +30,7 @@ var _mission_panel: PanelContainer
 var _mission_label: Label
 var _oxygen_panel: PanelContainer
 var _oxygen_label: Label
+var _astronomy_credit: Label
 var _toast: Label
 var _toast_remaining := 0.0
 var _shop_overlay: Control
@@ -217,7 +218,7 @@ func _configure_rocket_route() -> void:
 	var moon_transform := Transform3D(moon_world.global_basis * moon_local.basis,
 		moon_world.to_global(moon_local.origin))
 	# The same physical pad owns departure, return contact and disembarking.
-	rocket.configure_route(earth_transform, moon_transform, earth_transform)
+	rocket.configure_route(earth_transform, moon_transform, earth_transform, moon_world)
 
 
 func _create_voyage_camera() -> void:
@@ -291,6 +292,19 @@ func _build_ui() -> void:
 	_oxygen_panel.add_child(_oxygen_label)
 	_oxygen_panel.visible = false
 	_ui_layer.add_child(_oxygen_panel)
+	_astronomy_credit = Label.new()
+	_astronomy_credit.set_anchors_preset(Control.PRESET_BOTTOM_LEFT)
+	_astronomy_credit.offset_left = 18.0
+	_astronomy_credit.offset_top = -96.0
+	_astronomy_credit.offset_right = 750.0
+	_astronomy_credit.offset_bottom = -76.0
+	_astronomy_credit.text = "Sky: ESO / S. Brunier · Earth and constellation reference: NASA / GSFC"
+	_astronomy_credit.add_theme_font_size_override("font_size", 12)
+	_astronomy_credit.add_theme_color_override("font_shadow_color", Color.BLACK)
+	_astronomy_credit.add_theme_constant_override("shadow_offset_y", 2)
+	_astronomy_credit.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_astronomy_credit.visible = false
+	_ui_layer.add_child(_astronomy_credit)
 
 	_toast = Label.new()
 	_toast.set_anchors_preset(Control.PRESET_CENTER_BOTTOM)
@@ -340,6 +354,8 @@ static func _panel_style(fill: Color, border: Color,
 func _process(delta: float) -> void:
 	if not world or not world.local_player:
 		return
+	_astronomy_credit.visible = Net.player_realm() == Net.PlayerRealm.MOON \
+		and not is_instance_valid(world.get("frontier")) and not is_ui_open()
 	_local_reboard_cooldown_remaining = maxf(
 		_local_reboard_cooldown_remaining - delta, 0.0)
 	_local_disembark_request_remaining = maxf(
@@ -513,6 +529,9 @@ func _other_modal_open() -> bool:
 	if not is_instance_valid(main):
 		return false
 	if is_instance_valid(main.get("pause_menu")) or is_instance_valid(main.get("menu")):
+		return true
+	var frontier: Variant = main.get("frontier_controller")
+	if is_instance_valid(frontier) and is_instance_valid(frontier.ui) and frontier.ui.visible:
 		return true
 	var hud: Variant = main.get("hud")
 	if is_instance_valid(hud) and hud.world_map_is_open():

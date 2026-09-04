@@ -26,6 +26,9 @@ var admin_controller: AdminController
 var admin_panel: AdminPanel
 var trade_ui: TradeUI
 var expedition_manager: ExpeditionManager
+var frontier_controller: FrontierController
+var _enable_frontier := false
+var _frontier_load_saved := true
 var _session_ui_layer: CanvasLayer
 var update_chip: Label
 var menu: Control
@@ -68,7 +71,7 @@ func _ready() -> void:
 		args = PackedStringArray(["server"])
 	# Keep test fixtures on their canonical inputs, while every player-facing
 	# launch receives the bindings and look sensitivity saved in Settings.
-	if args.is_empty() or args[0] in ["solo", "host", "join", "online", "moon"]:
+	if args.is_empty() or args[0] in ["solo", "host", "join", "online", "moon", "frontier"]:
 		Settings.apply_saved_bindings()
 	_mouse_sensitivity = Settings.mouse_sensitivity
 	Settings.fps_limit_changed.connect(_on_fps_limit_changed)
@@ -89,6 +92,25 @@ func _ready() -> void:
 		_show_menu()
 		return
 	match args[0]:
+		"frontiertest", "lunarskytest":
+			mode = args[0]
+			var expansion_test = load("res://tests/%s.gd" % args[0]).new()
+			add_child(expansion_test)
+			expansion_test.call_deferred("run")
+		"frontier":
+			_start_frontier(_rand_name())
+		"frontierplaytest", "frontierbench", "frontierroutetest":
+			_start_frontier("SocietyTester", false)
+			var society_test = load("res://tests/%s.gd" % args[0]).new()
+			add_child(society_test)
+			society_test.call_deferred("run", self)
+		"frontiershot":
+			_do_frontier_shot(args)
+		"frontiervideo":
+			_start_frontier("Showcase", false)
+			var video_capture = load("res://tests/frontier_video_capture.gd").new()
+			add_child(video_capture)
+			video_capture.call_deferred("run", self, args.slice(1))
 		"joincancellationtest":
 			mode = args[0]
 			var cancellation_test = load("res://tests/joincancellationtest.gd").new()
@@ -120,6 +142,8 @@ func _ready() -> void:
 			add_child(play_test)
 			play_test.call_deferred("run", self)
 		"moon":
+			_enable_frontier = true
+			Gen.frontier_world = true
 			_start_moon_world(_rand_name())
 		"movetest":
 			mode = "movetest"
@@ -309,6 +333,7 @@ func _rand_name() -> String:
 
 
 func _register_inputs() -> void:
+	_add_key("society", KEY_B)
 	_add_key("move_fwd", KEY_W)
 	_add_key("move_back", KEY_S)
 	_add_key("move_left", KEY_A)
@@ -562,6 +587,9 @@ func _begin_menu_offline(destination: String) -> void:
 		_set_join_status("Graphics assets could not load. Please restart TROOP and try again.")
 		return
 	match destination:
+		"frontier":
+			_close_menu()
+			_start_frontier(pname)
 		"solo":
 			mode = "solo"
 			_close_menu()
@@ -570,6 +598,8 @@ func _begin_menu_offline(destination: String) -> void:
 			_close_menu()
 			_start_debug_world(pname)
 		"moon":
+			_enable_frontier = true
+			Gen.frontier_world = true
 			_start_moon_world(pname)
 
 
@@ -617,8 +647,10 @@ func _finish_world_entry(pname: String) -> void:
 	_sync_puppets()
 	_reset_adaptive_rendering()
 	_trace_join_phase("session_ui", phase_started)
+	if _enable_frontier:
+		_install_frontier()
 	if DisplayServer.get_name() != "headless" \
-			and mode in ["menu", "solo", "host", "join", "debugworld"]:
+			and mode in ["menu", "solo", "host", "join", "debugworld", "frontier", "moon"]:
 		Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
 
 
@@ -832,6 +864,82 @@ func _start_debug_world(pname: String) -> void:
 func _start_solo(pname: String, seed_v: int, warm_r: int) -> void:
 	Net.solo(pname, seed_v)
 	_enter_world(pname, seed_v, warm_r)
+
+
+func _start_frontier(pname: String, load_saved := true) -> void:
+	mode = "frontier"
+	_enable_frontier = true
+	_frontier_load_saved = load_saved
+	Gen.debug_world = false
+	Gen.frontier_world = true
+	_close_menu()
+	_start_solo(pname, 4041969, 2)
+
+
+func _install_frontier() -> void:
+	frontier_controller = FrontierController.new()
+	frontier_controller.persistence_enabled = _frontier_load_saved
+	world.add_child(frontier_controller)
+	frontier_controller.configure(self, world, expedition_manager, _frontier_load_saved)
+	if hud:
+		hud.score_label.visible = false
+	if chat_box:
+		chat_box.add_system_line("ROOTS & ROCKETS · E talks and works · B opens your society. Your career saves automatically.")
+
+
+func _do_frontier_shot(args: PackedStringArray) -> void:
+	var subject := str(args[1]) if args.size() > 1 else "town"
+	var output := str(args[2]) if args.size() > 2 else "/tmp/troop-frontier.png"
+	_start_frontier("FrontierPreview", false)
+	frontier_controller.simulation_enabled = false
+	world.set_time_of_day_override(10.0)
+	if subject.begins_with("moon") or subject == "solar":
+		Net.rocket_state.phase = Net.RocketMissionPhase.MOON_READY
+		expedition_manager._apply_authoritative_state(Net.expedition_state_snapshot())
+		expedition_manager.admin_travel(Net.PlayerRealm.MOON)
+		frontier_controller._sync_realm()
+	var camera := Camera3D.new()
+	world.add_child(camera)
+	camera.far = 20000.0
+	camera.current = true
+	if subject.begins_with("moon") or subject == "solar":
+		var site := frontier_controller.moon_site
+		camera.global_position = site.to_global(Vector3(70, 42, 95))
+		camera.look_at(site.to_global(Vector3(0, 0, -5)), site.global_basis.y)
+		camera.environment = expedition_manager.moon_world.lunar_environment
+	else:
+		camera.global_position = Vector3(118, 89, 133)
+		camera.look_at(Vector3(0, 3.25, 0))
+	if subject == "industry":
+		camera.global_position = Vector3(165, 65, -175)
+		camera.look_at(Vector3(90, 5, -55))
+	elif subject == "town-walk":
+		camera.global_position = Vector3(4, Gen.height(4, 1) + 1.85, 1)
+		camera.look_at(Vector3(-7, Gen.height(-7, -17) + 1.2, -17))
+	elif subject == "moon-walk":
+		var site := frontier_controller.moon_site
+		camera.global_position = site.surface_point(0, 0, 1.8)
+		camera.look_at(site.surface_point(-20, -15, 1.2), site.global_basis.y)
+	if subject.begins_with("ui"):
+		frontier_controller.ui.open(str(args[3]) if args.size() > 3 else "Overview")
+	elif subject == "moon-sky":
+		frontier_controller.set_observation(true)
+		camera.global_position = expedition_manager.moon_world.to_global(expedition_manager.moon_world.actor_landing_position())
+		camera.look_at(camera.global_position + LunarSky.EARTH_DIRECTION * 500, Vector3.UP)
+	if hud: hud.visible = false
+	if not subject.begins_with("ui"):
+		frontier_controller._layer.visible = false
+		if chat_box: chat_box.visible = false
+		expedition_manager._ui_layer.visible = false
+	await get_tree().create_timer(2.0).timeout
+	await RenderingServer.frame_post_draw
+	if subject.begins_with("ui"):
+		print("FRONTIER_SHOT_UI viewport=%s panel=%s minimum=%s scroll=%s" % [
+			str(get_viewport().get_visible_rect()), str(frontier_controller.ui._panel.get_rect()),
+			str(frontier_controller.ui._panel.get_combined_minimum_size()), str(frontier_controller.ui._scroll.get_rect())])
+	var result := get_viewport().get_texture().get_image().save_png(output)
+	print("FRONTIER_SHOT %s %s error=%d" % [subject, output, result])
+	get_tree().quit(0 if result == OK else 1)
 
 
 func _start_moon_world(pname: String) -> void:
@@ -1351,6 +1459,11 @@ func _show_menu() -> void:
 	play_head.add_theme_color_override("font_color", Color("8fb98f"))
 	_menu_scale_font(play_head, 12)
 	play_column.add_child(play_head)
+	var society := _menu_action_card(play_column, "ROOTS & ROCKETS · LIVING SOCIETY",
+		"Persistent farms · working citizens · fuel industry · Earth and Moon",
+		Color("4c7443"), Color("80a961"))
+	_offline_buttons.append(society)
+	society.pressed.connect(func(): _begin_menu_offline("frontier"))
 
 	var solo := _menu_action_card(play_column, "SOLO BANANA DUEL",
 		"Instant match against Captain Peel in a fresh jungle",
@@ -1374,7 +1487,7 @@ func _show_menu() -> void:
 	debug_b.pressed.connect(func(): _begin_menu_offline("debugworld"))
 
 	var moon_b := _menu_action_card(play_column, "MOON EXPEDITION",
-		"Grow cheese · trade with Muenster · build your lunar farm",
+		"Solar farms · lunar agriculture · photographic observatory · Muenster",
 		Color("46566e"), Color("9dc5ed"))
 	_offline_buttons.append(moon_b)
 	moon_b.pressed.connect(func(): _begin_menu_offline("moon"))
@@ -1461,7 +1574,8 @@ func _show_menu() -> void:
 	var foot := Label.new()
 	foot.text = ("WASD MOVE · E GRAB / CHEST · LMB FIRE · RMB AIM\n"
 		+ "1–4 WEAPONS · R RELOAD · H BANDAGE\n"
-		+ "HOLD T TO TALK · ENTER CHAT · C CAMERA")
+		+ "HOLD T TO TALK · ENTER CHAT · C CAMERA\n"
+		+ "SOCIETY CAREER · B BOARD · E TALK / WORK")
 	foot.add_theme_color_override("font_color", Color("a5c8a5"))
 	foot.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	_menu_scale_font(foot, 11)
@@ -1744,6 +1858,11 @@ func _apply_mouse_sensitivity(value: float) -> void:
 
 func _return_to_main_menu() -> void:
 	_close_pause_menu(false)
+	if is_instance_valid(frontier_controller):
+		frontier_controller.save_progress()
+	frontier_controller = null
+	_enable_frontier = false
+	_frontier_load_saved = true
 	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
 	Voice.clear_world()
 	Net.shutdown()
@@ -1759,6 +1878,7 @@ func _return_to_main_menu() -> void:
 	hud = null
 	_teardown_session_ui()
 	Gen.debug_world = false
+	Gen.frontier_world = false
 	_show_menu()
 
 
@@ -1771,6 +1891,20 @@ func _input(e: InputEvent) -> void:
 
 
 func _unhandled_input(e: InputEvent) -> void:
+	if is_instance_valid(frontier_controller) and frontier_controller.ui.visible:
+		if e.is_action_pressed("menu") or e.is_action_pressed("society"):
+			frontier_controller.ui.close()
+		get_viewport().set_input_as_handled()
+		return
+	if e.is_action_pressed("society") and is_instance_valid(frontier_controller) \
+			and not pause_menu and not menu \
+			and (not expedition_manager or not expedition_manager.is_ui_open()) \
+			and (not hud or not hud.world_map_is_open()) \
+			and (not chat_box or not chat_box.is_open()) \
+			and (not admin_panel or not admin_panel.visible):
+		frontier_controller.open_board()
+		get_viewport().set_input_as_handled()
+		return
 	if e.is_action_pressed("fullscreen") and DisplayServer.get_name() != "headless":
 		var next_mode := DisplayServer.WINDOW_MODE_WINDOWED if DisplayServer.window_get_mode() == DisplayServer.WINDOW_MODE_FULLSCREEN else DisplayServer.WINDOW_MODE_FULLSCREEN
 		DisplayServer.window_set_mode(next_mode)

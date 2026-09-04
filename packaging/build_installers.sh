@@ -64,6 +64,13 @@ MAC_BUILD_APP="$MAC_BUILD/TROOP.app"
 MAC_DMG="$DIST_DIR/TROOP-$APP_VERSION-macOS-universal.dmg"
 CONTENT_PCK="$DIST_DIR/TROOP-$APP_VERSION-content.pck"
 CHECKSUMS="$DIST_DIR/TROOP-$APP_VERSION-SHA256SUMS.txt"
+PLAYER_PACKAGE_README="$BUILD_ROOT/PLAYER_README.txt"
+ASTRONOMY_ATTRIBUTION="$PROJECT_ROOT/assets/astronomy/ATTRIBUTION.md"
+
+if [[ ! -s "$ASTRONOMY_ATTRIBUTION" ]]; then
+  echo "Missing astronomy image credits and usage notices: $ASTRONOMY_ATTRIBUTION" >&2
+  exit 1
+fi
 
 for OUTPUT_PATH in "$WINDOWS_EXE" "$WINDOWS_PCK" "$WINDOWS_INSTALLER" "$MAC_BUILD_APP" "$MAC_DMG" "$CONTENT_PCK" "$CHECKSUMS"; do
   if [[ -e "$OUTPUT_PATH" || -L "$OUTPUT_PATH" ]]; then
@@ -74,6 +81,14 @@ for OUTPUT_PATH in "$WINDOWS_EXE" "$WINDOWS_PCK" "$WINDOWS_INSTALLER" "$MAC_BUIL
 done
 
 mkdir -p "$WINDOWS_BUILD" "$MAC_BUILD" "$DIST_DIR"
+
+# Both installers already expose README.txt. Include the full astronomy notice
+# there as well as in the content pack, so credits and license/source links are
+# readable without unpacking a Godot resource archive.
+cat "$SCRIPT_DIR/PLAYER_README.txt" > "$PLAYER_PACKAGE_README"
+printf '\n\nAstronomy image credits and usage notices\n========================================\n\n' \
+  >> "$PLAYER_PACKAGE_README"
+cat "$ASTRONOMY_ATTRIBUTION" >> "$PLAYER_PACKAGE_README"
 
 # Package the Mac app outside Documents so File Provider cannot attach Finder
 # metadata that causes strict code-signature verification to fail.
@@ -145,7 +160,7 @@ echo "[4/8] Compiling the per-user Windows installer"
   "-DGAME_EXE=$WINDOWS_EXE" \
   "-DGAME_PCK=$WINDOWS_PCK" \
   "-DGODOT_LICENSE=$SCRIPT_DIR/GODOT_LICENSE.txt" \
-  "-DPLAYER_README=$SCRIPT_DIR/PLAYER_README.txt" \
+  "-DPLAYER_README=$PLAYER_PACKAGE_README" \
   "-DOUTPUT_FILE=$WINDOWS_INSTALLER" \
   "$SCRIPT_DIR/windows/TROOP.nsi"
 
@@ -222,7 +237,8 @@ if ! grep -q '^SMOKE_OK ' <<< "$EXPORTED_SMOKE_OUTPUT"; then
   exit 1
 fi
 cp "$SCRIPT_DIR/GODOT_LICENSE.txt" "$MAC_DMG_STAGE/GODOT_LICENSE.txt"
-cp "$SCRIPT_DIR/PLAYER_README.txt" "$MAC_DMG_STAGE/README.txt"
+cp "$PLAYER_PACKAGE_README" "$MAC_DMG_STAGE/README.txt"
+cp "$ASTRONOMY_ATTRIBUTION" "$MAC_DMG_STAGE/ASTRONOMY_ATTRIBUTION.md"
 ln -s /Applications "$MAC_DMG_STAGE/Applications"
 hdiutil create \
   -volname "TROOP $APP_VERSION" \
