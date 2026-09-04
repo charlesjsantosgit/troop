@@ -218,7 +218,7 @@ func _configure_rocket_route() -> void:
 	var moon_transform := Transform3D(moon_world.global_basis * moon_local.basis,
 		moon_world.to_global(moon_local.origin))
 	# The same physical pad owns departure, return contact and disembarking.
-	rocket.configure_route(earth_transform, moon_transform, earth_transform)
+	rocket.configure_route(earth_transform, moon_transform, earth_transform, moon_world)
 
 
 func _create_voyage_camera() -> void:
