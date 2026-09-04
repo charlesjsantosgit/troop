@@ -50,7 +50,7 @@ signal moon_colony_result(action: String, ok: bool, reason: String)
 const PORT := 30623
 const MAX_CLIENTS := 24
 const CHANNEL_COUNT := 2
-const PROTOCOL_VERSION := 12
+const PROTOCOL_VERSION := 13
 const MAX_NAME_LENGTH := 20
 const REGISTRATION_TIMEOUT_SECONDS := 5.0
 const MAX_STATE_PACKETS_PER_SECOND := 30
@@ -352,6 +352,20 @@ func _wire() -> void:
 	multiplayer.server_disconnected.connect(_on_server_disconnected)
 
 
+static func configure_transport(peer: ENetMultiplayerPeer) -> void:
+	# Both ends must use the same codec. Repeated town snapshot fields compress
+	# below the managed UDP path's datagram limit; the MTU regression checks this.
+	peer.get_host().compress(ENetConnection.COMPRESS_RANGE_CODER)
+
+
+static func configure_server_transport(peer: ENetMultiplayerPeer) -> void:
+	# Godot 4.7 (5b4e0cb0f) passes max_channels + 2 as incoming bandwidth
+	# in create_server. Our two channels therefore advertise four bytes/second,
+	# causing ENet to discard nearly all incoming voice/movement datagrams.
+	# Restore the requested unlimited budget before any client handshake.
+	peer.get_host().bandwidth_limit(0, 0)
+
+
 ## Playable host retained for loopback diagnostics and offline development.
 func host(pname: String, seed_v: int, port := PORT) -> Error:
 	_save_offline_moon_colony()
@@ -361,6 +375,8 @@ func host(pname: String, seed_v: int, port := PORT) -> Error:
 	var err := peer.create_server(port, MAX_CLIENTS, CHANNEL_COUNT)
 	if err != OK:
 		return err
+	configure_server_transport(peer)
+	configure_transport(peer)
 	multiplayer.multiplayer_peer = peer
 	_reset_moon_colonies()
 	active = true
@@ -430,6 +446,8 @@ func start_dedicated(seed_v: int, port := PORT, bind_ip := "*",
 	var err := peer.create_server(port, clampi(max_clients, 2, 256), CHANNEL_COUNT)
 	if err != OK:
 		return err
+	configure_server_transport(peer)
+	configure_transport(peer)
 	multiplayer.multiplayer_peer = peer
 	_reset_moon_colonies()
 	active = true
@@ -487,6 +505,7 @@ func join(address: String, pname: String, port := PORT) -> Error:
 	var err := peer.create_client(host_address, port, CHANNEL_COUNT)
 	if err != OK:
 		return err
+	configure_transport(peer)
 	multiplayer.multiplayer_peer = peer
 	_reset_moon_colonies()
 	local_name = _sanitize_name(pname, 0)

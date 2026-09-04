@@ -1,5 +1,32 @@
 # TROOP changelog
 
+## 0.6.1 — TOWN SURFACES & ONLINE FIXES
+
+### Stable town surfaces
+
+- Remove overlapping visible faces where the plaza, streets, footpaths and
+  loading bays meet. Roads keep usable junctions without flickering triangles.
+  Physical ground support remains available for players and delivery vehicles.
+
+### Shared towns and voice
+
+- Correct the server bandwidth limit applied by Godot 4.7 when multiple ENet
+  channels are requested, preventing severe loss of incoming realtime traffic.
+- Enable matching ENet packet compression on clients and servers so large
+  personalized town snapshots cross the public host's smaller UDP packet limit.
+  Town accounts, crops, workers and deliveries continue using the same saves.
+- This update includes all features from Shared Societies. Press **E** by a
+  person or workplace and **B** for your journal and optional tutorials.
+
+### Updating together
+
+- Apply the signed update and restart, or install the Windows/macOS package.
+  All clients and the public server must use **0.6.1 / protocol 13**.
+  Bootstrap **3** is retained; versions older than **0.4.10** need the installer.
+- Cold Metal shader compilation and the existing exhaust renderer warning at
+  shutdown remain open. This hotfix does not establish Windows runtime or
+  M1/M3 performance coverage; native testing here uses an Apple M4.
+
 ## 0.6.0 — SHARED SOCIETIES
 
 ### Roots & Rockets on the public server
