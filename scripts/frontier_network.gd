@@ -179,6 +179,13 @@ func register_peer(peer_id: int) -> void:
 			rpc_id(peer_id, "cl_result", 0, "join", registration, "", -1, {})
 		return
 	_watch[peer_id] = "canopy_earth"
+	if peer_id == net.local_id():
+		# A listen host applies its snapshots synchronously and sends no remote
+		# application ACK. Bootstrap its six towns directly, without recursive
+		# queue draining or leaving local work in the remote backpressure queue.
+		for town: Dictionary in catalog:
+			_send_view(peer_id, str(town.id), false)
+		return
 	# Bootstrap every town once for distant scenery and the personal map.
 	# Send these one at a time, then retain only the newest live refresh.
 	# The bootstrap RPC stays on channel 0 after cl_world so clients cannot see a

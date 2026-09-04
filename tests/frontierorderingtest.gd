@@ -9,6 +9,10 @@ var expected_water := -1
 
 class IdentitySource extends Node:
 	var _peer_key_fingerprints: Dictionary = {}
+	var names: Dictionary = {7:"Alice"}
+	var active := false
+	var is_host := false
+	func local_id() -> int: return 7
 
 func _initialize() -> void:
 	create_timer(20).timeout.connect(func(): push_error("FRONTIERORDERING deadline"); quit(2))
@@ -125,6 +129,29 @@ func _run() -> void:
 	missing._apply_view("canopy_earth", 45, domain.view(alice, "canopy_earth"), domain.towns(alice))
 	_check(missing.views.has("canopy_earth") and missing._view_sequences.canopy_earth == 45,
 		"a result before the first view cannot poison its later bootstrap")
+	# Local authority registration has no remote application ACK. It must
+	# synchronously bootstrap every town and remain safe when registration
+	# repeats in the same process after a canceled entry attempt.
+	authority.authoritative = true
+	authority.society_ready = true
+	authority.catalog = domain.towns()
+	authority.register_peer(7)
+	_check(authority.views.size() == 6 and authority._view_sequences.size() == 6,
+		"local authority registration synchronously creates six personalized town views")
+	_check(authority._bootstrap_views.is_empty() and authority._bootstrap_control.is_empty()
+		and authority._view_in_flight.is_empty() and authority._pending_views.is_empty()
+		and authority._priority_views.is_empty(),
+		"local bootstrap creates no remote ACK, pending, or priority queue entries")
+	var before_retry: Dictionary = domain.export_state()
+	var before_revisions: Dictionary = authority._view_sequences.duplicate()
+	authority.register_peer(7)
+	var refreshed: bool = authority.views.size() == 6
+	for town_id in before_revisions:
+		refreshed = refreshed and int(authority._view_sequences.get(town_id, -1)) > int(before_revisions[town_id])
+	_check(refreshed and domain.export_state() == before_retry,
+		"local registration retry refreshes all six views without regranting money or goods")
+	_check(authority._bootstrap_views.is_empty() and authority._view_in_flight.is_empty(),
+		"same-process local registration retry cannot stall behind a missing remote ACK")
 	client.stop()
 	_check(client._view_sequences.is_empty() and client._shared_sequences.is_empty()
 		and client._shared_player.is_empty() and client._catalog_sequence == -1,

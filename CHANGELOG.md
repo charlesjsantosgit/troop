@@ -12,6 +12,8 @@
   when the player walks away or the request expires.
 - Show ping beside FPS and connection details in Pause to help distinguish
   connection delay from rendering performance. School Wi-Fi has not been measured.
+- Load all six towns when hosting locally, including retries after canceling
+  entry, without waiting for a network acknowledgment from the host itself.
 
 ### Backpacks and interactive trading
 
@@ -33,6 +35,8 @@
   Remove redundant NPC headings; Nana's first Buy/Sell controls fit without
   scrolling at 1280×720 and 960×540. Preserve focus, scroll and close controls.
 - Retain the muted sage title background and charcoal, ivory and amber palette.
+- Make town signs smaller and fade nearby lettering before it fills the camera;
+  the contextual E prompt keeps nearby workplaces easy to use.
 
 ### Physical residents and six-foot players
 

@@ -112,15 +112,20 @@ func text(at: Vector3, value: String, color := Color(0.98, 0.91, 0.72),
 	var label := Label3D.new()
 	label.text = value
 	label.font_size = size
-	label.pixel_size = 0.013
+	label.pixel_size = 0.008
 	label.modulate = color
 	label.outline_size = 7
 	label.outline_modulate = Color(0.055, 0.075, 0.075, 0.92)
 	label.billboard = BaseMaterial3D.BILLBOARD_ENABLED
 	label.position = frame * at
 	label.no_depth_test = false
+	# World signs guide players from a distance; the E prompt handles nearby
+	# interaction. Fade in the renderer before billboard text fills the camera.
+	label.visibility_range_begin = 8.0
+	label.visibility_range_begin_margin = 1.5
 	label.visibility_range_end = distance
 	label.visibility_range_end_margin = 4.0
+	label.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_SELF
 	parent.add_child(label)
 	return label
 
