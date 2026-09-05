@@ -242,6 +242,23 @@ jobs:
             grep -Eq "^${TEST_PREFIX} PASS [0-9]+/[0-9]+ " "$TEST_LOG"
           done
 
+      - name: Verify Crownreach housing, city streaming, and shared persistence
+        shell: bash
+        run: |
+          set -euo pipefail
+          for MODE in cityeconomytest cityplantest cityuitest citysoak; do
+            TEST_LOG="$RUNNER_TEMP/troop-$MODE.log"
+            TEST_PREFIX="$(printf '%s' "$MODE" | tr '[:lower:]' '[:upper:]')"
+            # The gameplay soak also stages the complete skyline and checks
+            # collision remains under the player throughout the longer visit.
+            if [ "$MODE" = citysoak ]; then TEST_PREFIX=CITYPLAYTEST; fi
+            "$GODOT_BIN" --headless --path . --fixed-fps 60 \
+              --quit-after 30000 -- "$MODE" 2>&1 | tee "$TEST_LOG"
+            grep -Eq "^${TEST_PREFIX} (result=)?[0-9]+/[0-9]+ PASS$" "$TEST_LOG"
+            ! grep -q 'SCRIPT ERROR:' "$TEST_LOG"
+          done
+          python3 tests/run_city_network.py --godot "$GODOT_BIN" --project .
+
       - name: Build installers and cross-platform content pack
         shell: bash
         run: ./packaging/build_installers.sh

@@ -1,8 +1,8 @@
 {
   "godot_compatibility": "4.7",
   "minimum_bootstrap": 3,
-  "network_protocol": 14,
-  "release_title": "TROOP 0.7.1 \u2014 RESPONSIVE TOWNS",
-  "notes": "Visible field backpacks are standard gear, with an I-key inventory linked directly to finite town goods and personal pockets. Trading pairs your backpack with merchant stock in opaque animated tile grids, with quantity and Buy/Sell controls always visible. Shared actions and vehicle confirmations use separate network channels from bulk town updates; queued views stay bounded and ping appears beside FPS. Residents have physical collisions, separated work positions, realistic walking and job-specific work poses. Player anatomy, collision height and eye level measure six feet (1.8288 m). Install the full 0.7.1 package for multiplayer protocol 14; bootstrap 3 is retained. Existing local saves and server town ownership are preserved.",
+  "network_protocol": 15,
+  "release_title": "TROOP 0.8.0 \u2014 CROWNREACH",
+  "notes": "Explore Crownreach: a 23.04 km-wide city covering about 205 square miles, with 400,000 residents represented by bounded district simulation. Visit Lantern Square, twelve districts and addressable buildings. Buy a village cottage, town apartment, suburban home, city apartment, penthouse or warehouse using your existing credits. Physical interiors offer private storage and home respawning. Courier, maintenance, produce and depot-restocking work moves finite goods and pays funded wages. Transit, contextual menus and a city guide connect the city to the existing towns. Nearby building batches, collisions and street actors stream within fixed budgets. Install the full 0.8.0 package for multiplayer protocol 15; bootstrap 3 is retained. Existing local saves, shared town ownership and player inventories are preserved.",
   "requires_installer": true
 }

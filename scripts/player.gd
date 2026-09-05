@@ -163,6 +163,8 @@ var death_ragdoll: MonkeyRagdoll
 
 # test-injected input (movetest drives the monkey through this)
 var test_mode := false
+## Temporary ground handoff hold; independent of the rocket's cabin lock.
+var arrival_locked := false
 var ti := {"dir": Vector2.ZERO, "jump_just": false, "jump_held": false, "sprint": false,
 	"crouch_just": false, "crouch_held": false, "grab": false, "reel": 0.0,
 	"shoot_just": false, "shoot_held": false, "reload_just": false,
@@ -300,7 +302,7 @@ func _physics_process(dt: float) -> void:
 		if melee_primed or melee_attack_primed or melee_attack_remaining > 0.0:
 			cancel_melee_input()
 		return
-	if expedition_locked:
+	if expedition_locked or arrival_locked:
 		if melee_primed or melee_attack_primed or melee_attack_remaining > 0.0:
 			cancel_melee_input()
 		velocity = Vector3.ZERO

@@ -7,6 +7,7 @@ extends RefCounted
 ## Citizens physically reach positions before timed jobs commit resources.
 ## Saves are validated fully then atomically replace current state.
 const RoutesScript = preload("res://scripts/frontier_routes.gd")
+const CityScript = preload("res://scripts/city_economy.gd")
 const VERSION := 1
 const PEDESTRIAN_RADIUS := 0.34
 const PEDESTRIAN_SPACING := 0.86
@@ -94,6 +95,7 @@ var shared_players: Dictionary = {}
 var multiplayer_mode := false
 var _pedestrian_obstacles: Array = []
 var _pedestrian_layout_ready := false
+var _city_model = null
 
 func _init() -> void:
 	for id in CROP_ROWS:
@@ -125,6 +127,7 @@ func recipe_catalog() -> Dictionary:
 func new_game(world_seed: int = 2026) -> void:
 	_pedestrian_layout_ready = false
 	_accumulator = 0.0
+	_city_model = null
 	state = {"schema_version":VERSION,"seed":world_seed,"time":400.0,"planet":"earth",
 		"solar_illumination":0.5,"lunar_phase":1.0/12.0,
 		"accounts":{"player":1800,"cooperative":20000,"earth_market":30000,"moon_market":22000,
@@ -213,6 +216,9 @@ func new_game(world_seed: int = 2026) -> void:
 	_add_quest("fuel_station","Keep the village moving","Deliver 12 litres of refined gasoline.","gasoline",12,"gas_station",230,"diesel")
 	_add_quest("aircraft_fuel","Cargo flight departure","Deliver 10 litres of refined jet fuel.","jet_fuel",10,"airfield",260,"jet")
 	_add_quest("solar_delivery","A brighter lunar morning","Supply one solar kit to the power crew.","solar_kit",1,"solar_array",160,"ray")
+	_city_model = CityScript.new()
+	_city_model.new_game(world_seed,float(state.time))
+	state["city"] = _city_model.state
 	state.initial_money = total_money()
 	_event("Welcome to Roots & Rockets. Your Earth crops are nearly ready; Ookbar has a funded harvest contract.")
 
@@ -270,6 +276,7 @@ func _step(dt: float) -> void:
 				person.position = _free_work_position(person, person.position, false)
 		_pedestrian_layout_ready = true
 	state.time += dt
+	_advance_city(float(state.time))
 	_update_habitat(dt)
 	for id in _ids(state.plots):
 		_grow_plot(state.plots[id],dt)
@@ -1227,6 +1234,38 @@ func summary() -> Dictionary:
 		"shipments":state.shipments.size(),"metrics":state.metrics.duplicate(),
 		"greenhouse":state.facilities.lunar_greenhouse.duplicate()}
 
+func city_view(property_context: String = "") -> Dictionary:
+	var city = _city()
+	if city==null: return {}
+	var result: Dictionary=city.view("player",self,property_context)
+	result.credits=balance("player")
+	result.backpack_counts=state.inventories.get("player_earth",{}).duplicate(true)
+	result.backpack_capacity=int(state.locations.get("player_earth",{}).get("capacity",350))
+	result.time=float(state.time)
+	result.now=float(state.time)
+	return result
+
+func city_action(kind: String, payload: Dictionary, position: Vector3, time: float = -1.0) -> Dictionary:
+	var city = _city()
+	if city==null: return _result(false,"Crownreach is unavailable in this world.")
+	var authority_time := float(state.time) if time<0.0 else time
+	var result: Dictionary=city.action("player",kind,payload,self,position,authority_time)
+	state.city=city.state
+	return result
+
+func _city():
+	if multiplayer_mode or not state.get("city") is Dictionary: return null
+	if _city_model==null or _city_model.state!=state.city:
+		var candidate=CityScript.new()
+		if not candidate.import_state(state.city): return null
+		_city_model=candidate
+	return _city_model
+
+func _advance_city(to_time: float) -> void:
+	var city=_city()
+	if city==null: return
+	if city.advance(to_time): state.city=city.state
+
 func save_game(path: String) -> bool:
 	if not validate_state(state): return false
 	var actual := ProjectSettings.globalize_path(path)
@@ -1254,8 +1293,15 @@ func load_game(path: String) -> bool:
 	var json := JSON.new()
 	var parsed := json.parse(file.get_as_text())
 	file.close()
-	if parsed!=OK or not validate_state(json.data): return false
-	state=json.data
+	if parsed!=OK or not json.data is Dictionary: return false
+	var candidate: Dictionary=json.data.duplicate(true)
+	if not candidate.has("city"):
+		var migrated=CityScript.new()
+		migrated.new_game(int(candidate.get("seed",2026)),float(candidate.get("time",400.0)))
+		candidate.city=migrated.state
+	if not validate_state(candidate): return false
+	state=candidate
+	_city_model=null
 	_pedestrian_layout_ready=false
 	_accumulator=0.0
 	return true
@@ -1269,6 +1315,17 @@ func validate_state(candidate: Variant) -> bool:
 		if not data.get(key) is Array: return false
 	if not _valid_integer(data.get("schema_version"),VERSION,VERSION) or data.get("planet") not in ["earth","moon"] or not _valid_number(data.get("time"),0,1000000000): return false
 	if bool(data.get("online",false))!=multiplayer_mode: return false
+	if multiplayer_mode and data.has("city"): return false
+	if data.has("city"):
+		var city=CityScript.new()
+		if not city.import_state(data.city) or int(city.state.seed)!=int(data.get("seed",-1)) \
+				or float(city.state.last_time)>float(data.get("time",-1))+0.0001: return false
+		for property: Dictionary in city.state.properties.values():
+			if property.owner!="player": return false
+		for actor in city.state.homes:
+			if actor!="player": return false
+		for actor in city.state.active_jobs:
+			if actor!="player": return false
 	var location_count := EARTH_LOCATIONS.size()+MOON_LOCATIONS.size()+(shared_players.size()*2 if multiplayer_mode else 0)
 	if data.locations.size()!=location_count or data.citizens.size()>64 or data.plots.size()>64 or data.shipments.size()>24 or data.batches.size()>8 or data.ledger.size()>160 or data.events.size()>24 or data.recent_requests.size()>64: return false
 	for key in ["initial_money","next_id","seed"]:
@@ -1657,6 +1714,8 @@ func configure_shared_players(book: Dictionary) -> void:
 	multiplayer_mode=true
 	shared_players=book
 	state["online"]=true
+	state.erase("city")
+	_city_model=null
 	for actor in shared_players:
 		attach_shared_player(str(actor))
 

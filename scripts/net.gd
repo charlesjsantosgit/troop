@@ -55,7 +55,7 @@ const MAX_CLIENTS := 24
 # 2 carries latency-sensitive actions and seat ownership, and 3 carries large
 # personalized society views with application-level backpressure.
 const CHANNEL_COUNT := 4
-const PROTOCOL_VERSION := 14
+const PROTOCOL_VERSION := 15
 const MAX_NAME_LENGTH := 20
 const REGISTRATION_TIMEOUT_SECONDS := 5.0
 const MAX_STATE_PACKETS_PER_SECOND := 30

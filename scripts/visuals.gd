@@ -4,6 +4,7 @@ extends RefCounted
 ## gets richer lighting and motion without creating a shader per mesh instance.
 
 static var _shared: Dictionary = {}
+static var _city_enabled := false
 static var _foliage: Dictionary = {}
 static var _fur: Dictionary = {}
 ## Shader source is immutable after construction. Share the program, not the
@@ -105,6 +106,7 @@ render_mode diffuse_burley, specular_schlick_ggx;
 """ + TERRAIN_OWNERSHIP_SHADER + """
 
 uniform vec2 focus_xz = vec2(0.0);
+uniform bool city_enabled = false;
 uniform float snow_amount : hint_range(0.0, 1.0) = 0.0;
 uniform vec2 cinematic_curve_focus_xz = vec2(0.0);
 uniform float cinematic_curve_surface_y = 0.0;
@@ -215,6 +217,14 @@ void fragment() {
 	float floor_weight = (1.0 - cinematic_curve_strength)
 		* mix(0.52, 0.30, slope);
 	ground = mix(ground, textured_floor, floor_weight);
+	// Crownreach's engineered pavement retains the shared terrain mesh and
+	// depth ownership. Suppress leaf-litter albedo inside its municipal bounds.
+	bool city_surface = city_enabled && world_pos.x >= 2880.0 && world_pos.x <= 25920.0
+		&& world_pos.z >= -11520.0 && world_pos.z <= 11520.0;
+	if (city_surface) {
+		ground = vertex_tint.rgb * mix(0.78, 0.86, fine);
+		floor_weight = 0.0;
+	}
 	// Let soil texture and broad terrain variation remain legible below the
 	// accumulation.  Fully replacing the ground with a flat near-white made
 	// winter hills clip into one featureless value under the noon sun.
@@ -1153,11 +1163,18 @@ static func ground_material() -> ShaderMaterial:
 	if not _shared.has("ground"):
 		_shared.ground = _material(GROUND_SHADER, {
 			"snow_amount": _snow_amount,
+			"city_enabled": _city_enabled,
 			"focus_xz": Vector2.ZERO if not _far_focus.is_finite() else _far_focus,
 			"terrain_microdetail": TERRAIN_MICRODETAIL,
 			"terrain_floor_albedo": TERRAIN_FLOOR_ALBEDO,
 		})
 	return _shared.ground
+
+
+static func set_city_enabled(enabled: bool) -> void:
+	_city_enabled = enabled
+	if _shared.has("ground"):
+		_shared.ground.set_shader_parameter("city_enabled", enabled)
 
 
 static func trunk_material() -> ShaderMaterial:

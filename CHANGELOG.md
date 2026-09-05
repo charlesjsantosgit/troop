@@ -1,5 +1,51 @@
 # TROOP changelog
 
+## 0.8.0 — CROWNREACH
+
+### A city to live in
+
+- Add **Crownreach**, a 23.04 km square municipality covering approximately
+  **205 square miles**, with twelve districts, **36,861 city buildings**, and
+  **Lantern Square**, a pedestrian center inspired by Times Square.
+- Represent **400,000 residents** through district food demand, workforce and
+  service conditions. Stream nearby building batches, colliders, pedestrians
+  and cars within fixed budgets; census residents are not 400,000 active NPCs.
+- Give generated buildings deterministic addresses and usable housing or
+  workplace entrances. Furnished reusable interiors load when visited.
+- Grade streets and foundations through the shared terrain generator, preserving
+  one ground surface for rendering, collisions and vehicle contact.
+
+### Homes and useful space
+
+- Buy a **450-credit village cottage**, **700-credit town apartment**,
+  **1,200-credit suburban home**, **1,600-credit city apartment**,
+  **4,800-credit penthouse**, or **2,600-credit warehouse**.
+- Transfer real backpack goods into private storage. Capacity ranges from 80
+  units in the cottage to 1,000 in a warehouse. Use a residential bed to choose
+  your home respawn address. Warehouses are commercial storage spaces.
+- Persist exclusive ownership, private storage and home selections in local
+  careers and on the server. Limit ownership to eight properties per resident.
+
+### Work and getting around
+
+- Take courier, repair, produce-supply and depot-restocking jobs at their actual
+  workplaces. Carry finite sealed job parcels; deliver at the destination after
+  the work timer. Wages come from municipal funds and supplies cannot duplicate.
+- Pay six credits at a marked transit stop to reach the square, districts and
+  workplaces. Streets also connect the city to the existing Earth settlements.
+- Press **E** at a door, cupboard, bed, noticeboard or transit stop for its own
+  compact menu. Press **B** in the city for housing, jobs, transit and the guide.
+  Follow gold markers to selected addresses.
+
+### Updating together
+
+- Install the full **0.8.0** Mac or Windows package. Client and server now use
+  **protocol 15**; bootstrap **3** and Godot **4.7** remain unchanged.
+- Existing town saves, shared wallets, bags and claims migrate without resets.
+- Native visual and frame-time checks cover Apple M4. Other Mac hardware and
+  Windows runtime remain unverified; first-use hitches and existing renderer
+  cleanup warnings are not claimed resolved by this city update.
+
 ## 0.7.1 — RESPONSIVE TOWNS
 
 ### Responsive shared actions

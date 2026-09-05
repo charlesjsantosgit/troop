@@ -26,11 +26,18 @@ the next launch. TROOP verifies the signature, exact file size, and SHA-256
 digest before it loads any downloaded code. Engine or installer-level changes
 still require the normal Windows installer or macOS disk-image flow.
 
-TROOP 0.7.1 improves shared action latency, menu content density and working NPCs.
-Install the full package to activate protocol 14, including when upgrading from
-0.7.0. Close every running copy before replacing the app. On a Mac, replace
-TROOP.app in Applications and launch that copy. Confirm 0.7.1 on the menu.
+TROOP 0.8.0 adds Crownreach, housing, private storage, city jobs and transit.
+Install the full package to activate protocol 15, including when upgrading from
+0.7.1. Close every running copy before replacing the app. On a Mac, replace
+TROOP.app in Applications and launch that copy. Confirm 0.8.0 on the menu.
 Your existing local saves and server town ownership are preserved.
+
+At the village, B > Places > Crownreach locates the transit stop. Press E at
+the stop and spend 6 credits to visit Lantern Square. B opens the city guide.
+Press E at housing entrances, cupboards, beds and workplace noticeboards.
+The cheapest cottage costs 450 credits; its storage uses your real backpack.
+The 400,000 city residents are simulated by district, with nearby physical
+pedestrians and cars; they are not all spawned at the same time.
 
 Choose Play, then Play online for six Earth/Moon towns, claimable communities,
 finite markets, farming, job-specific workers and physical delivery vehicles.

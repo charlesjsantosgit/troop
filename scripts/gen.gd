@@ -8,6 +8,7 @@ signal vine_visual_changed(chunk_key: Vector2i)
 const PlanetTerrainScript = preload("res://scripts/planet_terrain.gd")
 const PlanetRoadNetworkScript = preload("res://scripts/planet_road_network.gd")
 const TownLayout = preload("res://scripts/frontier_town_layout.gd")
+const CityTerrain = preload("res://scripts/city_terrain.gd")
 
 const CHUNK := 48.0
 const CELLS := 16                # terrain quads per chunk side
@@ -1285,6 +1286,7 @@ func _height_with_planet_sample(x: float, z: float,
 	if frontier_world:
 		var town_weight := TownLayout.terrain_weight(Vector2(x, z))
 		h = lerpf(h, FRONTIER_TOWN_HEIGHT, town_weight)
+		h = CityTerrain.grade(Vector2(x, z), h)
 	return h
 
 
@@ -1518,7 +1520,8 @@ func _ground_color_from_sample(h: float, x: float, z: float,
 		var pavement := 1.0 - smoothstep(TownLayout.ROAD_HALF_WIDTH,
 			TownLayout.ROAD_HALF_WIDTH + 0.7, lane_distance)
 		c = c.lerp(Color(0.29, 0.28, 0.245), pavement)
-	return Color(c.r + jit * 0.04, c.g + jit * 0.04, c.b)
+	c = Color(c.r + jit * 0.04, c.g + jit * 0.04, c.b)
+	return CityTerrain.color(Vector2(x, z), c) if frontier_world else c
 
 
 ## Exact physical terrain vertex plus its matching tint in one call. Streaming
@@ -1913,7 +1916,8 @@ func chunk_layout(cx: int, cz: int, include_decorations := true) -> Dictionary:
 	var rng := _chunk_rng(cx, cz)
 	# Reserve complete chunks touching town plots so near and distant trees
 	# agree. The settlement supplies its own deliberately placed shade trees.
-	if debug_world or (frontier_world and TownLayout.touches_town(cx, cz, CHUNK)):
+	if debug_world or (frontier_world and (TownLayout.touches_town(cx, cz, CHUNK) \
+			or CityTerrain.reserved_chunk(cx, cz, CHUNK))):
 		return {"trees": [], "bananas": [], "rocks": [], "foliage": [],
 			"structures": [], "arena_pieces": [], "arena_id": "",
 			"airfield_hangars": [], "freeway_tunnels": [],
@@ -2403,7 +2407,8 @@ func vehicle_definition_by_id(vehicle_id: String) -> Dictionary:
 ## Every RNG draw below is unconditional so the sequence stays deterministic
 ## regardless of which candidates the terrain gates reject.
 func skyline_tree_layout(cx: int, cz: int) -> Array:
-	if debug_world:
+	if debug_world or (frontier_world and (TownLayout.touches_town(cx, cz, CHUNK) \
+			or CityTerrain.reserved_chunk(cx, cz, CHUNK))):
 		return []
 	var rng := _chunk_rng(cx, cz, 1801)
 	var trees: Array = []
@@ -2440,7 +2445,8 @@ func skyline_tree_layout(cx: int, cz: int) -> Array:
 ## grow, so forests still read as forests kilometres past the last instanced
 ## tree silhouette. Purely a function of existing deterministic fields.
 func canopy_cover(h: float, x: float, z: float) -> float:
-	if debug_world:
+	if debug_world or (frontier_world and (CityTerrain.reserved(Vector2(x, z)) \
+			or CityTerrain.access_weight(Vector2(x, z)) > 0.0)):
 		return 0.0
 	if point_on_road(x, z) or point_on_airstrip(x, z) \
 			or point_in_rocket_launch_clearance(x, z,

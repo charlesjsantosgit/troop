@@ -44,6 +44,7 @@ var _active_town_id := "canopy_earth"
 var _town_refresh := 0.0
 var _offline_traffic: Node3D
 var tutorial: Node
+var city: Node
 var _tutorial_save_path := ""
 var _pending_actions: Dictionary = {}
 var _pending_kind := ""
@@ -63,6 +64,7 @@ func configure(main: Node, host: World, manager: ExpeditionManager,
 	_tutorial_save_path = "user://frontier/tutorial-online.cfg" if _online else custom_save_path + ".tutorial.cfg" if load_saved else ""
 	if _online:
 		_configure_online()
+		_install_city()
 		return
 	simulation = load("res://scripts/frontier_sim.gd").new()
 	var loaded: bool = load_saved and simulation.load_game(save_path)
@@ -92,7 +94,16 @@ func configure(main: Node, host: World, manager: ExpeditionManager,
 	_sync_realm()
 	if world.local_player:
 		world.local_player.melee_mode = true
-		world.local_player.rig.set_melee_pose(false, false, 0.0, 0)
+		if world.local_player.rig:
+			world.local_player.rig.set_melee_pose(false, false, 0.0, 0)
+	_install_city()
+
+
+func _install_city() -> void:
+	city = load("res://scripts/city_controller.gd").new()
+	city.name = "CityController"
+	add_child(city)
+	city.configure(self)
 
 
 func _create_sites() -> void:
@@ -302,17 +313,21 @@ func _sync_obstructions() -> void:
 func _refresh_overlays() -> void:
 	if not is_instance_valid(world.local_player):
 		return
-	var active := Net.player_realm() != Net.PlayerRealm.TRANSIT
+	var active: bool = Net.player_realm() != Net.PlayerRealm.TRANSIT \
+		and not (is_instance_valid(city) and city.panel.visible)
 	var physical_interaction: Dictionary = world.nearby_physical_interaction(
 		world.local_player) if world.has_method("nearby_physical_interaction") else {}
 	_status.visible = active and not ui.visible
 	_prompt.visible = active and not ui.visible and physical_interaction.is_empty()
 	_waypoint_label.visible = false # The world-space marker already gives name and distance.
-	_waypoint_marker.visible = active and not ui.visible and not waypoint.is_empty()
+	_waypoint_marker.visible = active and not ui.visible and not waypoint.is_empty() \
+		and not (is_instance_valid(city) and (city.is_inside() or city.is_in_city()))
 	_sky_credit.visible = Net.player_realm() == Net.PlayerRealm.MOON and not ui.visible and not expedition.is_ui_open()
 	var credits := int(simulation.state.get("accounts", {}).get("player", 0))
-	_status.text = "%s  ·  %s credits  ·  B Journal" % [
-		str(current_town().get("name", "Town")).to_upper(), str(credits)]
+	var city_context: bool = is_instance_valid(city) and (city.is_inside() or city.is_in_city())
+	_status.text = "%s  ·  %s credits  ·  B %s" % [
+		"CROWNREACH" if city_context else str(current_town().get("name", "Town")).to_upper(),
+		str(credits), "City guide" if city_context else "Journal"]
 	var interaction := nearest_interaction() if physical_interaction.is_empty() else {}
 	_prompt.text = interaction_prompt(interaction)
 	_focus_resident(interaction if active and not ui.visible else {})
@@ -400,6 +415,7 @@ func nearest_interaction() -> Dictionary:
 	var nearest: Dictionary = {}
 	var best := INTERACTION_RANGE * INTERACTION_RANGE
 	var candidates := interactions()
+	if is_instance_valid(city): candidates.append_array(city.interactions())
 	for candidate: Dictionary in candidates:
 		var position: Vector3 = candidate.get("position", Vector3.INF)
 		var distance := world.local_player.global_position.distance_squared_to(position)
@@ -447,9 +463,14 @@ func try_interact(player: MonkeyPlayer) -> bool:
 		return false
 	if ui.visible:
 		return true
+	if is_instance_valid(city) and city.panel.visible:
+		return true
 	var item := nearest_interaction()
 	if item.is_empty():
 		return false
+	if item.get("city", false):
+		city.open(item)
+		return true
 	selected_interaction = item
 	ui.open(item)
 	_refresh_overlays()
@@ -459,6 +480,9 @@ func try_interact(player: MonkeyPlayer) -> bool:
 
 
 func open_board() -> void:
+	if is_instance_valid(city) and (city.is_in_city() or city.is_inside()):
+		city.open({"kind": "info", "id": "city_guide", "name": "Crownreach guide"})
+		return
 	if Net.player_realm() == Net.PlayerRealm.TRANSIT:
 		return
 	selected_interaction.clear()
