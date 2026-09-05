@@ -5,7 +5,7 @@ extends Node3D
 ## solved onto the rope and the weapon arm stays aimed; an unarmed pose can
 ## still use both paws. The unused remainder of the vine trails below the grip.
 
-enum Anim { IDLE, RUN, SPRINT, AIR, DIVE, WALLSLIDE, SWING, SLIDE, ROLL, FLIP_F, FLIP_B, SWIM, SKID, RIDE, PILOT, CABIN }
+enum Anim { IDLE, RUN, SPRINT, AIR, DIVE, WALLSLIDE, SWING, SLIDE, ROLL, FLIP_F, FLIP_B, SWIM, SKID, RIDE, PILOT, CABIN, ENTER_SEAT, SIT, RECLINE, SLEEP, RISE }
 # SPRINT slot = quadruped gallop (entered by landing fast off a vine).
 # FLIP_F/FLIP_B = airborne tucked front/backflips after fast vine releases.
 
@@ -77,6 +77,8 @@ var kn_r: Node3D
 var foot_l: MeshInstance3D
 var foot_r: MeshInstance3D
 var tail_segs: Array = []
+var _sleep_eye_parts: Array[Dictionary] = []
+var _sleep_eye_blend := 0.0
 var tag: Label3D
 var rope_mi: MeshInstance3D
 var rope_mesh: ImmediateMesh
@@ -121,6 +123,7 @@ var _sniper_support_grip: Node3D
 var _melee_mode := false
 var _ride_lean := 0.0
 var _vehicle_pose = null
+var furnished_room := false
 var _melee_attack_active := false
 var _melee_attack_progress := 0.0
 var _melee_combo := 0
@@ -234,6 +237,8 @@ func setup(display_name: String, show_tag: bool) -> void:
 		eye_glint.position = Vector3(sx * 0.055, 0.047, -0.170)
 		eye_glint.scale = Vector3(0.8, 0.8, 0.45)
 		head_p.add_child(eye_glint)
+		_sleep_eye_parts.append({"eye":eye,"pupil":pupil,"glint":eye_glint,
+			"white":white_m,"skin":skin_m})
 		var cheek := _sph(0.018, blush_m, false)
 		cheek.name = "Cheek"
 		cheek.position = Vector3(sx * 0.092, -0.033, -0.148)
@@ -446,6 +451,7 @@ func _build_leg(hip: Node3D, fur_m: Material, skin_m: Material) -> Array:
 func _cap(r: float, h: float, m: Material,
 		outline_body := true) -> MeshInstance3D:
 	var mi := MeshInstance3D.new()
+	mi.set_meta("anatomical_mesh",true)
 	var c := CapsuleMesh.new()
 	c.radius = r
 	c.height = maxf(h, r * 2.1)
@@ -462,6 +468,7 @@ func _cap(r: float, h: float, m: Material,
 
 func _sph(r: float, m: Material, outline_body := true) -> MeshInstance3D:
 	var mi := MeshInstance3D.new()
+	mi.set_meta("anatomical_mesh",true)
 	var s := SphereMesh.new()
 	s.radius = r
 	s.height = r * 2.0
@@ -898,12 +905,14 @@ func update_motion(dt: float, anim: int, vel: Vector3, on_floor: bool, anchor: V
 	# its authored attack path before the contact frame.
 	var melee_pose_allowed := _melee_mode and anim not in [
 		Anim.SPRINT, Anim.SWING, Anim.SWIM, Anim.RIDE, Anim.PILOT, Anim.CABIN,
+		Anim.ENTER_SEAT, Anim.SIT, Anim.RECLINE, Anim.SLEEP, Anim.RISE,
 	] and not _gun_aim_active and not _healing_pose and not _reload_pose
 	var melee_pose_target := 1.0 \
 		if (melee_pose_allowed and (_melee_primed or _melee_attack_active)) else 0.0
 	var melee_pose_rate := 22.0 if _melee_attack_active else 11.0
 	_melee_pose_blend = lerpf(_melee_pose_blend, melee_pose_target,
 		1.0 - exp(-melee_pose_rate * dt))
+
 	if melee_pose_allowed and _melee_attack_active:
 		# Direct presentation snapshots may join a strike after wind-up. Respect
 		# their authored progress while ordinary frame-by-frame attacks still ease
@@ -1244,6 +1253,9 @@ func update_motion(dt: float, anim: int, vel: Vector3, on_floor: bool, anchor: V
 					p.hips_y = -0.08
 					p.torso = 0.10
 					p.head = -0.06
+					if is_instance_valid(_vehicle_pose) and _vehicle_pose.get("rider_torso_recline")!=null:
+						p.torso=clampf(float(_vehicle_pose.get("rider_torso_recline")),0.0,0.65)
+						p.head=-p.torso*0.70
 					p.al = Vector3(0.72, 0.10, 0.18)
 					p.ar = Vector3(0.72, -0.10, -0.18)
 					p.el = 0.88
@@ -1351,6 +1363,64 @@ func update_motion(dt: float, anim: int, vel: Vector3, on_floor: bool, anchor: V
 			p.tail_root_y = 0.48
 			p.tail_sway = sin(_t * 1.4) * 0.025
 
+	if anim in [Anim.ENTER_SEAT,Anim.SIT,Anim.RECLINE,Anim.SLEEP,Anim.RISE]:
+		# Joint angles are authored in the same full-stature skeleton as walking.
+		# Seated knees fold downward, while reclining and sleeping articulate
+		# the pelvis and shoulders independently instead of rotating a rigid doll.
+		p.hips_y = -0.20
+		p.ll = 1.45
+		p.lr = 1.45
+		p.kl = -1.45
+		p.kr = -1.45
+		p.torso = -0.05
+		p.head = 0.04
+		p.al = Vector3(0.28,0.12,0.25)
+		p.ar = Vector3(0.28,-0.12,-0.25)
+		p.el = 1.12
+		p.er = 1.12
+		p.tail_root_x = 1.18
+		p.tail_root_y = 0.75
+		p.tail_curl = 1.05
+		p.tail_sway = sin(_t*1.3)*0.025
+		if anim == Anim.ENTER_SEAT or anim == Anim.RISE:
+			p.hips_y = -0.10
+			p.torso = 0.26
+			p.head = -0.16
+			p.ll = 0.78
+			p.lr = 0.78
+			p.kl = -0.86
+			p.kr = -0.86
+			p.al.x = 0.48
+			p.ar.x = 0.48
+		if anim == Anim.RECLINE:
+			p.hips_x = 0.34
+			p.torso = -0.02
+			p.head = -0.20
+			p.ll = 0.95
+			p.lr = 1.10
+			p.kl = -0.78
+			p.kr = -0.98
+			p.al = Vector3(0.08,0.15,0.43)
+			p.ar = Vector3(0.15,-0.10,-0.30)
+			p.el = 0.62
+			p.er = 0.82
+		if anim == Anim.SLEEP:
+			p.hips_y = 0.0
+			p.hips_x = PI*0.5
+			p.torso = sin(_t*1.1)*0.008
+			p.head = 0.025
+			p.head_y = 0.10
+			p.ll = 0.02
+			p.lr = 0.05
+			p.kl = -0.07
+			p.kr = -0.10
+			p.al = Vector3(-0.10,0.0,0.16)
+			p.ar = Vector3(-0.08,0.0,-0.16)
+			p.el = 0.10
+			p.er = 0.15
+			p.tail_root_x = 0.4
+			p.tail_curl = 0.38
+
 	if melee_pose_allowed and _melee_attack_active:
 		var strike_twist := _melee_pulse(
 			_melee_attack_progress, 0.10, 0.42, 0.82)
@@ -1366,6 +1436,13 @@ func update_motion(dt: float, anim: int, vel: Vector3, on_floor: bool, anchor: V
 
 	var blend_rate := 18.0 if anim in [Anim.RUN, Anim.SPRINT, Anim.SWIM] else 12.0
 	var w := 1.0 - exp(-blend_rate * dt)
+	_sleep_eye_blend = lerpf(_sleep_eye_blend,1.0 if anim==Anim.SLEEP else 0.0,w)
+	for parts in _sleep_eye_parts:
+		parts.eye.scale.y = lerpf(1.05,0.14,_sleep_eye_blend)
+		parts.eye.material_override = parts.skin if _sleep_eye_blend>0.8 else parts.white
+		parts.pupil.scale.y = lerpf(1.0,0.10,_sleep_eye_blend)
+		parts.pupil.scale.x = lerpf(1.0,2.1,_sleep_eye_blend)
+		parts.glint.visible = _sleep_eye_blend<0.2
 	if anim == Anim.ROLL:
 		hips.rotation.x = _roll_spin  # continuous flip; lerp_angle would wrap backward
 	elif anim == Anim.FLIP_F or anim == Anim.FLIP_B:
@@ -1426,10 +1503,19 @@ func update_motion(dt: float, anim: int, vel: Vector3, on_floor: bool, anchor: V
 		tail_root_x = 0.34
 	elif anim == Anim.SWIM:
 		tail_root_x = 1.62
+	if furnished_room and anim not in [Anim.RIDE,Anim.PILOT,Anim.CABIN]:
+		# Keep the full tail above the body in tight rooms, including after a
+		# seat releases back to walking, so it cannot sweep through tabletops.
+		tail_root_x=-1.45
+		tail_root_y=0.0
+		tail_root_z=0.0
+		p.tail_curl=-0.04
+		p.tail_sway=0.0
 	var tail_root: Node3D = tail_segs[0]
 	tail_root.rotation.x = lerp_angle(tail_root.rotation.x, tail_root_x, w)
 	tail_root.rotation.y = lerp_angle(tail_root.rotation.y, tail_root_y, w)
 	tail_root.rotation.z = lerp_angle(tail_root.rotation.z, tail_root_z, w)
+	if furnished_room and anim not in [Anim.RIDE,Anim.PILOT,Anim.CABIN]:tail_root.rotation=Vector3(tail_root_x,tail_root_y,tail_root_z)
 	for i in range(1, tail_segs.size()):
 		var seg: Node3D = tail_segs[i]
 		var tail_x: float = -p.tail_curl * 0.5
@@ -2581,3 +2667,56 @@ func _update_angel_wings(dt: float, flight_velocity := Vector3.ZERO) -> void:
 			-side * (0.016 + tip_flap * 0.55))
 		coverts.rotation = Vector3(covert_ripple, 0.0,
 			-side * covert_ripple * 0.32)
+
+
+static func furniture_pose_values(a: String, b: String, blend: float) -> Dictionary:
+	var poses := {
+		"stand":{"hip_y":0.0,"hip_x":0.0,"torso":0.0,"head":0.0,"thigh":0.0,"knee":0.0,"arm":0.05,"elbow":0.05,"tail_x":-1.45,"tail_curl":0.02},
+		"chair":{"hip_y":-0.20,"hip_x":0.0,"torso":0.03,"head":-0.02,"thigh":1.05,"knee":-1.05,"arm":0.48,"elbow":1.25,"tail_x":-1.45,"tail_curl":0.02},
+		"sofa":{"hip_y":-0.20,"hip_x":0.20,"torso":-0.03,"head":-0.16,"thigh":0.70,"knee":-0.90,"arm":0.42,"elbow":1.15,"tail_x":-1.65,"tail_curl":0.02},
+		"climb":{"hip_y":-0.20,"hip_x":0.10,"torso":0.12,"head":-0.12,"thigh":1.45,"knee":-2.3,"arm":1.0,"elbow":0.75,"tail_x":-1.55,"tail_curl":0.02},
+		"bed":{"hip_y":0.0,"hip_x":PI*0.5,"torso":0.0,"head":0.0,"thigh":-0.19,"knee":0.0,"arm":-0.08,"elbow":0.05,"tail_x":-PI*1.5,"tail_curl":0.0},
+	}
+	var result := {}
+	for field in poses.stand: result[field]=lerpf(float(poses[a][field]),float(poses[b][field]),blend)
+	return result
+
+static func furniture_sole_height(values: Dictionary) -> float:
+	var thigh := float(values.hip_x)+float(values.thigh)
+	var shin := thigh+float(values.knee)
+	var y := HIP_Y+float(values.hip_y)-LEG_A*cos(thigh)-LEG_B*cos(shin)+0.035*sin(shin)
+	y -= 0.075*0.55*absf(cos(shin))+0.075*1.35*absf(sin(shin))
+	return (y-REST_SOLE_Y)*PLAYER_SCALE
+
+func furniture_pose_snapshot() -> Array[Transform3D]:
+	var result: Array[Transform3D] = []
+	for node in _pose_rest_nodes: result.append(node.transform)
+	return result
+
+func restore_furniture_pose(values: Array[Transform3D]) -> void:
+	for index in range(mini(values.size(),_pose_rest_nodes.size())): _pose_rest_nodes[index].transform=values[index]
+
+func apply_furniture_pose(frame: Dictionary) -> void:
+	var p: Dictionary = frame.values
+	for index in range(_pose_rest_nodes.size()): _pose_rest_nodes[index].transform=_pose_rest_transforms[index]
+	yaw_node.rotation.y=float(frame.yaw)
+	hips.position.y=HIP_Y+float(p.hip_y)
+	hips.rotation.x=float(p.hip_x)
+	torso_p.rotation.x=float(p.torso)
+	head_p.rotation.x=float(p.head)
+	for shoulder in [sh_l,sh_r]: shoulder.rotation.x=float(p.arm)
+	sh_l.rotation.z=0.12
+	sh_r.rotation.z=-0.12
+	for elbow in [el_l,el_r]: elbow.rotation.x=float(p.elbow)
+	for hip in [hip_l,hip_r]: hip.rotation.x=float(p.thigh)
+	for knee in [kn_l,kn_r]: knee.rotation.x=float(p.knee)
+	tail_segs[0].rotation.x=float(p.tail_x)
+	for index in range(1,tail_segs.size()): tail_segs[index].rotation.x=float(p.tail_curl)
+	stature_frame.position=Vector3(0,-REST_SOLE_Y*stature_frame.scale.y,0)
+	_sleep_eye_blend=float(frame.blend) if frame.pose_b=="bed" else 1.0-float(frame.blend) if frame.pose_a=="bed" else 0.0
+	for parts in _sleep_eye_parts:
+		parts.eye.scale.y=lerpf(1.05,0.14,_sleep_eye_blend)
+		parts.eye.material_override=parts.skin if _sleep_eye_blend>0.8 else parts.white
+		parts.pupil.scale.y=lerpf(1.0,0.10,_sleep_eye_blend)
+		parts.pupil.scale.x=lerpf(1.0,2.1,_sleep_eye_blend)
+		parts.glint.visible=_sleep_eye_blend<0.2

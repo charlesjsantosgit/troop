@@ -9,6 +9,8 @@ class Site extends Node3D:
 	var local_player: Node3D
 	func surface_height(_x: float, _z: float) -> float: return 0.0
 	func surface_normal(_x: float, _z: float) -> Vector3: return Vector3.UP
+	func radial_up_at(_point: Vector3) -> Vector3: return Vector3.UP
+	func worker_home_position() -> Vector3: return Vector3.ZERO
 
 func _initialize() -> void: call_deferred("_run")
 
@@ -43,6 +45,66 @@ func ragdoll_bounds(doll) -> Vector2:
 				if body.name=="Head": crown = maxf(crown,y)
 				else: sole = minf(sole,y)
 	return Vector2(sole,crown)
+
+func _canonical_parts(rig: Node3D) -> Array[MeshInstance3D]:
+	var parts: Array[MeshInstance3D] = []
+	for mesh: MeshInstance3D in rig.find_children("*", "MeshInstance3D", true, false):
+		if mesh.mesh == null or mesh.mesh is ImmediateMesh: continue
+		var active := true
+		var ancestor: Node = mesh
+		while ancestor != rig:
+			if ancestor is Node3D and not ancestor.visible and mesh.name != "WinterScarf": active = false
+			ancestor = ancestor.get_parent()
+		if active: parts.append(mesh)
+	return parts
+
+func _same_canonical_meshes(doll: Node3D, reference: Node3D) -> bool:
+	var expected := _canonical_parts(reference)
+	var actual := _canonical_parts(doll)
+	if actual.size() != expected.size() or actual.size() < 50:
+		print("CANONICAL_PART_COUNT actual=%d expected=%d"%[actual.size(),expected.size()]); return false
+	var indices: Dictionary = {}
+	for mesh: MeshInstance3D in actual:
+		if mesh.get_meta("canonical_model", "") != "MonkeyRig" or mesh.layers != 1: return false
+		var index: int = mesh.get_meta("canonical_index", -1)
+		if index < 0 or index >= expected.size() or indices.has(index): return false
+		indices[index] = true
+		var source: MeshInstance3D = expected[index]
+		if source.mesh.get_surface_count() != mesh.mesh.get_surface_count(): return false
+		var wanted: Transform3D = reference.global_transform.affine_inverse() * source.global_transform
+		var submitted: Transform3D = doll.global_transform.affine_inverse() * mesh.global_transform
+		for surface in range(source.mesh.get_surface_count()):
+			var original: Array = source.mesh.surface_get_arrays(surface)
+			var copied: Array = mesh.mesh.surface_get_arrays(surface)
+			if original != copied:
+				print("CANONICAL_ARRAY_MISMATCH index=%d actual=%s expected=%s"%[index,mesh.name,source.name]); return false
+			for vertex: Vector3 in original[Mesh.ARRAY_VERTEX]:
+				if (wanted * vertex).distance_to(submitted * vertex) > .00002:
+					print("CANONICAL_TRANSFORM_MISMATCH index=%d actual=%s expected=%s distance=%f"%[index,mesh.name,source.name,(wanted * vertex).distance_to(submitted * vertex)]); return false
+	return true
+
+func _physical_defeat(site: Node3D, doll_script) -> void:
+	for detached: bool in [false, true]:
+		var doll = doll_script.new()
+		doll.process_mode = Node.PROCESS_MODE_ALWAYS
+		doll.configure("Physical canonical defeat", Vector3(0, 3, 0), .3,
+			Vector3(2, 0, 0), Vector3(3, 1, 0), detached)
+		site.add_child(doll)
+		var before: Vector3 = doll.torso.global_position
+		var meshes := _canonical_parts(doll)
+		var ids: Array = meshes.map(func(part): return part.mesh.get_instance_id())
+		for frame in range(12): await physics_frame
+		var following := true
+		for part in meshes:
+			var parent: Node = part.get_parent()
+			while parent != doll and not parent is RigidBody3D: parent = parent.get_parent()
+			following = following and parent is RigidBody3D and part.global_transform.is_finite()
+		check(doll.torso.global_position.distance_to(before) > .03 and following \
+			and meshes.map(func(part): return part.mesh.get_instance_id()) == ids \
+			and (doll.get_node_or_null("NeckJoint") == null) == detached,
+			"physical %s defeat keeps the same canonical meshes on moving limbs and the correct neck connection" % ("headshot" if detached else "body"))
+		doll.queue_free()
+		for frame in range(3): await physics_frame
 
 func _rope_contacts(player, rig_script) -> void:
 	for stature: float in [1.7018,1.8288,1.8796]:
@@ -115,6 +177,25 @@ func _run() -> void:
 	puppet.setup(27,"Other player")
 	site.add_child(puppet)
 	check(absf(bounds(puppet.rig).y-1.8288)<0.00001,"remote player has identical1.8288 m rendered stature")
+	for actor_script: String in ["ai_monkey", "friendly_monkey"]:
+		var actor = load("res://scripts/" + actor_script + ".gd").new()
+		actor.is_ai = true; actor.is_local = false; actor.display_name = actor_script; actor.world = site
+		site.add_child(actor)
+		var actual := bounds(actor.rig)
+		check(actor.rig.get_script() == rig_script and absf(actual.y-actual.x-rig_script.npc_height(actor_script)) < .00001,
+			actor_script + " inherits exact player anatomy and identity-derived adult stature")
+		actor.free()
+	var merchant = load("res://scripts/moon_merchant.gd").new()
+	site.add_child(merchant)
+	var farmer = load("res://scripts/moon_farm_worker.gd").new()
+	farmer.configure(site,site)
+	site.add_child(farmer)
+	for resident in [merchant,farmer]:
+		var actual := bounds(resident.rig)
+		check(resident.rig.get_script() == rig_script and actual.y-actual.x >= 1.70179 and actual.y-actual.x <= 1.87961 \
+			and absf(resident._collision.shape.height-(actual.y-actual.x)) < .00001,
+			resident.name + " uses canonical adult anatomy and matching physical height under lunar workwear")
+	merchant.free(); farmer.free()
 	var sim = load("res://scripts/frontier_sim.gd").new()
 	sim.new_game(2026)
 	var minimum := INF
@@ -193,7 +274,16 @@ func _run() -> void:
 					shapes_match = shapes_match and absf(child.shape.radius-0.18*factor)<0.00001
 		check(unit_bases and shapes_match,
 			"%.4f m ragdoll uses scaled collision dimensions and unit rigid-body bases" % stature)
+		var reference = rig_script.new()
+		site.add_child(reference)
+		reference.setup("Height test", false)
+		reference.set_standing_height(stature)
+		reference.reset_pose_state()
+		check(_same_canonical_meshes(doll, reference),
+			"%.4f m ragdoll submits every original player-model vertex and exact rest transform, including the full furry tail" % stature)
+		reference.free()
 		doll.free()
+	await _physical_defeat(site,doll_script)
 	_rope_contacts(player,rig_script)
 	site.free()
 	await process_frame

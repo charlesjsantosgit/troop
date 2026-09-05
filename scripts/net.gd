@@ -55,7 +55,9 @@ const MAX_CLIENTS := 24
 # 2 carries latency-sensitive actions and seat ownership, and 3 carries large
 # personalized society views with application-level backpressure.
 const CHANNEL_COUNT := 4
-const PROTOCOL_VERSION := 15
+# The compact city moves deterministic property/road coordinates. Reject old
+# geometry peers before any authoritative proximity actions can disagree.
+const PROTOCOL_VERSION := 18
 const MAX_NAME_LENGTH := 20
 const REGISTRATION_TIMEOUT_SECONDS := 5.0
 const MAX_STATE_PACKETS_PER_SECOND := 30
@@ -172,12 +174,19 @@ var _bans: Dictionary = {}      # server: remote address -> {until, name}
 var is_host := false
 var is_dedicated := false
 var frontier_network: Node
+var city_incidents: Node
 var local_name := "Monkey"
 var world_seed := 0
 var names: Dictionary = {}      # peer id -> display name (server is omitted)
 var scores: Dictionary = {}     # peer id -> banana count
 var collected: Dictionary = {}  # stable banana id -> true
 var claimed_supply_chests: Dictionary = {} # stable chest id -> winning peer id
+signal vehicle_crash_changed(vehicle_id: String, state: Dictionary, animate: bool)
+var vehicle_crashes: Dictionary = {}
+var _vehicle_crash_live: Dictionary = {}
+const MAX_VEHICLE_CRASH_BYTES := 512
+const MAX_CRASH_PAGE_BYTES := 16384
+
 var claimed_vehicles: Dictionary = {}   # stable vehicle id -> driving peer id
 var vehicle_rests: Dictionary = {}      # vehicle id -> [pos, yaw, pitch, roll]
 var vehicle_spawn_definitions: Dictionary = {} # authority-broadcast dynamic defs
@@ -359,6 +368,10 @@ func effective_game_version() -> String:
 
 
 func _wire() -> void:
+	if not is_instance_valid(city_incidents):
+		city_incidents=load("res://scripts/city_incident_network.gd").new()
+		city_incidents.name="CityIncidents"
+		add_child(city_incidents)
 	if not is_instance_valid(frontier_network):
 		frontier_network = load("res://scripts/frontier_network.gd").new()
 		frontier_network.name = "FrontierNetwork"
@@ -411,6 +424,8 @@ func host(pname: String, seed_v: int, port := PORT) -> Error:
 	collected = {}
 	claimed_supply_chests = {}
 	claimed_vehicles = {}
+	vehicle_crashes = {}
+	_vehicle_crash_live = {}
 	vehicle_rests = {}
 	vehicle_spawn_definitions = {}
 	_vehicle_kinds = {}
@@ -482,6 +497,8 @@ func start_dedicated(seed_v: int, port := PORT, bind_ip := "*",
 	collected = {}
 	claimed_supply_chests = {}
 	claimed_vehicles = {}
+	vehicle_crashes = {}
+	_vehicle_crash_live = {}
 	vehicle_rests = {}
 	vehicle_spawn_definitions = {}
 	_vehicle_kinds = {}
@@ -539,6 +556,8 @@ func join(address: String, pname: String, port := PORT) -> Error:
 	collected = {}
 	claimed_supply_chests = {}
 	claimed_vehicles = {}
+	vehicle_crashes = {}
+	_vehicle_crash_live = {}
 	vehicle_rests = {}
 	vehicle_spawn_definitions = {}
 	_vehicle_kinds = {}
@@ -574,6 +593,8 @@ func solo(pname: String, seed_v: int) -> void:
 	collected = {}
 	claimed_supply_chests = {}
 	claimed_vehicles = {}
+	vehicle_crashes = {}
+	_vehicle_crash_live = {}
 	vehicle_rests = {}
 	vehicle_spawn_definitions = {}
 	_vehicle_kinds = {}
@@ -612,6 +633,8 @@ func shutdown() -> void:
 	_pending_registrations = {}
 	_rate_windows = {}
 	_vehicle_kinds = {}
+	vehicle_crashes = {}
+	_vehicle_crash_live = {}
 	_admin_vehicle_creators = {}
 	vehicle_spawn_definitions = {}
 	_peer_on_foot_positions = {}
@@ -1205,6 +1228,7 @@ func _finish_registration(id: int, pname: String, fingerprint: String,
 		claimed_supply_chests, authoritative_cycle_hour(),
 		effective_game_version(), claimed_vehicles, vehicle_rests,
 		vehicle_spawn_definitions, player_realms, expedition_state_snapshot())
+	_send_vehicle_crash_snapshot(id)
 	_broadcast_expedition_state()
 	for primed_peer in _melee_primed:
 		rpc_id(id, "cl_melee_primed", int(primed_peer), true)
@@ -2050,13 +2074,14 @@ func send_state(pos: Vector3, yaw: float, vel: Vector3, anim: int,
 		wraps: PackedVector3Array, weapon_kind: int, weapon_stowed: bool,
 		melee_mode: bool, weapon_ammo: int, weapon_reloading: bool,
 		healing_progress: float, flying := false, vehicle_kind := -1,
-		vehicle_id := "", vehicle_aux := Vector3.ZERO) -> void:
+		vehicle_id := "", vehicle_aux := Vector3.ZERO, vehicle_crash: Dictionary = {}) -> void:
 	if not active:
 		return
 	_local_melee_prime_eligible = _melee_mode_eligible(anim, swinging,
 		weapon_stowed, melee_mode, weapon_reloading, healing_progress, flying,
 		vehicle_kind)
 	if is_host:
+		_accept_driver_vehicle_crash(local_id(),vehicle_kind,vehicle_id,vehicle_crash)
 		_remember_authoritative_state_position(local_id(), pos, vehicle_kind,
 			vehicle_id)
 		_remember_melee_mode(local_id(), anim, swinging, weapon_stowed,
@@ -2070,7 +2095,7 @@ func send_state(pos: Vector3, yaw: float, vel: Vector3, anim: int,
 		rpc_id(1, "srv_state", pos, yaw, vel, anim, swinging, anchor,
 			rope_tail, wraps, weapon_kind, weapon_stowed, melee_mode,
 			weapon_ammo, weapon_reloading, healing_progress, flying,
-			vehicle_kind, vehicle_id, vehicle_aux)
+			vehicle_kind, vehicle_id, vehicle_aux, vehicle_crash)
 	_try_send_melee_prime()
 
 
@@ -2080,7 +2105,7 @@ func srv_state(pos: Vector3, yaw: float, vel: Vector3, anim: int,
 		wraps: PackedVector3Array, weapon_kind: int, weapon_stowed: bool,
 		melee_mode: bool, weapon_ammo: int, weapon_reloading: bool,
 			healing_progress: float, flying := false, vehicle_kind := -1,
-			vehicle_id := "", vehicle_aux := Vector3.ZERO) -> void:
+			vehicle_id := "", vehicle_aux := Vector3.ZERO, vehicle_crash: Dictionary = {}) -> void:
 	var sender := multiplayer.get_remote_sender_id()
 	var authorized_flying := _server_authorized_flying(sender, flying)
 	if not _registered_peer(sender) \
@@ -2089,8 +2114,10 @@ func srv_state(pos: Vector3, yaw: float, vel: Vector3, anim: int,
 			swinging, anchor, rope_tail, wraps, weapon_kind, weapon_ammo,
 			healing_progress, vehicle_kind, vehicle_id, vehicle_aux,
 			authorized_flying) \
-			or not _sender_owns_vehicle_state(sender, vehicle_kind, vehicle_id):
+			or not _sender_owns_vehicle_state(sender, vehicle_kind, vehicle_id) \
+			or not _valid_vehicle_crash_payload(vehicle_crash,vehicle_kind):
 		return
+	_accept_driver_vehicle_crash(sender,vehicle_kind,vehicle_id,vehicle_crash)
 	_remember_authoritative_state_position(sender, pos, vehicle_kind, vehicle_id)
 	_moon_colony_flying_peers[sender] = authorized_flying
 	_remember_melee_mode(sender, anim, swinging, weapon_stowed, melee_mode,
@@ -2330,6 +2357,38 @@ func cl_vehicle_spawn_registered(vehicle_id: String, vehicle_kind: int,
 		spawn_yaw)
 
 
+## Called only after CityNetwork has durably committed a purchase/collection.
+func register_city_vehicle(peer: int, supplied: Dictionary) -> bool:
+	if not is_instance_valid(frontier_network) or not frontier_network.authoritative: return false
+	var id := str(supplied.get("id",""))
+	var city = frontier_network.societies._city()
+	if city==null: return false
+	var record: Dictionary = city.state.get("owned_vehicles",{}).get(id,{})
+	var owner := "member_"+str(frontier_network._identity(peer))
+	if record.is_empty() or str(record.owner)!=owner or claimed_vehicles.has(id): return false
+	var dealer := preload("res://scripts/city_plan.gd").building(record.building)
+	var at := preload("res://scripts/city_commerce.gd").delivery_position(dealer,int(id.get_slice(":",3)))
+	if _vehicle_kinds.size()>=MAX_VEHICLE_CLAIMS and not _vehicle_kinds.has(id): return false
+	_vehicle_kinds[id] = Vehicle.Kind.JEEP
+	_vehicle_positions[id] = at
+	vehicle_rests.erase(id)
+	vehicle_spawn_definitions[id] = {"kind":Vehicle.Kind.JEEP,"pos":at,"yaw":0.0}
+	vehicle_spawn_registered.emit(id,Vehicle.Kind.JEEP,at,0.0)
+	if active and is_host and multiplayer.multiplayer_peer:
+		rpc("cl_city_vehicle_delivered",id,at)
+	return true
+
+
+@rpc("authority","call_remote","reliable",0)
+func cl_city_vehicle_delivered(id: String, at: Vector3) -> void:
+	if not active or is_host or preload("res://scripts/city_commerce.gd").model_from_vehicle_id(id)<0 or not _finite_vec(at) or _outside_world(at): return
+	_vehicle_kinds[id] = Vehicle.Kind.JEEP
+	_vehicle_positions[id] = at
+	vehicle_rests.erase(id)
+	vehicle_spawn_definitions[id] = {"kind":Vehicle.Kind.JEEP,"pos":at,"yaw":0.0}
+	vehicle_spawn_registered.emit(id,Vehicle.Kind.JEEP,at,0.0)
+
+
 ## Return the kind from the authority's immutable registry. Generated ids are
 ## resolved lazily from Gen's current seed, so a dedicated server does not have
 ## to pre-enumerate an infinite world and an invented but well-formed id is
@@ -2367,15 +2426,15 @@ func request_vehicle(vehicle_id: String, request_id: int = 0) -> bool:
 	return true
 
 
-func release_vehicle(vehicle_id: String, rest: Array) -> void:
+func release_vehicle(vehicle_id: String, rest: Array, crash: Dictionary = {}) -> void:
 	if not _valid_vehicle_id(vehicle_id):
 		return
 	if not active:
 		_apply_vehicle_release(vehicle_id, rest)
 	elif is_host:
-		_host_release_vehicle(vehicle_id, local_id(), rest)
+		_host_release_vehicle(vehicle_id, local_id(), rest, crash)
 	else:
-		rpc_id(1, "srv_release_vehicle", vehicle_id, rest)
+		rpc_id(1, "srv_release_vehicle", vehicle_id, rest, crash)
 
 
 @rpc("any_peer", "call_remote", "reliable", 2)
@@ -2391,15 +2450,24 @@ func srv_request_vehicle(vehicle_id: String, request_id: int) -> void:
 
 
 @rpc("any_peer", "call_remote", "reliable", 2)
-func srv_release_vehicle(vehicle_id: String, rest: Array) -> void:
+func srv_release_vehicle(vehicle_id: String, rest: Array, crash: Dictionary = {}) -> void:
 	var sender := multiplayer.get_remote_sender_id()
 	if _registered_peer(sender) and _allow_rate(sender, "vehicle_claim", 8):
-		_host_release_vehicle(vehicle_id, sender, rest)
+		_host_release_vehicle(vehicle_id, sender, rest, crash)
 
 
 func _host_claim_vehicle(vehicle_id: String, claimant_id: int,
 		request_id: int = 0) -> bool:
+	if vehicle_id.begins_with("v:city:"):
+		var city = frontier_network.societies._city() if is_instance_valid(frontier_network) else null
+		var record: Dictionary = city.state.get("owned_vehicles",{}).get(vehicle_id,{}) if city!=null else {}
+		if record.is_empty() or record.get("owner")!="member_"+str(frontier_network._identity(claimant_id)):
+			_reply_vehicle_request(claimant_id,vehicle_id,false,"This vehicle belongs to another resident.",request_id)
+			return false
 	var kind := _canonical_vehicle_kind(vehicle_id)
+	if bool(vehicle_crashes.get(vehicle_id,{}).get("wrecked",false)):
+		_reply_vehicle_request(claimant_id,vehicle_id,false,"This vehicle is wrecked and cannot be driven.",request_id)
+		return false
 	if kind < 0 or not names.has(claimant_id):
 		_reply_vehicle_request(claimant_id, vehicle_id, false,
 			"This vehicle is unavailable.", request_id)
@@ -2452,11 +2520,13 @@ func _reply_vehicle_request(peer_id: int, vehicle_id: String, accepted: bool,
 
 
 func _host_release_vehicle(vehicle_id: String, releasing_id: int,
-		rest: Array) -> void:
+		rest: Array, crash: Dictionary = {}) -> void:
 	if not _valid_vehicle_id(vehicle_id) \
 			or not claimed_vehicles.has(vehicle_id) \
 			or int(claimed_vehicles[vehicle_id]) != releasing_id:
 		return
+	if not _valid_vehicle_crash_payload(crash,_canonical_vehicle_kind(vehicle_id)): return
+	_accept_driver_vehicle_crash(releasing_id,_canonical_vehicle_kind(vehicle_id),vehicle_id,crash)
 	if not _valid_vehicle_rest(rest):
 		rest = []
 	elif releasing_id != local_id() \
@@ -2508,6 +2578,7 @@ func _remember_authoritative_state_position(peer_id: int, position: Vector3,
 	if vehicle_kind == -1:
 		_peer_on_foot_positions[peer_id] = position
 	elif _valid_vehicle_kind(vehicle_kind) and _valid_vehicle_id(vehicle_id):
+		if vehicle_kind==Vehicle.Kind.JET and is_instance_valid(city_incidents):city_incidents.observe_motion(vehicle_id,position)
 		_vehicle_positions[vehicle_id] = position
 
 
@@ -2738,6 +2809,7 @@ func srv_fire_bullet(origin: Vector3, velocity: Vector3, play_fx: bool,
 
 func _relay_bullet(sender: int, origin: Vector3, velocity: Vector3,
 		play_fx: bool, weapon_kind: int) -> void:
+	if is_host and is_instance_valid(frontier_network) and is_instance_valid(frontier_network.civil):frontier_network.civil.observe_shot(sender,origin)
 	for peer_id in names:
 		if peer_id != 1 and peer_id != sender \
 				and _can_relay_combat_between(sender, int(peer_id)):
@@ -3433,10 +3505,14 @@ func _valid_state_for_peer(peer_id: int, pos: Vector3, yaw: float,
 		rope_tail: float, wraps: PackedVector3Array, weapon_kind: int,
 		weapon_ammo: int, healing_progress: float, vehicle_kind := -1,
 		vehicle_id := "", vehicle_aux := Vector3.ZERO, flying := false) -> bool:
-	return _valid_state(pos, yaw, vel, anim, swinging, anchor, rope_tail, wraps,
+	var shape_valid := _valid_state(pos, yaw, vel, anim, swinging, anchor, rope_tail, wraps,
 		weapon_kind, weapon_ammo, healing_progress, vehicle_kind, vehicle_id,
 		vehicle_aux, flying) and _state_spatial_payload_matches_realm(peer_id,
 		pos, swinging, anchor, wraps)
+	if not shape_valid: return false
+	if is_host and is_instance_valid(frontier_network) and is_instance_valid(frontier_network.city):
+		return frontier_network.city.validate_furniture_state(peer_id,pos,anim,yaw)
+	return not (is_host and anim >= 16 and anim <= 20)
 
 
 func _state_spatial_payload_matches_realm(peer_id: int, pos: Vector3,
@@ -3553,6 +3629,10 @@ func _valid_admin_vehicle_id_for_creator(vehicle_id: String,
 	if not vehicle_id.begins_with(prefix):
 		return false
 	var serial_text := vehicle_id.substr(prefix.length())
+	if serial_text.contains(":"):
+		var model_parts := serial_text.split(":")
+		if model_parts.size()!=2 or preload("res://scripts/city_vehicle_models.gd").index_for_id(model_parts[1])<0: return false
+		serial_text = model_parts[0]
 	if not serial_text.is_valid_int():
 		return false
 	var serial := int(serial_text)
@@ -3578,8 +3658,9 @@ func _admin_vehicle_creator_from_id(vehicle_id: String) -> int:
 
 func _valid_dynamic_vehicle_spawn(vehicle_id: String, vehicle_kind: int,
 		spawn_position, spawn_yaw) -> bool:
-	return _admin_vehicle_creator_from_id(vehicle_id) > 0 \
+	return (_admin_vehicle_creator_from_id(vehicle_id) > 0 or (preload("res://scripts/city_commerce.gd").model_from_vehicle_id(vehicle_id)>=0 and vehicle_kind==Vehicle.Kind.JEEP)) \
 		and _valid_vehicle_kind(vehicle_kind) \
+		and (preload("res://scripts/city_commerce.gd").model_from_vehicle_id(vehicle_id)<0 or vehicle_kind==Vehicle.Kind.JEEP) \
 		and spawn_position is Vector3 and _finite_vec(spawn_position) \
 		and not _outside_world(spawn_position) \
 		and (spawn_yaw is float or spawn_yaw is int) \
@@ -3752,3 +3833,91 @@ func _clear_rate_windows(id: int) -> void:
 	for key in _rate_windows.keys():
 		if str(key).begins_with(prefix):
 			_rate_windows.erase(key)
+
+
+# Crash state is carried only by the existing claimed driver's state/release
+# messages. There is intentionally no client-callable impact RPC here.
+func _valid_vehicle_crash_payload(payload: Dictionary, kind: int, canonical := false) -> bool:
+	if payload.is_empty(): return true
+	if not _valid_vehicle_kind(kind) or var_to_bytes(payload).size()>MAX_VEHICLE_CRASH_BYTES: return false
+	var keys := ["damage","wrecked","point","normal","speed"]
+	if canonical: keys.append_array(["revision","kind"])
+	if payload.size()!=keys.size(): return false
+	for key in payload:
+		if key not in keys: return false
+	if not payload.damage is int or payload.damage<1 or payload.damage>1000 or not payload.wrecked is bool: return false
+	if payload.damage>=990 and not payload.wrecked or payload.wrecked and payload.damage<640: return false
+	if not payload.point is Vector3 or not _finite_vec(payload.point) or payload.point.length()>(20.0 if kind==Vehicle.Kind.JET else 10.0): return false
+	if not payload.normal is Vector3 or not _finite_vec(payload.normal) or payload.normal.length()<.9 or payload.normal.length()>1.1: return false
+	if not (payload.speed is float or payload.speed is int) or not is_finite(float(payload.speed)) or payload.speed<3 or payload.speed>400: return false
+	if canonical and (not payload.revision is int or payload.revision<1 or payload.revision>1000000 or not payload.kind is int or payload.kind!=kind): return false
+	return true
+
+func _accept_driver_vehicle_crash(peer: int, kind: int, id: String, payload: Dictionary) -> bool:
+	if not _valid_vehicle_crash_payload(payload,kind): return false
+	if payload.is_empty(): return true
+	if not is_host or not names.has(peer) or not _sender_owns_vehicle_state(peer,kind,id): return false
+	return _store_authoritative_vehicle_crash(id,kind,payload)
+
+func record_host_vehicle_crash(vehicle: Vehicle) -> void:
+	if not active or not is_host or vehicle.remote_controlled or not is_instance_valid(vehicle.world): return
+	if not vehicle.world.has_method("vehicle_by_id") or vehicle.world.vehicle_by_id(vehicle.vid)!=vehicle: return
+	if _canonical_vehicle_kind(vehicle.vid)!=vehicle.kind: return
+	_store_authoritative_vehicle_crash(vehicle.vid,vehicle.kind,vehicle.crash_state())
+
+func _store_authoritative_vehicle_crash(id: String, kind: int, payload: Dictionary) -> bool:
+	if not _valid_vehicle_id(id) or payload.is_empty() or not _valid_vehicle_crash_payload(payload,kind): return false
+	var previous: Dictionary = vehicle_crashes.get(id,{})
+	if int(payload.damage)<int(previous.get("damage",0)) or bool(previous.get("wrecked",false)) and not payload.wrecked: return false
+	if int(payload.damage)==int(previous.get("damage",0)) and bool(payload.wrecked)==bool(previous.get("wrecked",false)): return true
+	if not vehicle_crashes.has(id) and vehicle_crashes.size()>=MAX_VEHICLE_CLAIMS: return false
+	var row := payload.duplicate(true)
+	row["kind"]=kind
+	row["revision"]=int(previous.get("revision",0))+1
+	_apply_vehicle_crash(id,row,true)
+	if active and is_host and multiplayer.has_multiplayer_peer(): rpc("cl_vehicle_crash",id,row,true)
+	return true
+
+@rpc("authority","call_remote","reliable",2)
+func cl_vehicle_crash(id: String, row: Dictionary, animate: bool = true) -> void:
+	if not active or is_host: return
+	_apply_vehicle_crash(id,row,animate)
+
+func _apply_vehicle_crash(id: String, row: Dictionary, animate: bool) -> bool:
+	if not _valid_vehicle_id(id) or row.is_empty() or not _valid_vehicle_crash_payload(row,int(row.get("kind",-1)),true): return false
+	var previous: Dictionary = vehicle_crashes.get(id,{})
+	if int(row.revision)<=int(previous.get("revision",0)): return false
+	if not previous.is_empty() and (int(row.damage)<int(previous.damage) or bool(previous.wrecked) and not row.wrecked): return false
+	if not vehicle_crashes.has(id) and vehicle_crashes.size()>=MAX_VEHICLE_CLAIMS: return false
+	vehicle_crashes[id]=row.duplicate(true)
+	if animate: _vehicle_crash_live[id]=Time.get_ticks_msec()+1200
+	else: _vehicle_crash_live.erase(id)
+	vehicle_crash_changed.emit(id,row.duplicate(true),animate)
+	return true
+
+func consume_vehicle_crash_event(id: String) -> bool:
+	var fresh := Time.get_ticks_msec()<=int(_vehicle_crash_live.get(id,-1))
+	_vehicle_crash_live.erase(id)
+	return fresh
+
+func vehicle_crash_snapshot_pages() -> Array[Dictionary]:
+	var pages: Array[Dictionary]=[]
+	var page := {}
+	for id in vehicle_crashes:
+		var next := page.duplicate()
+		next[id]=vehicle_crashes[id]
+		if next.size()>32 or var_to_bytes(next).size()>MAX_CRASH_PAGE_BYTES:
+			if not page.is_empty(): pages.append(page)
+			page={id:vehicle_crashes[id]}
+		else: page=next
+	if not page.is_empty(): pages.append(page)
+	return pages
+
+func _send_vehicle_crash_snapshot(peer: int) -> void:
+	for page in vehicle_crash_snapshot_pages(): rpc_id(peer,"cl_vehicle_crash_snapshot",page)
+
+@rpc("authority","call_remote","reliable",2)
+func cl_vehicle_crash_snapshot(page: Dictionary) -> void:
+	if not active or is_host or page.size()>32 or var_to_bytes(page).size()>MAX_CRASH_PAGE_BYTES: return
+	for id in page:
+		if id is String and page[id] is Dictionary: _apply_vehicle_crash(id,page[id],false)

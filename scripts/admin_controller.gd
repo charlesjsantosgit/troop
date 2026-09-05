@@ -11,6 +11,9 @@ var world: Node3D
 var chat: ChatBox
 var _spawn_serial := 0
 var _admin_vehicle_serial := 0
+var vehicle_catalog: Control
+var _catalog_layer: CanvasLayer
+var _catalog_was_paused := false
 
 const BIOME_BY_NAME := {
 	"rainforest": Gen.Biome.RAINFOREST,
@@ -114,15 +117,30 @@ func spawn_vehicle(kind_word: String) -> bool:
 		"jeep": Vehicle.Kind.JEEP, "boat": Vehicle.Kind.BOAT,
 		"airboat": Vehicle.Kind.BOAT, "jet": Vehicle.Kind.JET}
 	var query := kind_word.to_lower().strip_edges()
+	if query.is_empty():
+		open_vehicle_catalog.call_deferred()
+		return true
+	if query in ["park_rowboat","rowboat"]:
+		var boats := preload("res://scripts/city_park_layout.gd").boat_definitions()
+		if is_instance_valid(main.frontier_controller) and main.frontier_controller.current_planet()=="earth":
+			main.frontier_controller.city._teleport(boats[0].exit+Vector3(0,.1,0))
+			feedback("Lake rowboats are ready at the park dock. Press E beside one to board.")
+			return true
+		feedback("Visit Earth to use the rowboats at Lantern Central Park.")
+		return false
+	var model := preload("res://scripts/city_vehicle_models.gd").index_for_id(query)
+	if model>=0: kinds[query]=Vehicle.Kind.JEEP
 	if not kinds.has(query):
-		feedback("Unknown machine — try /vehicle bike|jeep|boat|jet.")
+		feedback("Unknown vehicle. Use /vehicle to search the complete catalog.")
 		return false
 	_admin_vehicle_serial += 1
 	var p: MonkeyPlayer = _player()
 	var forward := Vector3(sin(p.rig.yaw_angle() + PI), 0.0,
 		cos(p.rig.yaw_angle() + PI))
-	var spot := p.global_position + forward * 5.5
+	var delivery_distance := 12.0 if query=="jet" else 6.5
+	var spot := p.global_position + forward * delivery_distance
 	var vehicle_id := "v:admin#%d-%d" % [Net.local_id(), _admin_vehicle_serial]
+	if model>=0: vehicle_id += ":"+query
 	var vehicle_kind := int(kinds[query])
 	var spawn_yaw := atan2(forward.x, forward.z)
 	if not Net.register_admin_vehicle(vehicle_id, vehicle_kind, spot, spawn_yaw):
@@ -145,6 +163,29 @@ const VEHICLE_SPOTS := {
 	"dock": "dock", "boat": "dock", "airboat": "dock",
 	"machine": "machine", "vehicle": "machine", "wild": "machine",
 }
+
+
+func open_vehicle_catalog() -> void:
+	if not Net.is_admin or not is_instance_valid(_player()): return
+	if is_instance_valid(vehicle_catalog): return
+	_catalog_was_paused=get_tree().paused
+	_catalog_layer=CanvasLayer.new()
+	_catalog_layer.layer=100
+	add_child(_catalog_layer)
+	vehicle_catalog=load("res://scripts/vehicle_catalog_panel.gd").new()
+	vehicle_catalog.configure(self)
+	vehicle_catalog.close_requested.connect(close_vehicle_catalog)
+	_catalog_layer.add_child(vehicle_catalog)
+	if not Net.active: get_tree().paused=true
+	Input.mouse_mode=Input.MOUSE_MODE_VISIBLE
+
+
+func close_vehicle_catalog() -> void:
+	if is_instance_valid(_catalog_layer): _catalog_layer.queue_free()
+	vehicle_catalog=null
+	_catalog_layer=null
+	get_tree().paused=_catalog_was_paused
+	if not get_tree().paused and DisplayServer.get_name()!="headless": Input.mouse_mode=Input.MOUSE_MODE_CAPTURED
 
 
 func teleport_to_vehicle_spot(query: String) -> bool:
@@ -306,12 +347,31 @@ func revoke_admin(peer_id: int) -> void:
 	Net.admin_command("revoke_admin", {"target": peer_id})
 
 
+static func parse_time_value(value: String) -> float:
+	var names := {"day":12.0,"noon":12.0,"night":22.0,"midnight":0.0,"dawn":6.0,"dusk":18.0,"sunset":18.0}
+	if names.has(value):
+		return float(names[value])
+	if value.contains(":"):
+		var pieces := value.split(":")
+		if pieces.size() != 2 or not pieces[0].is_valid_int() or not pieces[1].is_valid_int():
+			return -1.0
+		var hour := int(pieces[0])
+		var minute := int(pieces[1])
+		return float(hour) + float(minute) / 60.0 if hour >= 0 and hour < 24 and minute >= 0 and minute < 60 else -1.0
+	if value.is_valid_float() and is_finite(float(value)):
+		return wrapf(float(value), 0.0, 24.0)
+	return -1.0
+
+
 func set_time(hour: float) -> void:
 	var normalized := wrapf(hour, 0.0, 24.0)
 	if Net.active:
 		Net.admin_command("set_time", {"hour": normalized})
 	elif world:
-		world.set_time_of_day_override(normalized)
+		if is_instance_valid(world.frontier):
+			world.frontier.set_solar_hour(normalized)
+		else:
+			world.set_time_of_day_override(normalized)
 		feedback("Time set to %02d:%02d." % [int(normalized),
 			int(fmod(normalized, 1.0) * 60.0)])
 
@@ -320,7 +380,10 @@ func clear_time() -> void:
 	if Net.active:
 		Net.admin_command("clear_time", {})
 	elif world:
-		world.clear_time_of_day_override()
+		if is_instance_valid(world.frontier):
+			world.frontier.clear_solar_hour()
+		else:
+			world.clear_time_of_day_override()
 		feedback("Clock released back to the shared cycle.")
 
 
@@ -419,7 +482,7 @@ func run_command(text: String) -> void:
 			feedback("/moon [player] · /earth [player] — realm travel")
 			feedback("/tp <airstrip|pool|dock|machine> — to the vehicles")
 			feedback("/spawn <peel|swinger|follower|statue|villager>")
-			feedback("/vehicle <bike|jeep|boat|jet> — deliver any machine")
+			feedback("/vehicle — search every vehicle; /vehicle <name> delivers a match")
 			feedback("/time <hour|clear> — set or release the clock")
 			feedback("/kick <player> · /ban <player> <minutes>")
 			feedback("/admin <exact-player|peer-id> · /unadmin <exact-player|peer-id>")
@@ -460,12 +523,15 @@ func run_command(text: String) -> void:
 		"earth", "toearth":
 			travel_to_realm(Net.PlayerRealm.EARTH, _resolve_peer(parts, 1))
 		"time":
-			if parts.size() > 1 and parts[1] == "clear":
+			var value := parts[1].to_lower() if parts.size() == 2 else ""
+			if value == "clear":
 				clear_time()
-			elif parts.size() > 1 and parts[1].is_valid_float():
-				set_time(float(parts[1]))
 			else:
-				feedback("Usage: /time <0-23.99|clear>")
+				var hour := parse_time_value(value)
+				if hour >= 0.0:
+					set_time(hour)
+				else:
+					feedback("Usage: /time 21:30, /time night, /time day, or /time clear")
 		"kick":
 			var target := _find_peer_by_name(parts[1] if parts.size() > 1 else "")
 			if target != 0:

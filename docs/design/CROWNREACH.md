@@ -1,12 +1,18 @@
 # Crownreach: a home, a trade, a city
 
-Crownreach is TROOP's main Earth city. Lantern Square is its illuminated meeting place: tall signs, ground-floor shops, transit, street trees and a pedestrian gathering area. Practical neighborhoods spread outward into smaller homes, workshops, food markets and logistics yards. The city belongs to its residents; claiming a village does not give one player ownership of the metropolis.
+Crownreach is TROOP's main Earth city. The September 2026 remake concentrates it into a dense metropolis of approximately 30 square miles, with a skyline of tall residential and commercial towers around Lantern Square. The residential Beacon rises 199.8 metres; the distinct commercial Crownreach Spire rises 647.8 metres. Ground-floor shops, transit, street trees and a pedestrian gathering area anchor the city at walking height. Practical neighborhoods spread outward into smaller homes, workshops, food markets and logistics yards. The city belongs to its residents; claiming a village does not give one player ownership of the metropolis.
 
 ## Scale that means something
 
-The municipal grid is 48 by 48 blocks, each 480 metres across: 23.04 km on each side, 530.84 km², approximately 205 square miles. Crownreach begins east of the existing settlements. Streets, building addresses and entrances have deterministic world coordinates. The footprint is traversable space, not a map label on a small level.
+The municipal grid is 52 by 48 blocks. Street centerlines are 104.4672 by 298.32 metres apart, enclosing 264 by 900 foot buildable blocks with 24-metre streets. The municipal footprint is 5.432 by 14.319 km, 77.787 km², or approximately 30.034 square miles. Lantern Square remains at Earth coordinates (14,400, 0). Streets, entrances and parcel boundaries share deterministic world coordinates.
 
-The population is exactly 400,000 monkeys in deterministic building occupancy totals and twelve aggregate district records. Districts track population, workforce, food reserves, demand and service condition. Only a bounded neighborhood crowd has animated physical bodies; individual census residents do not each have a live rig, personal schedule or inventory. Aggregate economic updates and nearby rendering have separate budgets. Building shells use shared geometry and materials; local detail and collision stream around the player. Furnished rooms load on entry.
+All 36,861 original city building IDs survive. The expanded park displaces 104 blocks; their addresses and housing/service identities move to eastern neighborhoods, preserving saved owners and cupboards. The city now contains 38,269 buildings. Each block has two parcel columns and eight rows, with entrances facing the actual public streets. No miniature roads cross these parcels. Core towers rise into the hundreds of metres; outer neighborhoods mix low-rise housing, industry and public services.
+
+The census is exactly 100,000 monkeys across twelve aggregate districts. Nearby pedestrians, drivers, park visitors and emergency crews use the same MonkeyRig anatomy as the player, at standing heights from 1.7018 to 1.8796 metres (5 ft 7 in to 6 ft 2 in); the player remains 1.8288 metres. Long-distance pedestrians use images rendered from that exact model. Thousands of lightweight cars and walkers remain visible above the city. Census residents do not each have an individual live physics rig or inventory.
+
+The remade exterior uses procedural physically based glass, limestone and metal facades. Window panes follow a metre-scaled floor grid, with mullions, varied blinds and occupied-room shading. The shader smooths that grid as buildings recede to avoid shimmering. Towers share a podium, shaft, setback and mechanical crown across visual detail, distant silhouettes and collision. Nearby construction adds coping, corner piers, crown louvers, storefront glazing, door frames, canopies and small service signs. Window detail is shaded on the facade instead of creating a separate mesh for every window on every floor.
+
+Lantern Central Park spans eight columns and thirteen rows of city blocks, with a landscaped interior approximately 808 by 3,850 metres (3.11 km²). Its irregular lake has 160,515 m² of water, a shared physical terrain basin up to 1.6 metres deep, an eastern boathouse and four usable rowboats. Nine walking routes, a separate cycling loop longer than six kilometres, 2,063 trees, yoga groups, dog walkers and social terraces occupy the lawns and woodland. Every visitor uses the actual player monkey model, scaled between 5 ft 7 in and 6 ft 2 in. Press E at the activity locations or a docked boat to participate. The water mesh, basin, boat boundary, maps and park routes use shared canonical geometry. See [Lantern Central Park](LANTERN_CENTRAL_PARK.md) for controls, resource budgets and validation.
 
 ## Housing progression
 
@@ -19,15 +25,33 @@ The population is exactly 400,000 monkeys in deterministic building occupancy to
 
 Purchases debit the player's existing trade-credit wallet and credit the municipal property account. Ownership is persistent and exclusive. Any generated building with a supported housing role can be purchased at its entrance; the six example listings are guides, not the complete supply. Ownership is one record per building, with one reusable interior, rather than a separate apartment purchase on each floor. Storage transfers actual backpack goods, respects capacity and never creates stock. A selected residential property becomes the return/respawn address at that building's outdoor door. Listings show the exact price, capacity and location before buying. Entry, storage and services belong to the building being visited.
 
+## Luxury penthouse
+
+The penthouse has been rebuilt around the supplied interior references: a warm, double-height home with panoramic glazing, a cream sectional, rounded upholstered seating, grained wood, stone surfaces and bronze details. The 26-by-22-metre lower floor includes a living area, kitchen with an island, dining area, bedroom and entrance console. A four-metre-high mezzanine adds a study and reading corner beneath the eight-metre ceiling. Twenty-two visible timber stair treads sit above a continuous walkable collision ramp; transparent barriers protect both the stairs and the overlook.
+
+The new bedroom, cupboard and residence console remain functional property services. The bed sets the owned penthouse as home, the cupboard moves real backpack goods, and the console opens the property's details. Normal entry and exit use the existing controller and physical address. No ownership, inventory or purchase-price schema changes are required for the interior redesign.
+
+The skyline outside the glazing is the actual traversable city. The suite occupies the real top eight metres of its property, at a 191.8-metre floor elevation in the Beacon. Only the host building's occupied roof volume is opened, consistently in nearby/distant geometry and collision. Surrounding buildings retain their exact positions and heights. The camera inherits Earth's live sky, time, weather lighting and environment. Leaving restores its previous view and clipping distance. There is no miniature city, copied skyline or compressed viewpoint.
+
+Press E at a chair to sit, at a sofa to recline, or at the mattress to sleep. Separate jointed enter, seated, reclined, sleeping and rise animations play. E, movement or jump gets up if the standing capsule has clear supported space. The bed's home-setting service and cupboard storage still work. Furniture occupancy and replicated poses are checked by the server.
+
+`Play Penthouses.command` opens a fresh, interactive sunset preview of the owned Beacon penthouse. The preview receives an allowance from its temporary career treasury, purchases through the normal door action and enters through the normal controller. It does not load or save existing career progress. Normal movement and service interaction remain active. In an existing career, buy the 4,800-credit penthouse at its entrance and choose **Enter property**.
+
+The earlier rooftop-view suite passed 144/144 before this expansion. Current full-body furniture validation is recorded in [CITY_LIFE.md](CITY_LIFE.md); it supersedes the old capsule-only seating checks. Furniture motion sweeps the actual articulated body, including angular changes and tail, through approach, lowering, sitting/reclining and exit. Dynamic obstructions pause motion and refuse a blocked exit.
+
 ## A working city
 
 Districts combine housing with services, loading yards, parks and employment. Player courier contracts carry finite goods between designated workplaces. Maintenance contracts consume real supplies and require a timed task and completion at the workplace. Provisioning connects urban demand to the existing farming inventory. Work payments come from a funded municipal employer; repeated clicks cannot skip travel, duplicate cargo or create money. Aggregate district updates account for production, consumption and service shortages without individually ticking hundreds of thousands of characters. The nearby pedestrians and cars provide ambient street life; they do not award goods, finish player contracts or run a separate authoritative delivery economy.
 
-Every generated building has an address and an entrance with a housing or service role. Reusable interiors provide homes, loading/storage rooms or public counters. Only designated workplaces offer the implemented contracts; a generic service label does not imply an additional playable profession. Mixed-use workplaces remain accessible for their jobs while cupboard and bed actions require ownership. This version has fixed furnishings, decorative windows and one room per visited property, without individually explorable tower floors, furniture editing, rental income or property resale.
+Every generated building has an address and an entrance with a housing or service role. Reusable interiors provide homes, loading/storage rooms or public counters. Only designated workplaces offer the implemented contracts; a generic service label does not imply an additional playable profession. Mixed-use workplaces remain accessible for their jobs while cupboard and bed actions require ownership. Furnishings are fixed, with one instanced interior per visited property. The penthouse has several living areas and a walkable mezzanine; individual tower floors, furniture editing, rental income and property resale are not implemented.
+
+Ten storefront categories offer groceries, bakery items, coffee, meals, hardware, gardening supplies, outdoor goods, energy equipment, fabrics and pantry staples. Purchases debit real credits and transfer finite shared stock into the Earth backpack. Twelve Crown Motor Galleries sell ten vehicle classes, with searchable model cards, a three-car private garage and collection at physical delivery bays. Initial stock migration adds the newly introduced product lines once while preserving existing goods and empty shelves.
 
 ## Getting started
 
 The existing towns get a marked transit stop and housing entrances. A short guide introduces the sequence: visit a cottage, inspect its cost, buy it, enter, move an item into storage, then try a city job. Transit connects the existing village to Crownreach and its districts; destinations remain reachable in the same Earth world. Menus stay compact and opaque, with clear backpack/storage quantities and contextual actions.
+
+For a direct look at the source remake, `Play Crownreach.command` opens a fresh, nonpersistent daytime session in Lantern Square. The normal career continues to use the village transit route and its existing saves.
 
 ## Acceptance and performance
 
@@ -50,15 +74,15 @@ The existing towns get a marked transit stop and housing entrances. A short guid
 | Penthouse | 4,800 | 300 | Yes |
 | Warehouse | 2,600 | 1,000 | No |
 
-There are 36,861 city buildings plus the three new village/town properties. Each player account may own up to eight properties; a saved city supports 512 owned properties and 64 active player jobs. Storage capacity counts the total quantity of goods, not the number of distinct item types. All owned properties expose capacity/usage summaries, but full cupboard contents are sent only for the owner's currently visited room.
+There are 38,269 city buildings plus three village/town properties. Each player may own up to eight properties and three vehicles; the city save supports 512 properties, 64 owned vehicles and 64 active jobs. Private cupboard contents are sent only for the owner’s currently visited room.
 
-The detailed neighborhood streams at most 25 city blocks in a 5-by-5 window, building at most one detailed block per render frame. Building colliders are enabled only in the nearby 3-by-3 window, up to nine city blocks; underlying Earth terrain collision streams separately. The three village/town properties are separate from this city-block budget. There are at most 16 walking residents and four cars, using physical collision and bounded local routes.
+The detailed neighborhood streams at most 25 city blocks, building one detailed block per render frame. Building colliders occupy at most a 3-by-3 block neighborhood, separate from Earth terrain streaming. The nearby traffic pool is capped at 24 physical cars and 64 articulated walkers. Persistent distant traffic and walkers are rendered independently; the park and emergency responders have their own bounded pools.
 
-The distant skyline has a separate fixed-capacity MultiMesh: one simplified box silhouette per city building, up to 36,861 instances across all 2,304 blocks. It has no building colliders or cast shadows. The 25-block detail cap does not truncate this distant city to a small neighborhood. At most one far block is staged or restored per render frame: recently unloaded detail is restored first, then nearby unstaged blocks within six blocks of the player, then the remaining municipal grid. Distant shells are hidden when their detailed block loads and restored when it unloads, avoiding overlapping shells. The final fill pass accounts for currently detailed blocks with hidden silhouettes, so reaching the instance cap does not draw a duplicate city over local geometry. Distant preparation progresses over many frames; it is not an instantaneous full-city load.
+The distant skyline shares canonical building massing and facade materials, with capacity for 153,076 massing sections across 2,496 blocks. Nearby detail replaces distant shells without duplication. Far blocks stage at most once per frame, prioritizing the neighborhood and recently unloaded detail; full-city preparation takes many frames. Continuous aircraft/building intersection checks use the same canonical geometry even beyond the ordinary collision window.
 
 Ten player contracts cover couriers, utility repair, fresh produce and replenishing depot supplies. One active contract uses one sealed cargo slot rather than silently adding goods beyond backpack capacity. Work pays 40–120 credits from municipal funds. Transit costs six credits. District workers and household demand advance once per simulated minute; shortages affect service condition and effective workforce.
 
-To begin, use the village journal's Places page to locate transit, or visit the marked cottage near the village. In Crownreach, B opens the city guide. E operates the physical door, cupboard, bed, noticeboard or stop. Furnished rooms use local lighting and exclude outdoor fog and precipitation; leaving restores the outdoor environment.
+To begin, use the village journal's Places page to locate transit, or visit the marked cottage near the village. In Crownreach, B opens the city guide. E operates the physical door, cupboard, bed, noticeboard or stop. Furnished rooms add local lights and exclude precipitation; penthouse glazing retains the actual Earth environment and surrounding city.
 
 ## Arrival safety
 
@@ -66,7 +90,15 @@ Bus travel, room transitions and home returns apply a dedicated arrival hold. Th
 
 Outdoor release requires active terrain collision for every chunk touched by a footprint extending 0.45 metres in each horizontal direction, including all four chunks at a junction. Five downward probes must also find sufficiently level support under the center and corners. Interior arrivals use the same support probes against the already-built room floor. After at least two physics ticks, a successful check releases only the arrival lock and clears velocity. If outdoor terrain preparation stalls for more than three seconds, the controller may warm one required chunk per physics tick; it does not synchronously build the entire city. The dedicated regression pauses normal world processing for one second while player physics continues, then checks that height stays fixed during the hold and movement releases once support is ready.
 
-## Recorded validation scope
+## Current realism validation
+
+See [CITY_REALISM.md](CITY_REALISM.md) for the requested-subsystem checklist, implementation boundaries, research and current validation. [CITY_TRAFFIC.md](CITY_TRAFFIC.md) documents the specific U.S. traffic-control profile. [PLANET_CARTOGRAPHY.md](PLANET_CARTOGRAPHY.md) documents the exact Earth/Moon samplers and projections.
+
+Current native and headless evidence, including park activities, full-size driver fit, commerce, full-body furniture, maps and disaster recovery, is recorded in [CITY_LIFE.md](CITY_LIFE.md). Prior test totals below describe the earlier city baseline, not this expanded layout.
+
+The local source uses network protocol **18**, requiring matching client and server geometry, vehicle registration and furniture semantics. No installer or public server was published by this work. Rendering remains procedural; the simulation is not a photorealistic asset set, an engineering collapse solver, or a simulation of every municipal operation.
+
+## Previous city baseline (before the remake)
 
 Existing source logs record CityPlan **2,423/2,423** (`artifacts/crownreach-regressions/cityplantest-home-relocation.log`), city economy **93/93** (`artifacts/crownreach-regressions/cityeconomytest.log`), and city UI/interior **100/100** (`artifacts/crownreach-ui/headless-final.log`) passing checks. The capped economy fixture records a 43,328-byte wrapped reply under the 49,152-byte network limit, including one context-scoped cupboard and both realm bags. The earlier isolated native UI/room capture records **90/90** on Apple M4; it precedes the final source assertions and full-city arrival changes.
 

@@ -14,3 +14,8 @@ packaging
 *.mp4
 *.ogv
 *.zip
+
+# Retain the installed client source provenance in the dedicated export.
+!packaging
+packaging/*
+!packaging/local_build.json

@@ -12,12 +12,14 @@ extends RigidBody3D
 ## through the world.
 
 signal driver_impact(delta_speed: float)
+signal collision_impact(point: Vector3, normal: Vector3, closing_speed: float)
 ## A deliberately completed backwards motorcycle loop is categorically fatal,
 ## unlike ordinary impacts that respect spawn/revive protection.
 signal driver_fatal_crash()
 
 enum Kind { BIKE, JEEP, BOAT, JET }
 const KIND_NAMES := ["DUAL-SPORT", "SAFARI JEEP", "AIRBOAT", "FIGHTER JET"]
+const ImpactEffects = preload("res://scripts/vehicle_impact_effects.gd")
 const ENTER_RANGE := 3.4
 const IMPACT_DAMAGE_THRESHOLD := 9.0   # m/s of velocity lost in one tick
 const DIRECTION_CHANGE_MAX_PLANAR_SPEED := 0.7
@@ -51,6 +53,11 @@ class RiderRenderPose:
 			var owner = _vehicle_ref.get_ref()
 			return int(owner.kind) if is_instance_valid(owner) else 0
 
+	var rider_torso_recline:Variant:
+		get:
+			var owner=_vehicle_ref.get_ref()
+			return owner.get("rider_torso_recline") if is_instance_valid(owner) else null
+
 	func has_rider_target(slot: StringName) -> bool:
 		var owner = _vehicle_ref.get_ref()
 		return is_instance_valid(owner) and owner.has_rider_target(slot)
@@ -60,6 +67,16 @@ class RiderRenderPose:
 		return owner.rider_target_render_global(slot) \
 			if is_instance_valid(owner) else Vector3.INF
 
+var crash_damage := 0.0
+var wrecked := false
+var _crash_revision := 0
+var _crash_contact_state: Dictionary = {}
+var collision_count := 0
+var last_collision: Dictionary = {}
+var _impact_cooldown := -1.0
+var _pending_impact: Dictionary = {}
+var _impact_effects: VehicleImpactEffects
+var _crashed_meshes := 0
 var vid := ""
 var kind := Kind.JEEP
 var world: Node3D
@@ -148,7 +165,8 @@ func _ready() -> void:
 	collision_mask = 1
 	continuous_cd = true
 	can_sleep = true
-	contact_monitor = false
+	contact_monitor = true
+	max_contacts_reported = 8
 	# Every loss is modelled explicitly (tires, aero, water, rolling
 	# resistance). The engine's default velocity damping would otherwise act
 	# as a hidden ~0.1/s brake that caps top speeds hundreds of newtons early.
@@ -334,7 +352,7 @@ func interaction_position() -> Vector3:
 
 
 func can_enter(_player: Node3D) -> bool:
-	return not npc_controlled and driver == null and not remote_controlled and occupied_by_peer == 0
+	return not wrecked and not npc_controlled and driver == null and not remote_controlled and occupied_by_peer == 0
 
 
 func begin_drive(player: Node3D) -> void:
@@ -469,7 +487,7 @@ func apply_remote_state(pos: Vector3, yaw: float, aux: Vector3,
 	_remote_target_basis = Basis.from_euler(Vector3(aux.x, yaw, aux.y),
 		EULER_ORDER_YXZ)
 	_remote_velocity = vel
-	_remote_rpm = aux.z
+	_remote_rpm = 0.0 if wrecked else aux.z
 	if not _remote_got_state:
 		_remote_got_state = true
 		global_position = _remote_target_pos
@@ -619,7 +637,7 @@ func _simulate(dt: float) -> void:
 	if worst_slip > traction_slip_limit:
 		throttle *= clampf(1.0 - (worst_slip - traction_slip_limit) * 3.2,
 			0.18, 1.0)
-	var drive := engine.step(dt, throttle, driven_speed, forward_speed())
+	var drive := engine.step(dt, throttle, driven_speed, forward_speed())*drive_power_factor()
 	if not has_drive_fuel():
 		drive = 0.0
 	_active_brake = brake
@@ -801,14 +819,77 @@ func _advance_remote(dt: float) -> void:
 		wheel.spin_angle = fposmod(wheel.spin_angle + wheel.spin * dt, TAU)
 
 
+func _integrate_forces(state: PhysicsDirectBodyState3D) -> void:
+	if remote_controlled: return
+	for index in range(state.get_contact_count()):
+		# Godot's contact positions and normals are in global space, despite
+		# the historical "local" method name referring to this body.
+		var normal := state.get_contact_local_normal(index).normalized()
+		var point := state.get_contact_local_position(index)
+		var previous_at_contact := _prev_velocity+state.angular_velocity.cross(point-state.transform.origin)
+		var relative := previous_at_contact-state.get_contact_collider_velocity_at_position(index)
+		var closing := maxf(0.0,-relative.dot(normal))
+		closing = maxf(closing,absf(state.get_contact_impulse(index).dot(normal))/maxf(mass,.01))
+		if closing>=3.0 and closing>float(_pending_impact.get("speed",0)):
+			_pending_impact = {"point":point,"normal":normal,"speed":closing,"other":weakref(state.get_contact_collider_object(index))}
+
 func _detect_impacts() -> void:
-	if driver == null:
-		_prev_velocity = linear_velocity
-		return
-	var delta := (_prev_velocity - linear_velocity).length()
 	_prev_velocity = linear_velocity
-	if delta > IMPACT_DAMAGE_THRESHOLD:
-		driver_impact.emit(delta)
+	if _pending_impact.is_empty(): return
+	var impact := _pending_impact
+	_pending_impact = {}
+	var other: Node = impact.other.get_ref() if impact.get("other") is WeakRef else null
+	report_collision_impact(impact.point,impact.normal,impact.speed,other)
+
+func drive_power_factor() -> float:
+	return 0.0 if wrecked else maxf(.15,1.0-crash_damage*.8)
+
+## Shared by actual rigid-body contacts and the city aircraft's continuous
+## facade sweep. Severity is normal closing speed in metres per second.
+func report_collision_impact(point: Vector3, normal: Vector3, closing_speed: float, other: Node = null) -> void:
+	if not point.is_finite() or not normal.is_finite() or not is_finite(closing_speed) or normal.length_squared()<.1 or closing_speed<3: return
+	var now := Time.get_ticks_msec()*.001
+	if now-_impact_cooldown<.35: return
+	_impact_cooldown = now
+	normal = normal.normalized()
+	collision_count += 1
+	var severe := 55.0 if kind==Kind.JET else 32.0
+	crash_damage = clampf(crash_damage+pow(closing_speed/severe,2)*.65,0,1)
+	wrecked = wrecked or closing_speed>=severe or crash_damage>=.99
+	last_collision = {"point":point,"normal":normal,"closing_speed":closing_speed,"damage":crash_damage,"wrecked":wrecked}
+	_crash_contact_state={"damage":clampi(roundi(crash_damage*1000.0),1,1000),"wrecked":wrecked,
+		"point":global_transform.affine_inverse()*point,"normal":(global_basis.inverse()*normal).normalized(),"speed":minf(closing_speed,400.0)}
+	# A swept aircraft contact can arrive before a streamed collider exists.
+	# Remove the incoming normal component, leaving dissipative tangential
+	# motion; actual solved contacts already have zero incoming normal speed.
+	var incoming := minf(0,linear_velocity.dot(normal))
+	linear_velocity -= normal*incoming*(.96 if wrecked else .82)
+	angular_velocity *= .65 if wrecked else .9
+	if is_instance_valid(driver) and closing_speed>IMPACT_DAMAGE_THRESHOLD: driver_impact.emit(closing_speed)
+	# The contacted traffic body receives the same accepted physical event.
+	# Its surface normal faces opposite this body's contact normal.
+	if is_instance_valid(other) and other.has_method("receive_vehicle_impact"):
+		other.receive_vehicle_impact(point,-normal,closing_speed)
+	collision_impact.emit(point,normal,closing_speed)
+	if is_instance_valid(world):
+		var disasters: Variant = world.get("city_disasters")
+		if is_instance_valid(disasters): disasters.report_vehicle_impact(self,point,normal,closing_speed)
+	if closing_speed>=6:
+		_crashed_meshes += ImpactEffects.dent(self,point,normal,closing_speed)
+		var holder: Node = world if is_instance_valid(world) else get_parent()
+		if is_instance_valid(holder):
+			var effects := holder.get_node_or_null("VehicleImpactEffects") as VehicleImpactEffects
+			if not is_instance_valid(effects):
+				effects = ImpactEffects.new()
+				effects.name = "VehicleImpactEffects"
+				holder.add_child(effects)
+			_impact_effects = effects
+			effects.impact(point,normal,closing_speed,_prev_velocity,get_rid())
+		if is_instance_valid(world): Sfx.play_at("thud",point,-3.0,.58,70.0)
+	if Net.active and Net.is_host: Net.record_host_vehicle_crash(self)
+
+func crash_report() -> Dictionary:
+	return {"damage":crash_damage,"wrecked":wrecked,"collisions":collision_count,"deformed_meshes":_crashed_meshes,"last":last_collision.duplicate(),"power":drive_power_factor()}
 
 
 ## Returns true when this frame was recovered and callers must stop using the
@@ -1130,3 +1211,36 @@ func build_knobby_wheel(tire_radius: float, tire_width: float,
 		spoke.material_override = paint_material(hub_color, 0.7, 0.35)
 		wheel_root.add_child(spoke)
 	return wheel_root
+
+
+func crash_state() -> Dictionary:
+	return _crash_contact_state.duplicate(true)
+
+## A visual/propulsion replica update cannot inflict player or building damage.
+func apply_replicated_crash(row: Dictionary, animate: bool) -> void:
+	var revision:=int(row.get("revision",0))
+	if revision<=_crash_revision: return
+	_crash_revision=revision
+	_crash_contact_state=row.duplicate(true)
+	_crash_contact_state.erase("revision")
+	_crash_contact_state.erase("kind")
+	var previous:=crash_damage
+	crash_damage=maxf(crash_damage,float(row.damage)/1000.0)
+	wrecked=wrecked or bool(row.wrecked)
+	if wrecked: _remote_rpm=0.0
+	var point:Vector3=global_transform*Vector3(row.point)
+	var normal:Vector3=(global_basis*Vector3(row.normal)).normalized()
+	last_collision={"point":point,"normal":normal,"closing_speed":float(row.speed),"damage":crash_damage,"wrecked":wrecked}
+	if crash_damage>previous+.0005:
+		_crashed_meshes+=ImpactEffects.dent(self,point,normal,float(row.speed))
+		if animate:
+			var holder:Node=world if is_instance_valid(world) else get_parent()
+			if is_instance_valid(holder):
+				var effects:=holder.get_node_or_null("VehicleImpactEffects") as VehicleImpactEffects
+				if not is_instance_valid(effects):
+					effects=ImpactEffects.new();effects.name="VehicleImpactEffects";holder.add_child(effects)
+				effects.impact(point,normal,float(row.speed),linear_velocity,get_rid())
+	_apply_replicated_crash_presentation(row,animate)
+
+func _apply_replicated_crash_presentation(_row: Dictionary, _animate: bool) -> void:
+	pass

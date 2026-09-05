@@ -4,6 +4,8 @@ const PanelScript = preload("res://scripts/city_panel.gd")
 const InteriorScript = preload("res://scripts/city_interior.gd")
 const EconomyScript = preload("res://scripts/city_economy.gd")
 const ControllerScript = preload("res://scripts/city_controller.gd")
+const NetworkScript = preload("res://scripts/city_network.gd")
+const Plan = preload("res://scripts/city_plan.gd")
 var passed := 0
 var total := 0
 var ui: Control
@@ -48,9 +50,11 @@ class ProjectionPlayer extends Node3D:
 	var vehicle: Node
 	var expedition_locked := false
 	var arrival_locked := false
+	func cancel_furniture() -> void: pass
 
 class ProjectionWorld extends Node3D:
 	var local_player: Node3D
+	var seasonal_weather: Node
 
 class ProjectionPanel extends Control:
 	var refreshes := 0
@@ -207,13 +211,160 @@ func _run() -> void:
 	ui.refresh_view()
 	_check(_button("district_selector").get_instance_id() == selector_id and ui._district().food_stock == 7, "changing district stocks refreshes without rebuilding selection")
 	await _capture("district-guide-960x540")
+	await _check_retail()
+	await _check_dealership()
 	ui.close()
 	if DisplayServer.get_name() != "headless": await get_tree().create_timer(0.15).timeout
 	_check(not ui.visible, "closing releases the panel")
 	_check_controller_guards()
+	_check_penthouse_authority()
 	await _check_rooms()
 	print("CITYUITEST %d/%d %s" % [passed, total, "PASS" if passed == total else "FAIL"])
 	get_tree().quit(0 if passed == total else 1)
+
+func _check_retail() -> void:
+	fake.view = _fixture()
+	fake.view.services["produce_market"]={"stock":{"banana":12,"tomato":9,"rice":7,"water":20}}
+	var shop:Dictionary=Plan.building("crownreach-b24-24-l00")
+	var door_context := shop.duplicate(true)
+	door_context.kind = "building"
+	ui._retail_quantity = 1
+	ui.open(door_context)
+	await _settle()
+	var buy := _button("buy_store_item")
+	_check(buy != null and not buy.disabled and buy.text.contains("6"), "physical market door exposes its real finite-stock retail offer")
+	print("CITY_RETAIL_GEOMETRY scroll=%s buy=%s home=%s scroll_y=%s panel=%s" % [ui._scroll.get_global_rect(), buy.get_global_rect(), _button("buy_home").get_global_rect() if _button("buy_home") else "missing", ui._scroll.scroll_vertical, ui._panel.get_global_rect()])
+	print("CITY_RETAIL_FOCUS ", get_viewport().gui_get_focus_owner().get_meta("city_focus", "none") if get_viewport().gui_get_focus_owner() else "none")
+	_check(buy != null and ui._scroll.get_global_rect().encloses(buy.get_global_rect()) and (_button("buy_home") == null or buy.global_position.y < _button("buy_home").global_position.y),
+		"retail purchase stays fully visible before any property controls at960x540")
+	_button("retail_plus").pressed.emit()
+	_check(buy.text.contains("12") and ui._retail_quantity == 2, "shop quantity updates the actual total price")
+	var selector:=_button("retail_selector") as OptionButton
+	_check(selector!=null and selector.item_count==4,"grocery selector lists all four actual finite-stock items")
+	selector.select(1)
+	selector.item_selected.emit(1)
+	_check(ui._retail_offer().item=="tomato" and buy.text.contains("10"),"selecting tomatoes updates the real item, stock and two-unit price")
+	selector.select(0)
+	selector.item_selected.emit(0)
+	await _settle()
+	await _capture("storefront-960x540")
+	var before_requests: int = fake.requests.size()
+	fake.async_reply = true
+	var credits: int = fake.view.credits
+	var goods: Dictionary = fake.view.backpack_counts.duplicate(true)
+	buy.pressed.emit()
+	buy.pressed.emit()
+	_check(fake.requests.size() == before_requests + 1 and fake.requests[-1] == {"kind":"buy_store_item","payload":{"building":shop.id,"item":"banana","quantity":2}},
+		"retail sends one exact shop/item/quantity request and no client-selected price")
+	_check(fake.view.credits == credits and fake.view.backpack_counts == goods and fake.view.services.produce_market.stock.banana == 12,
+		"retail UI waits for authoritative stock, wallet and backpack changes")
+	fake.async_reply = false
+	fake.view.action_pending = false
+	buy.grab_focus()
+	var identity := buy.get_instance_id()
+	fake.view.services.produce_market.stock.banana = 1
+	ui.refresh_view()
+	_check(_button("buy_store_item").get_instance_id() == identity and buy.disabled and root.gui_get_focus_owner() == buy,
+		"shared shop-stock updates preserve focus and reject unavailable quantity")
+	ui._retail_quantity = 1
+	fake.view.credits = 5
+	ui.refresh_view()
+	_check(buy.disabled, "insufficient actual credits disable retail purchase")
+	fake.view.credits = 100
+	fake.view.backpack_counts = {"banana":350}
+	ui.refresh_view()
+	_check(buy.disabled, "full actual backpack disables retail purchase")
+	fake.view.backpack_counts = {"banana":3}
+	fake.view.services.produce_market.stock.banana = 0
+	ui.refresh_view()
+	_check(buy.disabled, "an exhausted shared shop inventory cannot be purchased")
+	fake.view.services.produce_market.stock.banana = 8
+	ui.refresh_view()
+	door_context.kind = "info"
+	ui.open(door_context)
+	await _settle()
+	_check(_button("buy_store_item") != null and _button("buy_store_item").disabled and _button("retail_plus").disabled,
+		"remote shop preview is read-only")
+	door_context.kind = "interior"
+	ui.open(door_context)
+	await _settle()
+	_check(_button("buy_store_item") != null and _button("buy_store_item").disabled,
+		"housing interiors cannot purchase through the remote exterior storefront")
+	_check(NetworkScript.room_action_position(shop, NetworkScript.interior_origin(shop), "buy_store_item") == Vector3.INF,
+		"network room translation never grants a storefront purchase from underground interiors")
+	_check(NetworkScript._payload_valid({"building":shop.id,"item":"banana","quantity":1}) and not NetworkScript._payload_valid({"building":shop.id,"item":"banana","quantity":1,"price":1}),
+		"network retail payload permits only authoritative item quantity fields")
+
+func _check_dealership()->void:
+	fake.view=_fixture()
+	fake.view.credits=1000000
+	fake.view["vehicle_stock"]={}
+	fake.view["owned_vehicles"]=[]
+	var fleet:=preload("res://scripts/city_vehicle_models.gd").catalog()
+	for spec in fleet:fake.view.vehicle_stock[spec.id]=2
+	var dealer:Dictionary=Plan.dealerships()[0]
+	var context:=dealer.duplicate(true)
+	context.kind="building"
+	ui.open(context)
+	await _settle()
+	_check(ui._panel.size.x<=900 and ui._panel.size.y<=480,"dealership stays inside the compact960x540 viewport")
+	var spec:Dictionary=fleet[0]
+	var buy:=_button("buy_"+str(spec.id))
+	_check(buy!=null and not buy.disabled and fleet.size()==10,"dealer lists ten full-size models with stock and wallet eligibility")
+	var before:int=fake.requests.size()
+	fake.async_reply=true
+	buy.pressed.emit()
+	buy.pressed.emit()
+	_check(fake.requests.size()==before+1 and fake.requests[-1]=={"kind":"buy_vehicle","payload":{"building":dealer.id,"model":spec.id}},"dealer sends one model purchase and never chooses its own price or vehicle ID")
+	_check(fake.view.owned_vehicles.is_empty() and fake.view.vehicle_stock[spec.id]==2,"dealer waits for confirmed ownership and stock before updating its garage")
+	fake.async_reply=false
+	fake.view.action_pending=false
+	fake.view.vehicle_stock[spec.id]=0
+	ui.refresh_view()
+	_check(_button("buy_"+str(spec.id)).disabled,"exhausted vehicle stock disables that model")
+	fake.view.vehicle_stock[spec.id]=2
+	fake.view.credits=0
+	ui.refresh_view()
+	_check(_button("buy_"+str(spec.id)).disabled,"unaffordable vehicles cannot be purchased")
+	fake.view.credits=1000000
+	var owned_id:="v:city:"+str(spec.id)+":1"
+	fake.view.owned_vehicles=[{"id":owned_id,"model":spec.id}]
+	ui.refresh_view()
+	await _settle()
+	var recall:=_button("recall_"+owned_id)
+	_check(recall!=null and not recall.disabled,"owned garage vehicle exposes collection at the physical dealership")
+	recall.grab_focus()
+	await _settle()
+	_check(ui._scroll.get_global_rect().encloses(recall.get_global_rect()),"keyboard focus scrolls the garage collection action fully into the compact viewport")
+	recall.pressed.emit()
+	_check(fake.requests[-1]=={"kind":"recall_vehicle","payload":{"building":dealer.id,"vehicle":owned_id}},"garage collection sends the exact persisted vehicle identity")
+	await _capture("dealership-garage-960x540")
+	ui._scroll.scroll_vertical=0
+	root.gui_release_focus()
+	await _settle()
+	await _capture("dealership-models-960x540")
+	context.kind="info"
+	ui.open(context)
+	await _settle()
+	_check(_button("buy_"+str(spec.id)).disabled and _button("recall_"+owned_id).disabled,"remote dealer previews cannot purchase or summon a vehicle")
+
+func _check_penthouse_authority() -> void:
+	var beacon: Dictionary = Plan.building("crownreach-b24-24-l02")
+	var origin: Vector3 = NetworkScript.interior_origin(beacon)
+	var layout: Dictionary = InteriorScript.service_layout(beacon)
+	_check(beacon.name == "Crownreach Beacon" and layout.bed.position == Vector3(-6.1,0.8,7) and layout.storage.position == Vector3(-10.9,0.8,-6),
+		"real Beacon exposes the published ground-floor luxury suite service anchors")
+	for action in ["set_home", "store_item", "take_item"]:
+		var point: Vector3 = layout.bed.position if action == "set_home" else layout.storage.position
+		var wrong: Vector3 = layout.storage.position if action == "set_home" else layout.bed.position
+		_check(NetworkScript.room_action_position(beacon, origin + point, action) == beacon.door,
+			"Beacon %s resolves only its physical suite service to the canonical outdoor door" % action)
+		_check(NetworkScript.room_action_position(beacon, origin + wrong, action) == Vector3.INF,
+			"Beacon %s rejects the other service instead of granting room-wide authority" % action)
+		_check(NetworkScript.room_action_position(beacon, origin + point + Vector3(InteriorScript.INTERACTION_RANGE + 0.1, 0, 0), action) == Vector3.INF,
+			"Beacon %s rejects a resident beyond the service reach" % action)
+		_check(NetworkScript.room_action_position(beacon, origin + point + Vector3.UP * 4.0, action) == Vector3.INF,
+			"Beacon %s cannot activate a ground-floor service through the mezzanine" % action)
 
 func _check_controller_guards() -> void:
 	var controller := ControllerScript.new()
@@ -338,7 +489,7 @@ func _check_rooms() -> void:
 	await get_tree().process_frame
 
 func _fixture() -> Dictionary:
-	return {"city": {"name": "Crownreach", "population": 400000, "area_sq_mi": 204.96}, "credits": 9000, "now": 100.0,
+	return {"city": {"name": "Crownreach", "population": 400000, "area_sq_mi": EconomyScript.AREA_SQ_MI}, "credits": 9000, "now": 100.0,
 		"backpack_capacity": 350, "bus_fare": 6, "action_pending": false, "backpack_counts": {"banana": 12, "tomato": 3},
 		"backpack": [{"id": "banana", "label": "Banana", "count": 12}, {"id": "tomato", "label": "Tomato", "count": 3}],
 		"owned_properties": [], "unavailable_buildings": [], "active_job": {},

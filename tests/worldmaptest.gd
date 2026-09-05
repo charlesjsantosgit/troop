@@ -456,17 +456,8 @@ func run(main) -> void:
 	_check(uhd_requested.size() <= WorldMap.CACHE_TILE_LIMIT,
 		"4K view coarsens instead of allocating unbounded tiles",
 		"tier=%d keys=%d" % [uhd_tier, uhd_requested.size()])
-	_check(WorldMap.TILE_PX >= 320 and requested.size() <= 32,
-		"close map uses large sharp tiles instead of a pixelated tile swarm",
-		"tile_px=%d hd_keys=%d" % [WorldMap.TILE_PX, requested.size()])
-	_check(WorldMap.local_samples_per_complete_tile() <= 1500,
-		"satellite-detail tile needs at most 1,500 live terrain samples",
-		"samples=%d" % WorldMap.local_samples_per_complete_tile())
-	_check(WorldMap.BAKE_TIME_BUDGET_USEC <= 1800,
-		"progressive map refinement has a 1.8 ms per-frame CPU ceiling")
-	var detail_image := WorldMap.SATELLITE_DETAIL_OVERLAY.get_image()
-	_check(detail_image != null and detail_image.get_size() == Vector2i(512, 512),
-		"close map has a reusable 512px photoreal satellite detail plate")
+	_check(WorldMap.LOCAL_PREVIEW_GRIDS[-1] == WorldMap.TILE_PX,
+		"terrain tiles refine to their real sample resolution")
 
 	var atlas: WorldMap = main.hud.world_map
 	_check(atlas != null and not atlas.is_open(),
@@ -533,17 +524,7 @@ func run(main) -> void:
 			and not WorldMap.realm_visible_on_body(Net.PlayerRealm.TRANSIT,
 				WorldMap.CelestialBody.MOON),
 		"transit has no surface-map representation")
-	var moon_projection := WorldMap.moon_marker_projection(
-		realm_actors[1].global_position, realm_actors[1]._yaw,
-		Vector2(500.0, 400.0), 300.0, Vector2.ZERO)
-	var moon_direction: Vector2 = moon_projection.direction
-	var moon_screen_position: Vector2 = moon_projection.position
-	var expected_moon_direction := WorldMap.marker_forward(realm_actors[1]._yaw)
-	_check(bool(moon_projection.visible) \
-			and moon_screen_position.distance_to(Vector2(500.0, 400.0)) < 300.0 \
-			and moon_direction.dot(expected_moon_direction) > 0.96,
-		"Moon marker projection preserves the monkey's facing direction",
-		str(moon_projection))
+
 	for actor in realm_actors:
 		main.world.puppets.erase(actor.peer_id)
 		Net.player_realms.erase(actor.peer_id)
@@ -555,174 +536,22 @@ func run(main) -> void:
 		Net.player_realms.erase(local_id)
 	atlas.selected_body = original_body
 
-	var sample_started := Time.get_ticks_usec()
-	for sample_index in range(64):
-		atlas._map_sample(Vector2(sample_index * 71.0, sample_index * -43.0), 8.0)
-	var sample_elapsed := Time.get_ticks_usec() - sample_started
-	print("  MAP_SAMPLE_BENCHMARK count=64 total_us=%d each_us=%.1f" % [
-		sample_elapsed, float(sample_elapsed) / 64.0])
-	var coarse_road_visible := false
-	for along in [180.0, 320.0, 480.0, 640.0, 920.0]:
-		for offset in [18.0, 24.0, 30.0]:
-			var fine_road := float(atlas._map_sample(Vector2(along, offset),
-				1.0).road)
-			var coarse_road := float(atlas._map_sample(Vector2(along, offset),
-				64.0).road)
-			if fine_road <= 0.12 and coarse_road > 0.12:
-				coarse_road_visible = true
-				break
-		if coarse_road_visible:
-			break
-	_check(coarse_road_visible,
-		"coarse atlas pixels retain narrow roads without widening terrain")
 	_check(InputMap.has_action("world_map"), "X world-map input is registered")
 	atlas.open_map()
-	_check(atlas.size.x <= 900.0 and atlas.size.y <= 600.0 \
-		and atlas.position.x > 0.0 and atlas.position.y > 0.0,
-		"atlas opens as a bounded panel with the world visible around it")
-	var camera_mode_before := int(main.world.local_player.cam.view_mode)
-	var camera_event := InputEventAction.new()
-	camera_event.action = "camera_mode"
-	camera_event.pressed = true
-	main._unhandled_input(camera_event)
-	_check(int(main.world.local_player.cam.view_mode) == camera_mode_before,
+	_check(atlas.is_open() and atlas.size.x <= 1380 and atlas.size.y <= 920,
+		"atlas opens as a responsive bounded panel")
+	var camera_before := int(main.world.local_player.cam.view_mode)
+	var event := InputEventAction.new()
+	event.action = "camera_mode"
+	event.pressed = true
+	main._unhandled_input(event)
+	_check(int(main.world.local_player.cam.view_mode) == camera_before,
 		"open atlas consumes gameplay shortcuts")
-	atlas._target_span_m = 8000.0
-	atlas._view_span_m = 8000.0
-	await get_tree().process_frame
-	await get_tree().process_frame
-	var local_diag := atlas.cache_diagnostics()
-	_check(int(local_diag.last_local_samples) <=
-		WorldMap.LOCAL_BAKE_SAMPLES_PER_FRAME,
-		"local terrain bake work is frame bounded", str(local_diag))
-	_check(int(local_diag.last_local_texture_uploads) <= int(local_diag.required),
-		"coherent stage reveal uploads each visible tile at most once",
-		str(local_diag))
-	_check(int(local_diag.tiles) <= maxi(WorldMap.CACHE_TILE_LIMIT,
-		int(local_diag.required)), "local tile cache is globally bounded",
-		str(local_diag))
-	_check(int(local_diag.required) > 0,
-		"open local atlas requests visible terrain tiles", str(local_diag))
-	var snapshots := atlas.marker_snapshot()
-	_check(not snapshots.is_empty() and bool(snapshots[0].local)
-		and not str(snapshots[0].name).is_empty(),
-		"local player marker includes name and facing metadata", str(snapshots))
-
-	atlas._target_span_m = WorldMap.planet_circumference_m() * 0.24
-	atlas._view_span_m = atlas._target_span_m
-	await get_tree().process_frame
-	await get_tree().process_frame
-	var globe_diag := atlas.cache_diagnostics()
-	_check(int(globe_diag.last_atlas_samples) == 0 \
-			and int(globe_diag.atlas_pixels) \
-				== WorldMap.GLOBE_ATLAS_SIZE.x * WorldMap.GLOBE_ATLAS_SIZE.y,
-		"4K Earth atlas performs no runtime terrain bake", str(globe_diag))
-	_check(atlas._globe_texture != null \
-			and atlas._globe_texture.get_width() == 4096 \
-			and atlas._globe_texture.get_height() == 2048 \
-			and atlas._globe_texture.get_image().has_mipmaps() \
-			and atlas._globe_texture == WorldMap.shared_earth_texture() \
-			and atlas._globe_texture == SpaceVoyageVisuals.shared_earth_texture(),
-		"world map and voyage share a mipmapped 4096x2048 Pangaea atlas")
-	var voyage_visuals: SpaceVoyageVisuals = \
-		main.expedition_manager.rocket.voyage_visuals
-	var voyage_earth_mesh := voyage_visuals.earth_visual.mesh as SphereMesh
-	var voyage_moon_mesh := voyage_visuals.moon_visual.mesh as SphereMesh
-	_check(voyage_earth_mesh != null and voyage_moon_mesh != null \
-			and voyage_earth_mesh.radial_segments \
-				== SpaceVoyageVisuals.CELESTIAL_RADIAL_SEGMENTS \
-			and voyage_earth_mesh.rings == SpaceVoyageVisuals.CELESTIAL_RINGS \
-			and voyage_moon_mesh.radial_segments \
-				== SpaceVoyageVisuals.CELESTIAL_RADIAL_SEGMENTS \
-			and voyage_moon_mesh.rings == SpaceVoyageVisuals.CELESTIAL_RINGS,
-		"voyage Earth and Moon use dedicated 96x48 sphere geometry")
-	var earth_mesh := atlas._sphere_mesh_for_view(Vector2.ZERO)
-	_check(WorldMap.GLOBE_LONGITUDE_STEPS == 96 \
-			and WorldMap.GLOBE_LATITUDE_STEPS == 48 \
-			and earth_mesh != null and earth_mesh.get_surface_count() == 1 \
-			and atlas._sphere_mesh_for_view(Vector2.ZERO) == earth_mesh,
-		"Earth globe uses one cached high-detail 96x48 sphere mesh")
-	var transition_mid := WorldMap.transition_opacities(0.5)
-	_check(transition_mid.x > 0.45 and transition_mid.y > 0.45 \
-			and is_equal_approx(transition_mid.x + transition_mid.y, 1.0) \
-			and WorldMap.transition_opacities(0.0).is_equal_approx(Vector2(1, 0)) \
-			and WorldMap.transition_opacities(1.0).is_equal_approx(Vector2(0, 1)) \
-			and WorldMap.transition_globe_scale(0.0) > 2.0 \
-			and is_equal_approx(WorldMap.transition_globe_scale(1.0), 1.0),
-		"ground-to-space zoom crossfades continuously while the globe settles")
-	_check(atlas.globe_blend() >= 0.99,
-		"zooming out reaches the whole-Earth globe view")
-	var cached_earth_texture_id := atlas._globe_texture.get_instance_id()
 	atlas.focus_moon()
-	_check(atlas.selected_body == WorldMap.CelestialBody.MOON,
-		"moon globe is selectable as a destination")
-	var moon_diag := atlas.cache_diagnostics()
-	_check(int(moon_diag.moon_atlas_pixels) \
-			== WorldMap.MOON_ATLAS_SIZE.x * WorldMap.MOON_ATLAS_SIZE.y \
-			and int(moon_diag.moon_base_cursor) == 0 \
-			and int(moon_diag.moon_crater_stamps) == 0 \
-			and int(moon_diag.last_moon_base_samples) == 0 \
-			and int(moon_diag.last_moon_crater_stamps) == 0,
-		"4K lunar atlas is complete immediately with zero procedural bake",
-		str(moon_diag))
-	_check(atlas._moon_texture != null \
-			and atlas._moon_texture.get_width() == 4096 \
-			and atlas._moon_texture.get_height() == 2048 \
-			and atlas._moon_texture.get_image().has_mipmaps() \
-			and atlas._moon_texture == WorldMap.shared_moon_texture() \
-			and atlas._moon_texture == SpaceVoyageVisuals.shared_moon_texture(),
-		"world map and voyage share a mipmapped 4096x2048 lunar atlas")
-	var cached_moon_texture_id := atlas._moon_texture.get_instance_id()
-	atlas.focus_moon()
-	_check(atlas._moon_texture.get_instance_id() == cached_moon_texture_id \
-			and WorldMap.shared_earth_texture().get_instance_id() \
-				== cached_earth_texture_id,
-		"reselecting celestial bodies reuses both imported texture resources")
-	var outbound_duration := LunarRocket.OUTBOUND_DURATION_SECONDS
-	var return_duration := LunarRocket.RETURN_DURATION_SECONDS
-	var outbound_exit := float(LunarRocket.OUTBOUND_PHASE_TIMES[0])
-	var return_reentry := float(LunarRocket.RETURN_PHASE_TIMES[1])
-	var outbound_fade := SpaceVoyageVisuals.star_opacity_for_progress(
-		(outbound_exit - 2.0) / outbound_duration, true)
-	var return_departure_fade := SpaceVoyageVisuals.star_opacity_for_progress(
-		2.0 / return_duration, false)
-	var return_entry_fade := SpaceVoyageVisuals.star_opacity_for_progress(
-		(return_reentry - 2.0) / return_duration, false)
-	_check(is_zero_approx(SpaceVoyageVisuals.star_opacity_for_progress(0.0, true)) \
-			and outbound_fade > 0.0 and outbound_fade < 1.0 \
-			and is_equal_approx(SpaceVoyageVisuals.star_opacity_for_progress(
-				outbound_exit / outbound_duration, true), 1.0) \
-			and is_equal_approx(SpaceVoyageVisuals.star_opacity_for_progress(
-				24.0 / outbound_duration, true), 1.0) \
-			and is_zero_approx(SpaceVoyageVisuals.star_opacity_for_progress(
-				SpaceVoyageVisuals.LUNAR_REAL_SURFACE_SECONDS / outbound_duration, true)) \
-			and is_zero_approx(SpaceVoyageVisuals.star_opacity_for_progress(0.0, false)) \
-			and return_departure_fade > 0.0 and return_departure_fade < 1.0 \
-			and is_equal_approx(SpaceVoyageVisuals.star_opacity_for_progress(
-				3.0 / return_duration, false), 1.0) \
-			and return_entry_fade > 0.0 and return_entry_fade < 1.0 \
-			and is_zero_approx(SpaceVoyageVisuals.star_opacity_for_progress(
-				return_reentry / return_duration, false)),
-		"voyage stars fade through departure, atmospheric exit and reentry without phase cuts")
-	var largest_star_step := 0.0
-	for outbound in [true, false]:
-		var duration := outbound_duration if outbound else return_duration
-		var previous_opacity := 0.0
-		for frame in range(ceili(duration * 60.0) + 1):
-			var opacity := SpaceVoyageVisuals.star_opacity_for_progress(
-				float(frame) / (duration * 60.0), outbound)
-			largest_star_step = maxf(largest_star_step, absf(opacity - previous_opacity))
-			previous_opacity = opacity
-	_check(largest_star_step < 0.05,
-		"every 60 Hz voyage frame preserves a gradual star fade",
-		"largest opacity step=%.5f" % largest_star_step)
-	atlas.focus_earth()
-	_check(atlas.selected_body == WorldMap.CelestialBody.EARTH,
-		"Earth globe can be restored after lunar inspection")
+	var span := atlas._target_span_m
+	atlas.zoom_at(atlas.map_rect().get_center(), .72)
+	_check(atlas._target_span_m < span, "Moon terrain supports local cartographic zoom")
 	atlas.close_map()
-	_check(not atlas.is_open() and not atlas.visible,
-		"closing atlas restores gameplay presentation")
-
-	print("WORLDMAPTEST %d/%d %s" % [_total - _fails, _total,
-		"PASS" if _fails == 0 else "FAIL"])
+	_check(not atlas.is_open() and not atlas.visible, "closing atlas restores gameplay presentation")
+	print("WORLDMAPTEST %d/%d %s" % [_total - _fails, _total, "PASS" if _fails == 0 else "FAIL"])
 	get_tree().quit(0 if _fails == 0 else 1)

@@ -2,12 +2,18 @@ extends Node
 ## Connects physical addresses, compact panels and authenticated city services.
 const Plan = preload("res://scripts/city_plan.gd")
 const NetworkScript = preload("res://scripts/city_network.gd")
+const Rooms = preload("res://scripts/city_interior.gd")
+const Furniture = preload("res://scripts/city_furniture.gd")
+const PenthouseViewScript = preload("res://scripts/city_penthouse_view.gd")
+var civil: Node
 var frontier: Node
 var world: Node3D
 var city_world: Node3D
 var crowd: Node3D
+var park_world: Node3D
 var panel: Control
 var interior: Node3D
+var penthouse_view: Node3D
 var interior_id := ""
 var last_message := "Visit the village transit stop to explore Crownreach."
 var waypoint: Dictionary = {}
@@ -24,6 +30,7 @@ var _inspect_clock := 5.0
 var _room_saved_view := -1
 var _room_camera: Camera3D
 var _room_saved_environment: Environment
+var _room_saved_far := 0.0
 var _parcel: Node3D
 var _arrival := Vector3.INF
 var _arrival_frames := 0
@@ -40,6 +47,14 @@ func configure(owner_frontier: Node) -> void:
 	crowd = load("res://scripts/city_crowd.gd").new()
 	crowd.name = "CityStreetLife"
 	world.add_child(crowd)
+	park_world = load("res://scripts/city_park_world.gd").new()
+	park_world.name = "LanternGrandPark"
+	world.add_child(park_world)
+	park_world.configure(self)
+	world.city_disasters=load("res://scripts/city_disasters.gd").new()
+	world.city_disasters.name="CityDisasters"
+	world.add_child(world.city_disasters)
+	world.city_disasters.configure(self)
 	var layer := CanvasLayer.new()
 	layer.layer = 66
 	add_child(layer)
@@ -56,6 +71,11 @@ func configure(owner_frontier: Node) -> void:
 		_network = frontier._network.city
 		_network.finished.connect(_on_result)
 		_network.request("inspect")
+
+	civil=preload("res://scripts/civil_controller.gd").new()
+	civil.name="CivilController"
+	add_child(civil)
+	civil.configure(self)
 
 func city_view() -> Dictionary:
 	var view: Dictionary = _network.cached_view.duplicate(true) if is_instance_valid(_network) \
@@ -78,6 +98,8 @@ func city_view() -> Dictionary:
 	for item in bag:
 		view.backpack.append({"id": item, "label": str(item).replace("_", " ").capitalize(),
 			"count": int(bag[item]), "quantity": int(bag[item])})
+	if is_instance_valid(civil) and civil.view.get("resident_life") is Dictionary:
+		view.resident_life=civil.view.resident_life
 	return view
 
 func interactions() -> Array:
@@ -94,7 +116,19 @@ func interactions() -> Array:
 			entry["position"] = interior.to_global(service.position)
 			entry["label"] = str(service.get("label", service.get("prompt", service.kind)))
 			result.append(entry)
+		if world.local_player.furniture_active():
+			return [{"city":true,"kind":"furniture_exit","position":player,"label":"Stand up · movement also gets up"}]
+		var furniture := Rooms.furniture_layout(building)
+		for id: String in furniture:
+			var entry: Dictionary = furniture[id].duplicate(true)
+			entry["city"] = true
+			entry["furniture"] = id
+			entry["property"] = interior_id
+			entry.position = interior.to_global(entry.position)
+			result.append(entry)
 		return result
+	if is_instance_valid(civil): result.append_array(civil.interactions())
+	if is_instance_valid(park_world): result.append_array(park_world.interactions(world.local_player))
 	var nearest: Dictionary = Plan.nearest_building(player, 6.0)
 	if not nearest.is_empty():
 		nearest["city"] = true
@@ -112,6 +146,15 @@ func interactions() -> Array:
 	return result
 
 func open(context: Dictionary) -> void:
+	if str(context.kind).begins_with("park_") and is_instance_valid(park_world):
+		park_world.interact(context)
+		return
+	if context.kind == "furniture":
+		request_action("use_furniture",{"id":str(context.furniture)})
+		return
+	if context.kind == "furniture_exit":
+		_request_furniture_leave()
+		return
 	if context.kind == "exit":
 		exit_building()
 		return
@@ -127,11 +170,33 @@ func close_panel() -> void:
 		Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
 
 func request_action(kind: String, payload: Dictionary = {}) -> Dictionary:
+	if kind.begins_with("civil_") and is_instance_valid(civil):return civil.request_action(kind,payload)
 	if _pending != 0: return _reject("Your previous request is still being confirmed.")
 	if arrival_pending(): return _reject("Arriving… preparing the ground beneath you.")
 	var p = world.local_player
 	if not is_instance_valid(p) or p.vehicle or p.expedition_locked or frontier.current_planet() != "earth":
 		return _reject("Use city services on foot on Earth.")
+	if kind=="recall_vehicle":
+		var recalled: Vehicle=world.vehicles.get(str(payload.get("vehicle","")))
+		if is_instance_valid(recalled) and (is_instance_valid(recalled.driver) or recalled.remote_controlled):
+			return _reject("Park the vehicle and step out before recalling it.")
+	if kind=="use_furniture":
+		if not is_inside():return _reject("Enter the room before using its furniture.")
+		var layout:=Rooms.furniture_layout(Plan.building(interior_id))
+		var id:=str(payload.get("id",""))
+		if not layout.has(id):return _reject("This furniture is unavailable.")
+		var item:=Furniture.world_item(layout[id],interior.global_position)
+		if not p.furniture_can_enter(item):
+			p._furniture_notice(p.furniture_last_error)
+			return _reject(p.furniture_last_error)
+		payload=payload.duplicate(true)
+		payload["heading"]=roundi(fposmod(p.rig.yaw_angle(),TAU)*1000.0)
+	if kind=="leave_furniture" and p.furniture_active():
+		var index:int=int(payload.get("target",0))
+		if index<0 or index>=p.furniture_data.exits.size():return _reject("Choose a standing space beside the furniture.")
+		if not p.furniture_can_leave(p.furniture_data.exits[index]):
+			p._furniture_notice(p.furniture_last_error)
+			return _reject(p.furniture_last_error)
 	if is_instance_valid(_network):
 		var result: Dictionary = _network.request(kind, payload)
 		if result.get("pending", false):
@@ -149,7 +214,9 @@ func request_action(kind: String, payload: Dictionary = {}) -> Dictionary:
 			return _reject("Walk back to your cupboard or bed first.")
 	var result: Dictionary
 	var checkpoint: Dictionary = frontier.simulation.state.duplicate(true)
-	if kind in ["enter", "exit", "transit"]:
+	if kind in ["use_furniture","leave_furniture"]:
+		result = _offline_furniture(kind,payload)
+	elif kind in ["enter", "exit", "transit"]:
 		result = _offline_transition(kind, payload)
 	else:
 		var at: Vector3 = p.global_position
@@ -157,8 +224,9 @@ func request_action(kind: String, payload: Dictionary = {}) -> Dictionary:
 				or str(payload.get("building", payload.get("property", payload.get("id", "")))) == interior_id):
 			var translated := NetworkScript.room_action_position(Plan.building(interior_id), at, kind)
 			if translated != Vector3.INF: at = translated
-		result = frontier.simulation.city_action(kind, payload, at)
-	if result.get("ok", false) and kind not in ["enter", "exit"] and frontier.persistence_enabled:
+		var context:Dictionary=civil.life_context(str(payload.get("building",""))) if kind.begins_with("life_") else {}
+		result = frontier.simulation.city_action(kind, payload, at,-1.0,context)
+	if result.get("ok", false) and kind not in ["enter", "exit", "use_furniture", "leave_furniture"] and frontier.persistence_enabled:
 		if not frontier.save_progress():
 			frontier.simulation.state = checkpoint
 			result = {"ok": false, "message": "Could not save. Nothing was charged or transferred."}
@@ -171,6 +239,9 @@ func _reject(message: String) -> Dictionary:
 	return {"ok": false, "message": message}
 
 func enter_building(id: String) -> void:
+	if is_instance_valid(world.city_disasters) and world.city_disasters.building_closed(id):
+		_reject("Emergency reconstruction in progress. This building reopens tomorrow morning.")
+		return
 	request_action("enter", {"id": id})
 
 func exit_building() -> void:
@@ -206,11 +277,26 @@ func _on_result(serial: int, kind: String, result: Dictionary) -> void:
 	if result.has("view"): _view_clock_msec = Time.get_ticks_msec()
 	if serial == _pending: _pending = 0
 	if not str(result.get("message", "")).is_empty(): last_message = str(result.message)
+	if kind == "leave_furniture": world.local_player.furniture_leave_pending = false
 	if result.get("ok", false):
-		if result.has("enter"): _enter_room(str(result.enter))
+		if result.has("heal_to"):world.local_player.heal(maxf(0,float(result.heal_to)-world.local_player.health))
+		if result.get("furniture") is Dictionary:
+			panel.close()
+			if not world.local_player.begin_furniture(result.furniture):
+				if is_instance_valid(_network):_network.request("cancel_furniture",{})
+				last_message=world.local_player.furniture_last_error
+		elif result.get("furniture_exit") is Vector3:
+			world.local_player.rise_from_furniture(result.furniture_exit,result.get("motion_path",[]))
+		elif result.has("enter"): _enter_room(str(result.enter))
 		elif result.get("destination") is Vector3:
 			_leave_room()
 			_teleport(result.destination)
+	if result.get("ok",false) and result.get("vehicle") is Dictionary and not is_instance_valid(_network):
+		var delivered: Dictionary = result.vehicle
+		var at := Vector3(delivered.position[0],delivered.position[1],delivered.position[2])
+		var vehicle: Vehicle = world.spawn_vehicle(Vehicle.Kind.JEEP,str(delivered.id),at,float(delivered.yaw))
+		vehicle.settle_at(at,float(delivered.yaw))
+		waypoint = {"position":at,"label":"Your "+str(delivered.model).replace("_"," ")}
 	frontier.backpack_changed.emit()
 	if panel.visible: panel.refresh_view()
 
@@ -224,6 +310,16 @@ func _enter_room(id: String) -> void:
 	world.add_child(interior)
 	interior.build(building)
 	interior.global_position = NetworkScript.interior_origin(building)
+	world.local_player.rig.furnished_room=true
+	if str(building.get("housing", "")) == "penthouse":
+		penthouse_view = PenthouseViewScript.new()
+		interior.add_child(penthouse_view)
+		penthouse_view.build(building,city_world)
+		city_world.set_penthouse_host(id,interior.global_position.y)
+	if not world.local_player.furniture_leave_requested.is_connected(_request_furniture_leave):
+		world.local_player.furniture_leave_requested.connect(_request_furniture_leave)
+	if not world.local_player.furniture_blocked.is_connected(_on_furniture_blocked):
+		world.local_player.furniture_blocked.connect(_on_furniture_blocked)
 	if world.local_player.cam:
 		_room_saved_view = world.local_player.cam.preferred_view_mode
 		world.local_player.cam.set_first_person(true)
@@ -231,32 +327,90 @@ func _enter_room(id: String) -> void:
 		world.local_player.cam.pitch = 0.0
 		_room_camera = world.local_player.cam._cam
 		_room_saved_environment = _room_camera.environment
-		var room_environment := Environment.new()
-		room_environment.background_mode = Environment.BG_COLOR
-		room_environment.background_color = Color("29282a")
-		room_environment.ambient_light_source = Environment.AMBIENT_SOURCE_COLOR
-		room_environment.ambient_light_color = Color("fff0d9")
-		room_environment.ambient_light_energy = 0.45
-		# Outdoor height fog becomes opaque at the isolated room's elevation.
-		# A camera override keeps private rooms clear without mutating Earth/Moon.
-		room_environment.fog_enabled = false
-		room_environment.volumetric_fog_enabled = false
-		_room_camera.environment = room_environment
+		_room_saved_far = _room_camera.far
+		if is_instance_valid(penthouse_view):
+			# Inherit Earth's actual sky, sun, atmosphere and exposure. The view
+			# contains the same CityWorld instances visible from the street.
+			_room_camera.far = maxf(_room_camera.far,12000.0)
+		else:
+			var room_environment := Environment.new()
+			room_environment.background_mode = Environment.BG_COLOR
+			room_environment.background_color = Color("29282a")
+			room_environment.ambient_light_source = Environment.AMBIENT_SOURCE_COLOR
+			room_environment.ambient_light_color = Color("fff0d9")
+			room_environment.ambient_light_energy = 0.45
+			room_environment.fog_enabled = false
+			room_environment.volumetric_fog_enabled = false
+			_room_camera.environment = room_environment
+	_update_room_lighting()
 	if world.seasonal_weather: world.seasonal_weather.set_atmosphere_enabled(false)
 	_teleport(interior.to_global(interior.spawn_point()))
 
 func _leave_room() -> void:
-	if is_instance_valid(_room_camera): _room_camera.environment = _room_saved_environment
+	if is_instance_valid(world.local_player):
+		world.local_player.cancel_furniture()
+		if world.local_player is MonkeyPlayer:world.local_player.rig.furnished_room=false
+	if is_instance_valid(city_world): city_world.set_penthouse_host("",0.0)
+	if is_instance_valid(_room_camera):
+		_room_camera.environment = _room_saved_environment
+		if _room_saved_far > 0.0: _room_camera.far = _room_saved_far
 	_room_camera = null
 	_room_saved_environment = null
-	if _room_saved_view >= 0 and is_instance_valid(world.local_player) and world.local_player.cam:
+	_room_saved_far = 0.0
+	if _room_saved_view >= 0 and is_instance_valid(world.local_player) and is_instance_valid(world.local_player.cam):
 		world.local_player.cam.set_view_mode(_room_saved_view)
 	_room_saved_view = -1
-	if is_instance_valid(interior): interior.queue_free()
+	if is_instance_valid(interior):
+		# The departing room must disappear before its tower roof is restored.
+		interior.visible = false
+		interior.queue_free()
 	interior = null
+	penthouse_view = null
 	interior_id = ""
-	if world.seasonal_weather:
+	if is_instance_valid(world.seasonal_weather):
 		world.seasonal_weather.set_atmosphere_enabled(world._earth_streaming_enabled)
+
+func _update_room_lighting() -> void:
+	if not is_instance_valid(interior): return
+	var hour_value: Variant = world.get("time_of_day_hours")
+	var daylight_value: Variant = world.get("daylight_amount")
+	var hour := float(hour_value) if hour_value != null else 12.0
+	var daylight := clampf(float(daylight_value),0.0,1.0) if daylight_value != null else 1.0
+	if is_instance_valid(penthouse_view): penthouse_view.update_time(hour,daylight)
+	interior.update_time(hour,daylight)
+
+func _offline_furniture(kind: String, payload: Dictionary) -> Dictionary:
+	if not is_inside(): return _reject("Enter the room before using its furniture.")
+	var p: MonkeyPlayer = world.local_player
+	if kind == "leave_furniture":
+		if not p.furniture_active(): return _reject("You are already standing.")
+		var index: int = int(payload.get("target",0))
+		if index < 0 or index >= p.furniture_data.exits.size(): return _reject("Choose a clear place beside the furniture.")
+		var destination: Vector3 = p.furniture_data.exits[index]
+		if not p.can_stand_at(destination): return _reject("The space beside you is blocked. Try again when it is clear.")
+		return {"ok":true,"message":"Standing up.","furniture_exit":destination}
+	if p.furniture_active(): return _reject("Stand up before using another seat.")
+	var layout := Rooms.furniture_layout(Plan.building(interior_id))
+	var id := str(payload.get("id",""))
+	if not layout.has(id): return _reject("This furniture is unavailable.")
+	var item := Furniture.world_item(layout[id],interior.global_position)
+	if p.global_position.distance_to(item.position) > Furniture.REACH: return _reject("Walk beside the chair, sofa or bed first.")
+	return {"ok":true,"message":"E or movement to stand up.","furniture":item}
+
+func _on_furniture_blocked(message:String)->void:
+	last_message=message
+	if panel.visible:panel.refresh_view()
+
+func _request_furniture_leave() -> void:
+	var p: MonkeyPlayer = world.local_player
+	if not p.furniture_active(): return
+	for index in range(p.furniture_data.exits.size()):
+		if p.can_stand_at(p.furniture_data.exits[index]):
+			var result := request_action("leave_furniture",{"target":index})
+			if not result.get("pending",false): p.furniture_leave_pending = false
+			return
+	p.furniture_leave_pending = false
+	_reject("The space beside you is blocked. Try again when it is clear.")
 
 func _teleport(destination: Vector3) -> void:
 	panel.close()
@@ -332,7 +486,11 @@ func is_in_city() -> bool:
 
 func _exit_tree() -> void:
 	if is_instance_valid(world) and is_instance_valid(world.local_player):
+		_leave_room()
 		world.local_player.arrival_locked = false
+	elif is_instance_valid(interior):
+		interior.visible = false
+		interior.queue_free()
 	Visuals.set_city_enabled(false)
 
 func _update_parcel() -> void:
@@ -383,7 +541,7 @@ func _process(delta: float) -> void:
 	_refresh -= delta
 	_retry -= delta
 	_inspect_clock -= delta
-	if panel.visible and is_instance_valid(_network) and _pending == 0 and _inspect_clock <= 0.0:
+	if (panel.visible or is_in_city() or is_inside()) and is_instance_valid(_network) and _pending == 0 and _inspect_clock <= 0.0:
 		_network.request("inspect")
 		_inspect_clock = 5.0
 	if _pending != 0 and _retry <= 0.0 and Net.active:
@@ -391,6 +549,8 @@ func _process(delta: float) -> void:
 		_retry = 3.0
 	if _refresh <= 0.0:
 		_refresh = 0.5
+		_update_room_lighting()
+		crowd.set_district_services(city_view().get("districts",[]))
 		if world.seasonal_weather:
 			var weather_enabled: bool = world._earth_streaming_enabled and not is_inside()
 			if world.seasonal_weather.atmosphere_enabled() != weather_enabled:
@@ -402,6 +562,9 @@ func _process(delta: float) -> void:
 		if arrival_pending():
 			_label.position = Vector2(24, get_viewport().get_visible_rect().size.y - 220)
 			_label.text = "Arriving… preparing the ground beneath you."
+		elif is_inside() and city_world.far_staged_block_count() < Plan.TOTAL_BLOCKS:
+			_label.position = Vector2(24, get_viewport().get_visible_rect().size.y - 220)
+			_label.text = "Preparing the distant city view… %d%%" % roundi(100.0 * float(city_world.far_staged_block_count()) / float(Plan.TOTAL_BLOCKS))
 		elif not waypoint.is_empty():
 			var destination: Vector3 = waypoint.position
 			var distance: float = world.local_player.global_position.distance_to(destination)

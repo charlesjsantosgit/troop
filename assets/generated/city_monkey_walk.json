@@ -1,0 +1,22 @@
+{
+	"atlas_sha256": "1898f16b9c9f25935a6806f32c9f48484ad613b881b1bb63dd740e0900642032",
+	"directions": 8,
+	"elevations": [
+		10,
+		45,
+		75
+	],
+	"frames": 4,
+	"model_report": {
+		"body_meshes": 55,
+		"height": 1.7018,
+		"source": "MonkeyRig",
+		"surface_count": 5,
+		"vertices": 6534
+	},
+	"pose_sha256": "bbf6d09ec0d26341fa428ea1b79dd344e6103d966f0e6c600e233942e530a371",
+	"source": "res://scripts/monkey_rig.gd",
+	"source_sha256": "e3bf90ef7ebcc46f7946d75db1bed3067c7e882a754fa51424b53ee4af601ec8",
+	"standing_height": 1.7018,
+	"tile_pixels": 96
+}

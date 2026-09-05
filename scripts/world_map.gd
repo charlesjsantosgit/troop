@@ -1,12 +1,13 @@
 class_name WorldMap
 extends Control
-## Windowed, spherical world atlas. Close local zooms reuse the same analytic
-## Gen fields as the terrain instead of a second camera; distant zooms use
-## imported 4K equirectangular atlases wrapped onto interactive globes. Local
-## tile baking remains incremental and keeps a strict per-frame sampling budget.
-## A transparent satellite micro-detail plate gives every new tile crisp natural
-## texture immediately while the low-frequency live terrain mask refines.
-
+## Seeded cartographic atlas of the playable terrain. A private worker samples
+## the same Earth generator and lunar collision triangles; canvas vectors retain
+## sharp roads, footprints and labels at every zoom. No photographic atlas is
+## used as navigation data.
+const Cartography = preload("res://scripts/cartography_source.gd")
+const Plan = preload("res://scripts/city_plan.gd")
+const Towns = preload("res://scripts/frontier_town_layout.gd")
+const Highways = preload("res://scripts/highway_plan.gd")
 const MenuTheme = preload("res://scripts/menu_theme.gd")
 
 signal opened
@@ -17,22 +18,18 @@ enum CelestialBody { EARTH, MOON }
 
 const EARTH_CIRCUMFERENCE_FALLBACK := 40_075_016.686
 const MOON_CIRCUMFERENCE_M := 10_921_000.0
-const TILE_PX := 320
-const TILE_METERS_PER_PX := [2.0, 8.0, 32.0, 128.0, 512.0, 2048.0,
-	8192.0]
+const TILE_PX := 128
+const TILE_METERS_PER_PX := [0.5, 1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0, 256.0, 512.0, 1024.0, 2048.0, 4096.0, 8192.0, 16384.0]
 const CACHE_TILE_LIMIT := 64
 const LOCAL_BAKE_SAMPLES_PER_FRAME := 64
 const LOCAL_SAMPLES_PER_TILE_TURN := 12
-# Kept as a compatibility diagnostic: imported atlases perform zero runtime
-# terrain samples, so the actual value reported each frame is always zero.
+# The canvas thread does no terrain sampling; worker publication is bounded.
 const GLOBE_BAKE_SAMPLES_PER_FRAME := 64
 const BAKE_TIME_BUDGET_USEC := 1800
-# Thirty-two live samples across a 320 px tile preserve coast, biome, height and
-# road silhouettes. Fine satellite texture comes from the shared overlay below,
-# avoiding the old 34,284 expensive Gen samples per tile.
-const LOCAL_PREVIEW_GRIDS := [2, 4, 8, 16, 32]
-const GLOBE_ATLAS_SIZE := Vector2i(4096, 2048)
-const MOON_ATLAS_SIZE := Vector2i(4096, 2048)
+# Each tile reaches one shared-generator sample per texture pixel.
+const LOCAL_PREVIEW_GRIDS := [4, 8, 16, 32, 64, 128]
+const GLOBE_ATLAS_SIZE := Vector2i(1025, 513)
+const MOON_ATLAS_SIZE := Vector2i(1025, 513)
 const GLOBE_LONGITUDE_STEPS := 96
 const GLOBE_LATITUDE_STEPS := 48
 static var EARTH_ATLAS: Texture2D:
@@ -45,9 +42,9 @@ static var SATELLITE_DETAIL_OVERLAY: Texture2D:
 	get:
 		return SharedTextureCache.get_texture(SharedTextureCache.MICRODETAIL_PATH)
 const MOON_LIGHT_SCREEN := Vector3(-0.42, -0.30, 0.855)
-const MIN_VIEW_SPAN_M := 320.0
-const GLOBE_BLEND_START_FRACTION := 0.075
-const GLOBE_FULL_FRACTION := 0.18
+const MIN_VIEW_SPAN_M := 120.0
+const GLOBE_BLEND_START_FRACTION := 0.20
+const GLOBE_FULL_FRACTION := 0.42
 const MAX_VIEW_SPAN_FRACTION := 1.08
 const HEADER_H := 72.0
 const FOOTER_H := 68.0
@@ -56,11 +53,27 @@ const ZOOM_RESPONSE := 12.0
 const PAN_RESPONSE := 14.0
 const HOVER_SAMPLE_SECONDS := 0.12
 const PLAYER_MARKER_WORLD_LENGTH := 90.0
-# The playable 768 m lunar landing zone is presented as a readable patch on the
-# near side of the selected Moon. This is a display projection only: marker
-# membership still comes exclusively from Net's authority-replicated realm.
-const MOON_MARKER_PATCH_ANGULAR_EXTENT := 0.42
 
+var _worker := Thread.new()
+var _cartography := Cartography.new()
+var _worker_job: Dictionary = {}
+var _context_signature := ""
+var _moon_probe: MoonWorld
+var _atlas_levels := [0, 0]
+var _atlas_stages := [32, 64, 128, 256, 512, 1024]
+var _body_views: Dictionary = {}
+var _last_worker_samples := 0
+var _source_cache_stats: Dictionary = {}
+var _last_publish_usec := 0
+var _last_update_usec := 0
+var _last_draw_usec := 0
+var _landmark_cache: Array[Dictionary] = []
+var _landmark_timer := 0.0
+var _outline_blocks: Dictionary = {}
+var _source_roads: Array = []
+var _footprint_view_bounds := Rect2(Vector2.INF, Vector2.ZERO)
+var _footprint_view: Array[Dictionary] = []
+var _label_rects: Array[Rect2] = []
 var world: Node3D
 var selected_body := CelestialBody.EARTH
 var _open := false
@@ -93,11 +106,8 @@ var _last_baked_samples := 0
 var _last_local_texture_uploads := 0
 var _baked_seed := -1
 var _active_tier := 0
-var _satellite_detail_image: Image
 
-# Both globe atlases are imported once and shared through Godot's resource
-# cache. They never invoke Gen or allocate/copy an 8.4-million-pixel Image at
-# runtime; only the nearby analytic terrain tiles use the bounded CPU baker.
+# Each body has its own progressively refined seeded surface atlas.
 var _globe_texture: Texture2D
 var _globe_stage := 0
 var _globe_sample_cursor := 0
@@ -129,8 +139,8 @@ func _ready() -> void:
 
 func _resize_panel() -> void:
 	var viewport := get_viewport_rect().size
-	size = Vector2(minf(900.0, viewport.x * 0.88), minf(600.0, viewport.y * 0.82))
-	position = (viewport - size) * 0.5
+	size = Vector2(minf(1380.0, viewport.x * .94), minf(920.0, viewport.y * .9))
+	position = (viewport - size) * .5
 	queue_redraw()
 
 
@@ -147,12 +157,12 @@ func open_map() -> void:
 	set_process_input(true)
 	_mouse_was_captured = Input.mouse_mode == Input.MOUSE_MODE_CAPTURED
 	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
+	_sync_seed()
 	if world and world.get("local_player"):
-		var p: Node3D = world.get("local_player")
-		_center = Vector2(p.global_position.x, p.global_position.z)
-		_target_center = _center
+		recenter_on_player()
+		_center = _target_center
 	_target_span_m = clampf(_target_span_m, MIN_VIEW_SPAN_M,
-		planet_circumference_m() * MAX_VIEW_SPAN_FRACTION)
+		body_circumference() * MAX_VIEW_SPAN_FRACTION)
 	_view_span_m = _target_span_m
 	grab_focus()
 	queue_redraw()
@@ -163,6 +173,7 @@ func close_map() -> void:
 	if not _open:
 		return
 	_open = false
+	_cartography.cancelled = true
 	_dragging = false
 	visible = false
 	set_process(false)
@@ -180,59 +191,42 @@ func toggle() -> void:
 
 
 func focus_earth() -> void:
-	selected_body = CelestialBody.EARTH
-	body_selected.emit(selected_body)
-	queue_redraw()
+	_select_body(CelestialBody.EARTH)
 
 
 func focus_moon() -> void:
-	# Resolve the shared imported atlas before the first destination frame.
-	_sync_seed()
-	_ensure_moon_atlas()
-	selected_body = CelestialBody.MOON
-	_target_span_m = maxf(_target_span_m,
-		planet_circumference_m() * GLOBE_FULL_FRACTION)
-	body_selected.emit(selected_body)
-	queue_redraw()
+	_select_body(CelestialBody.MOON)
 
 
 func recenter_on_player() -> void:
-	if not world or not world.get("local_player"):
-		return
+	if not world or not world.get("local_player"): return
+	var realm := Net.player_realm()
+	_select_body(CelestialBody.MOON if realm == Net.PlayerRealm.MOON else CelestialBody.EARTH)
 	var p: Node3D = world.get("local_player")
-	var destination := Vector2(p.global_position.x, p.global_position.z)
-	# Select the equivalent unwrapped representation closest to the current
-	# centre. Recentring near the date line therefore glides instead of jumping.
-	_target_center = nearest_equivalent_xz(destination, _center,
-		planet_circumference_m())
-	selected_body = CelestialBody.EARTH
+	_target_center = nearest_equivalent_xz(coordinates_for_position(p.global_position, selected_body),
+		_center, body_circumference())
 
 
 func _process(dt: float) -> void:
-	if not _open:
-		return
+	if not _open: return
+	var update_started := Time.get_ticks_usec()
 	_sync_seed()
-	var circumference := planet_circumference_m()
-	_target_span_m = clampf(_target_span_m, MIN_VIEW_SPAN_M,
-		circumference * MAX_VIEW_SPAN_FRACTION)
-	var pan_weight := 1.0 - exp(-PAN_RESPONSE * dt)
-	_center = _center.lerp(_target_center, pan_weight)
-	var zoom_weight := 1.0 - exp(-ZOOM_RESPONSE * dt)
-	_view_span_m = exp(lerpf(log(maxf(_view_span_m, 1.0)),
-		log(maxf(_target_span_m, 1.0)), zoom_weight))
+	_target_span_m = clampf(_target_span_m, MIN_VIEW_SPAN_M, body_circumference() * MAX_VIEW_SPAN_FRACTION)
+	_center = _center.lerp(_target_center, 1.0 - exp(-PAN_RESPONSE * dt))
+	_view_span_m = exp(lerpf(log(maxf(_view_span_m, 1.0)), log(maxf(_target_span_m, 1.0)), 1.0 - exp(-ZOOM_RESPONSE * dt)))
 	_keyboard_pan(dt)
-	var globe_amount := globe_blend()
 	_last_baked_samples = 0
 	_last_globe_baked_samples = 0
-	if selected_body == CelestialBody.EARTH and globe_amount < 0.995:
-		_request_visible_tiles()
-		_bake_local_samples(LOCAL_BAKE_SAMPLES_PER_FRAME)
-	if globe_amount > 0.0 or selected_body == CelestialBody.MOON:
-		_bake_globe_samples(GLOBE_BAKE_SAMPLES_PER_FRAME)
-	if selected_body == CelestialBody.MOON or globe_amount > 0.0:
-		_ensure_moon_atlas()
+	_last_local_texture_uploads = 0
+	if globe_blend() < .995: _request_visible_tiles()
+	_pump_worker()
+	_landmark_timer -= dt
+	if _landmark_timer <= 0.0:
+		_landmark_cache = landmark_snapshot()
+		_landmark_timer = .5
 	_update_hover(dt)
 	queue_redraw()
+	_last_update_usec = Time.get_ticks_usec() - update_started
 
 
 func _keyboard_pan(dt: float) -> void:
@@ -303,17 +297,11 @@ func _handle_click(point: Vector2) -> bool:
 
 
 func zoom_at(screen_point: Vector2, factor: float) -> void:
-	if selected_body == CelestialBody.MOON and factor < 1.0:
-		# Moon surface mapping is a future mission layer; keep this release on its
-		# honest globe view rather than presenting invented local coordinates.
-		return
 	var rect := map_rect()
 	var old_span := _target_span_m
-	var maximum := planet_circumference_m() * MAX_VIEW_SPAN_FRACTION
-	var new_span := clampf(old_span * factor, MIN_VIEW_SPAN_M, maximum)
-	if selected_body == CelestialBody.EARTH and rect.has_point(screen_point):
-		_target_center = zoom_anchored_center(_target_center, screen_point,
-			rect, old_span, new_span)
+	var new_span := clampf(old_span * factor, MIN_VIEW_SPAN_M, body_circumference() * MAX_VIEW_SPAN_FRACTION)
+	if rect.has_point(screen_point):
+		_target_center = zoom_anchored_center(_target_center, screen_point, rect, old_span, new_span)
 	_target_span_m = new_span
 
 
@@ -324,9 +312,10 @@ func map_rect() -> Rect2:
 
 
 func globe_blend() -> float:
-	var circumference := planet_circumference_m()
-	return smoothstep(circumference * GLOBE_BLEND_START_FRACTION,
-		circumference * GLOBE_FULL_FRACTION, _view_span_m)
+	var circumference := body_circumference()
+	var start := .34 if selected_body == CelestialBody.MOON else GLOBE_BLEND_START_FRACTION
+	var full := .58 if selected_body == CelestialBody.MOON else GLOBE_FULL_FRACTION
+	return smoothstep(circumference * start, circumference * full, _view_span_m)
 
 
 ## Alpha pair for the planar-to-orbital transition: x is local terrain and y
@@ -357,20 +346,7 @@ static func _with_alpha(color: Color, alpha: float) -> Color:
 
 
 static func planet_circumference_m() -> float:
-	var script: Script = Gen.get_script()
-	if script:
-		var constants: Dictionary = script.get_script_constant_map()
-		for key in ["PLANET_CIRCUMFERENCE_M", "PLANET_CIRCUMFERENCE",
-				"WORLD_CIRCUMFERENCE_M"]:
-			if constants.has(key):
-				var value := float(constants[key])
-				if value > 1000.0:
-					return value
-	if Gen.has_method("planet_circumference_m"):
-		var queried := float(Gen.call("planet_circumference_m"))
-		if queried > 1000.0:
-			return queried
-	return EARTH_CIRCUMFERENCE_FALLBACK
+	return Gen.PLANET_CIRCUMFERENCE
 
 
 ## Canonical equirectangular coordinates for a sphere. Longitude wraps. Passing
@@ -411,20 +387,17 @@ static func nearest_equivalent_xz(point: Vector2, reference: Vector2,
 		circumference := EARTH_CIRCUMFERENCE_FALLBACK) -> Vector2:
 	var c := maxf(float(circumference), 1.0)
 	var p := canonical_planet_xz(point, c)
-	var candidates: Array[Vector2] = []
-	for longitude_copy in range(-1, 2):
-		candidates.append(Vector2(p.x + float(longitude_copy) * c, p.y))
-		candidates.append(Vector2(p.x + c * 0.5 + float(longitude_copy) * c,
-			c * 0.5 - p.y))
-		candidates.append(Vector2(p.x + c * 0.5 + float(longitude_copy) * c,
-			-c * 0.5 - p.y))
-	var best := candidates[0]
-	var best_distance := best.distance_squared_to(reference)
-	for candidate in candidates:
-		var distance := candidate.distance_squared_to(reference)
-		if distance < best_distance:
-			best = candidate
-			best_distance = distance
+	var best := p
+	var best_distance := INF
+	for origin in [p, Vector2(p.x + c * .5, c * .5 - p.y)]:
+		var cycle := Vector2i(roundi((reference.x - origin.x) / c), roundi((reference.y - origin.y) / c))
+		for dx in range(cycle.x - 1, cycle.x + 2):
+			for dz in range(cycle.y - 1, cycle.y + 2):
+				var candidate: Vector2 = origin + Vector2(dx, dz) * c
+				var distance := candidate.distance_squared_to(reference)
+				if distance < best_distance:
+					best = candidate
+					best_distance = distance
 	return best
 
 
@@ -468,22 +441,11 @@ static func realm_visible_on_body(realm: int, body: int) -> bool:
 		or (body == CelestialBody.MOON and realm == Net.PlayerRealm.MOON)
 
 
-## Project the bounded playable landing zone around the currently displayed
-## lunar hemisphere. Positive world Z remains down-screen, matching the local
-## Earth atlas, so the same yaw arrow remains truthful in either realm.
+## Local lunar points project from their true radial direction; rotating the
+## globe cannot change the location of a landmark.
 static func moon_marker_lon_lat(position: Vector3,
-		view_lon_lat := Vector2.ZERO) -> Vector2:
-	var half_extent := maxf(float(MoonWorld.TERRAIN_HALF_EXTENT), 1.0)
-	var normalized_x := clampf(position.x / half_extent, -1.0, 1.0)
-	var normalized_z := clampf(position.z / half_extent, -1.0, 1.0)
-	var latitude := clampf(view_lon_lat.y \
-		- normalized_z * MOON_MARKER_PATCH_ANGULAR_EXTENT,
-		-PI * 0.5 + 0.001, PI * 0.5 - 0.001)
-	var longitude_scale := maxf(cos(view_lon_lat.y), 0.35)
-	var longitude := wrapf(view_lon_lat.x \
-		+ normalized_x * MOON_MARKER_PATCH_ANGULAR_EXTENT / longitude_scale,
-		-PI, PI)
-	return Vector2(longitude, latitude)
+		_view_lon_lat := Vector2.ZERO) -> Vector2:
+	return Cartography.lunar_coordinate(position - MoonWorld.PLAYABLE_CENTER) / MoonWorld.PLAYABLE_RADIUS_METERS
 
 
 static func moon_marker_projection(position: Vector3, yaw: float,
@@ -521,10 +483,10 @@ static func required_tile_keys(center: Vector2, rect_size: Vector2,
 	var mpp := maxf(view_span / maxf(rect_size.x, 1.0), 0.001)
 	var half_world := rect_size * mpp * 0.5
 	var tile_world := float(TILE_METERS_PER_PX[tier]) * TILE_PX
-	var min_key := Vector2i(floori((center.x - half_world.x) / tile_world) - 1,
-		floori((center.y - half_world.y) / tile_world) - 1)
-	var max_key := Vector2i(floori((center.x + half_world.x) / tile_world) + 1,
-		floori((center.y + half_world.y) / tile_world) + 1)
+	var min_key := Vector2i(floori((center.x - half_world.x) / tile_world),
+		floori((center.y - half_world.y) / tile_world))
+	var max_key := Vector2i(floori((center.x + half_world.x) / tile_world),
+		floori((center.y + half_world.y) / tile_world))
 	var keys: Array[Vector2i] = []
 	for tx in range(min_key.x, max_key.x + 1):
 		for tz in range(min_key.y, max_key.y + 1):
@@ -619,202 +581,37 @@ func _canonical_sample_xz(point: Vector2) -> Vector2:
 	return canonical_planet_xz(point, planet_circumference_m())
 
 
-func _map_sample(point: Vector2, meters_per_pixel: float) -> Dictionary:
-	var canonical := _canonical_sample_xz(point)
-	if Gen.has_method("map_sample"):
-		var generated: Variant = Gen.call("map_sample", canonical.x, canonical.y,
-			meters_per_pixel)
-		if generated is Dictionary and generated.has("color"):
-			return generated
-	# PlanetTerrain exposes value-only companions so a map pixel can reuse one
-	# macro sample for height and biome. This avoids the several repeated 3D
-	# noise evaluations in the ordinary gameplay convenience functions.
-	if Gen.has_method("planet_terrain_sample") \
-			and Gen.has_method("planet_height_from_sample") \
-			and Gen.has_method("planet_biome_from_sample"):
-		var macro: Dictionary = Gen.call("planet_terrain_sample", canonical.x,
-			canonical.y)
-		var sampled_elevation := float(Gen.call("planet_height_from_sample", macro))
-		var sampled_biome := int(Gen.call("planet_biome_from_sample", macro,
-			sampled_elevation))
-		var road_sample: Dictionary = Gen.call("road_surface_sample", canonical.x,
-			canonical.y) if Gen.has_method("road_surface_sample") else {}
-		var road_strength := float(road_sample.get("grade", 0.0))
-		var sampled_water := sampled_elevation < Gen.WATER_Y \
-			or sampled_biome in [Gen.Biome.OCEAN, Gen.Biome.LAKE]
-		var sampled_color := _map_ground_palette(sampled_elevation,
-			sampled_biome, macro, road_sample)
-		var sampled_canopy := _map_tree_cover(sampled_elevation, sampled_biome,
-			road_strength)
-		return {
-			"color": sampled_color,
-			"elevation": sampled_elevation,
-			"water": sampled_water,
-			"road": road_strength,
-			"tree_cover": sampled_canopy,
-			"biome": sampled_biome,
-		}
-	var elevation := Gen.height(canonical.x, canonical.y)
-	var water := elevation < Gen.WATER_Y
-	var color: Color
-	if water:
-		var depth := clampf((Gen.WATER_Y - elevation) / 120.0, 0.0, 1.0)
-		color = Color("287fa9").lerp(Color("082d58"), depth)
-	else:
-		color = Gen.ground_color(elevation, canonical.x, canonical.y)
-	var road := float(Gen.road_grade(canonical.x, canonical.y)) \
-		if Gen.has_method("road_grade") else 0.0
-	var tree_cover := float(Gen.canopy_cover(elevation, canonical.x,
-		canonical.y)) if Gen.has_method("canopy_cover") else 0.0
-	return {
-		"color": color,
-		"elevation": elevation,
-		"water": water,
-		"road": road,
-		"tree_cover": tree_cover,
-		"biome": Gen.biome_at_height(canonical.x, canonical.y, elevation)
-			if Gen.has_method("biome_at_height") else -1,
-	}
-
-
-func _map_ground_palette(elevation: float, biome: int, macro: Dictionary,
-		road_sample: Dictionary) -> Color:
-	var detail := float(macro.get("detail", 0.0))
-	if elevation < Gen.WATER_Y or biome in [Gen.Biome.OCEAN, Gen.Biome.LAKE]:
-		var depth := clampf((Gen.WATER_Y - elevation) / 360.0, 0.0, 1.0)
-		var water := Color("247fa8").lerp(Color("082b58"), depth * 0.88)
-		if biome == Gen.Biome.LAKE:
-			water = water.lerp(Color("3191a8"), 0.30)
-		return water
-	var low := Color(0.085, 0.26, 0.08)
-	var high := Color(0.035, 0.155, 0.06)
-	match biome:
-		Gen.Biome.BAMBOO_GROVE:
-			low = Color(0.14, 0.30, 0.075)
-			high = Color(0.065, 0.19, 0.05)
-		Gen.Biome.WETLAND:
-			low = Color(0.095, 0.225, 0.09)
-			high = Color(0.045, 0.14, 0.08)
-		Gen.Biome.HIGHLAND:
-			low = Color(0.075, 0.215, 0.10)
-			high = Color(0.035, 0.13, 0.085)
-		Gen.Biome.PLAINS:
-			low = Color(0.34, 0.43, 0.13)
-			high = Color(0.21, 0.31, 0.105)
-		Gen.Biome.GRASSLAND:
-			low = Color(0.23, 0.42, 0.10)
-			high = Color(0.12, 0.29, 0.075)
-		Gen.Biome.ROCKY_MOUNTAINS:
-			low = Color(0.30, 0.285, 0.25)
-			high = Color(0.42, 0.405, 0.38)
-		Gen.Biome.DESERT:
-			low = Color(0.67, 0.46, 0.22)
-			high = Color(0.53, 0.34, 0.17)
-		Gen.Biome.TUNDRA:
-			low = Color(0.37, 0.40, 0.29)
-			high = Color(0.27, 0.31, 0.27)
-		Gen.Biome.ICE:
-			low = Color(0.73, 0.81, 0.85)
-			high = Color(0.88, 0.92, 0.94)
-	var altitude_mix := clampf((elevation - 5.0) / 850.0, 0.0, 1.0)
-	var color := low.lerp(high, altitude_mix)
-	var rock := smoothstep(float(Gen.TREE_LINE) * 0.7,
-		float(Gen.SNOW_LINE_START), elevation)
-	color = color.lerp(Color(0.31, 0.28, 0.245), rock)
-	var snow := smoothstep(float(Gen.SNOW_LINE_START),
-		float(Gen.SNOW_LINE_FULL), elevation)
-	color = color.lerp(Color(0.84, 0.88, 0.92), snow)
-	var road := float(road_sample.get("grade", 0.0))
-	if road > 0.12:
-		var dirt := Color(0.39 + detail * 0.01, 0.285, 0.16)
-		color = color.lerp(dirt, smoothstep(0.12, 0.78, road))
-	return Color(color.r + detail * 0.018, color.g + detail * 0.018,
-		color.b + detail * 0.018)
-
-
-func _map_tree_cover(elevation: float, biome: int,
-		road_strength: float) -> float:
-	if road_strength > 0.12 or elevation < Gen.WATER_Y + 0.5 \
-			or elevation > Gen.TREE_LINE:
-		return 0.0
-	var density := 0.0
-	match biome:
-		Gen.Biome.RAINFOREST: density = 0.95
-		Gen.Biome.BAMBOO_GROVE: density = 0.90
-		Gen.Biome.WETLAND: density = 0.72
-		Gen.Biome.HIGHLAND: density = 0.82
-		Gen.Biome.PLAINS: density = 0.20
-		Gen.Biome.GRASSLAND: density = 0.32
-		Gen.Biome.ROCKY_MOUNTAINS: density = 0.10
-		Gen.Biome.DESERT: density = 0.025
-		Gen.Biome.TUNDRA: density = 0.08
-	var shore := smoothstep(Gen.WATER_Y + 0.5, Gen.WATER_Y + 1.6, elevation)
-	var tree_line := 1.0 - smoothstep(Gen.TREE_LINE - 5.0,
-		Gen.TREE_LINE, elevation)
-	return shore * tree_line * density
-
-
-## Whole-planet pixels do not need centimetre-scale runway grading or literal
-## tree rolls. One coherent PlanetTerrain sample is enough to classify ocean,
-## lake, climate, ice and mountain bands, keeping diagnostic overview samples
-## cheaper and more truthful than repeating local decoration queries.
-func _planet_overview_sample(point: Vector2) -> Dictionary:
-	if not Gen.has_method("planet_terrain_sample"):
-		return _map_sample(point, planet_circumference_m() /
-			float(GLOBE_ATLAS_SIZE.x))
-	var canonical := _canonical_sample_xz(point)
-	var macro: Dictionary = Gen.call("planet_terrain_sample", canonical.x,
-		canonical.y)
-	var elevation := float(macro.get("elevation", 0.0))
-	var ocean := float(macro.get("ocean", 0.0))
-	var lake := float(macro.get("lake", 0.0))
-	var water := ocean > 0.50 or lake > 0.52 or elevation < Gen.WATER_Y
-	var color: Color
-	if water:
-		var ocean_depth := clampf((Gen.WATER_Y - elevation) / 360.0, 0.0, 1.0)
-		color = Color("287faa").lerp(Color("082b58"), ocean_depth * 0.86)
-		if lake > ocean:
-			color = color.lerp(Color("2f91ad"), 0.28)
-	else:
-		var temperature := float(macro.get("temperature", 0.55))
-		var moisture := float(macro.get("moisture", 0.50))
-		var latitude := float(macro.get("latitude_fraction", 0.0))
-		if latitude > 0.91 or temperature < 0.11:
-			color = Color("dcebf0")
-		elif temperature < 0.26:
-			color = Color("788c70")
-		elif temperature > 0.58 and moisture < 0.34:
-			color = Color("c79a55")
-		elif moisture > 0.67 and temperature > 0.48:
-			color = Color("195d31")
-		elif moisture < 0.46:
-			color = Color("7da052")
-		else:
-			color = Color("3f853e")
-		var rocky := smoothstep(700.0, 2500.0, elevation)
-		color = color.lerp(Color("76736c"), rocky * 0.88)
-		var snow := smoothstep(2800.0, 4300.0, elevation)
-		color = color.lerp(Color("e7eef3"), snow)
-	return {
-		"color": color,
-		"elevation": elevation,
-		"water": water,
-		"road": 0.0,
-		"tree_cover": 0.0,
-		"biome": -1,
-	}
+func _map_sample(point: Vector2, _meters_per_pixel: float) -> Dictionary:
+	if selected_body == CelestialBody.MOON:
+		var source := source_moon()
+		var elevation := source.surface_position(Cartography.lunar_direction(point)).distance_to(MoonWorld.PLAYABLE_CENTER) - MoonWorld.PLAYABLE_RADIUS_METERS
+		return {"elevation": elevation, "water": false, "color": Color("aaa79c"), "biome": -1}
+	var canonical := Gen.canonical_planet_xz(point)
+	var actual := Gen.terrain_vertex_sample(canonical.x, canonical.y)
+	actual.water = float(actual.elevation) < Gen.WATER_Y
+	if Gen.frontier_world and Plan.pond_depth(canonical) > Plan.GROUND_Y - Plan.POND_SURFACE_Y:
+		actual.water = true
+	actual.biome = Gen.biome_at_height(canonical.x, canonical.y, float(actual.elevation))
+	return actual
 
 
 func _sync_seed() -> void:
-	if Gen.world_seed == _baked_seed:
-		return
+	var source := source_moon()
+	var signature := "%d:%d:%s:%s" % [Gen.world_seed, source.moon_seed, Gen.frontier_world, Gen.debug_world]
+	if signature == _context_signature: return
+	_context_signature = signature
 	_baked_seed = Gen.world_seed
 	_tiles.clear()
 	_bake_queue.clear()
 	_required_keys.clear()
-	# Imported celestial atlases are seed-independent display resources. Keep
-	# their resource IDs and sphere meshes stable while only analytic local tiles
-	# are invalidated for the new deterministic world seed.
+	_outline_blocks.clear()
+	_footprint_view_bounds = Rect2(Vector2.INF, Vector2.ZERO)
+	_footprint_view.clear()
+	_source_roads = Gen.road_routes()
+	_atlas_levels = [0, 0]
+	_globe_texture = null
+	_moon_texture = null
+	_landmark_timer = 0.0
 
 
 func _request_visible_tiles() -> void:
@@ -835,50 +632,19 @@ func _request_visible_tiles() -> void:
 
 
 func _cache_key(tier: int, tile_key: Vector2i) -> String:
-	return "%d:%d:%d" % [tier, tile_key.x, tile_key.y]
+	return "%d:%d:%d:%d" % [selected_body, tier, tile_key.x, tile_key.y]
 
 
 func _create_tile(cache_key: String, tier: int, tile_key: Vector2i) -> void:
-	# RGBA matches the low-alpha satellite overlay, allowing native blend_rect
-	# calls with no per-sample format conversion.
-	var image := _initial_satellite_tile(tier, tile_key)
-	_tiles[cache_key] = {
-		"tier": tier,
-		"key": tile_key,
-		"image": image,
-		"texture": ImageTexture.create_from_image(image),
-		# The cheap shared-edge overview already supplies the 2x2 stage. Live
-		# refinement begins at 4x4 with roads, foliage and local terrain detail.
-		"stage": 1,
-		"sample_cursor": 0,
-		"stage_image": Image.create(LOCAL_PREVIEW_GRIDS[1] + 1,
-			LOCAL_PREVIEW_GRIDS[1] + 1, false, Image.FORMAT_RGBA8),
-		"stage_ready": false,
-		"pending_image": null,
-		"touch": _touch_serial,
-	}
+	var image := Image.create(2, 2, false, Image.FORMAT_RGBA8)
+	image.fill(Color("657781") if selected_body == CelestialBody.MOON else Color("648a85"))
+	_tiles[cache_key] = {"body": selected_body, "tier": tier, "key": tile_key,
+		"image": image, "texture": ImageTexture.create_from_image(image),
+		"stage": 0, "touch": _touch_serial}
 	_bake_queue.append(cache_key)
 
 
-## Build a coherent first frame from nine inexpensive whole-planet samples.
-## Including tile edges makes adjacent images agree before live local queries
-## begin, so a newly opened or quickly panned map never shows flat tile blocks.
-func _initial_satellite_tile(tier: int, tile_key: Vector2i) -> Image:
-	var tile_world := float(TILE_METERS_PER_PX[tier]) * TILE_PX
-	var origin := Vector2(tile_key) * tile_world
-	var grid := int(LOCAL_PREVIEW_GRIDS[0])
-	var overview := Image.create(grid + 1, grid + 1, false, Image.FORMAT_RGBA8)
-	for sample_z in range(grid + 1):
-		for sample_x in range(grid + 1):
-			var fraction := Vector2(sample_x, sample_z) / float(grid)
-			var sample := _planet_overview_sample(origin + fraction * tile_world)
-			overview.set_pixel(sample_x, sample_z, sample.color)
-	overview.resize(TILE_PX, TILE_PX, Image.INTERPOLATE_LANCZOS)
-	_stamp_satellite_detail(overview, Rect2i(0, 0, TILE_PX, TILE_PX),
-		Vector2i(tile_key.x * TILE_PX, tile_key.y * TILE_PX))
-	return overview
-
-
+## Finish a shared-edge coarse preview across the viewport before refinement.
 func _prioritize_bakes() -> void:
 	var current: Array[String] = []
 	var rest: Array[String] = []
@@ -929,152 +695,11 @@ func _evict_tiles() -> void:
 			func(cache_key): return not removed.has(cache_key))
 
 
-func _bake_local_samples(maximum_samples: int) -> void:
-	_last_local_texture_uploads = 0
-	var deadline := Time.get_ticks_usec() + BAKE_TIME_BUDGET_USEC
-	while _last_baked_samples < maximum_samples \
-			and Time.get_ticks_usec() < deadline and not _bake_queue.is_empty():
-		var cache_key: String = _bake_queue.pop_front()
-		if not _tiles.has(cache_key):
-			continue
-		var tile: Dictionary = _tiles[cache_key]
-		# Work in short turns so every visible tile gets its smooth first pass in a
-		# few frames. Textures upload only when a complete grid stage resolves.
-		var turn_samples := mini(LOCAL_SAMPLES_PER_TILE_TURN,
-			maximum_samples - _last_baked_samples)
-		for _sample_index in range(turn_samples):
-			if _bake_tile_sample(tile):
-				break
-			_last_baked_samples += 1
-			if Time.get_ticks_usec() >= deadline:
-				break
-		if int(tile.stage) < LOCAL_PREVIEW_GRIDS.size() \
-				and not bool(tile.stage_ready):
-			_bake_queue.append(cache_key)
-	_commit_coherent_local_stage()
+func _bake_local_samples(_maximum_samples: int) -> void:
+	_pump_worker()
 
 
-## Hold finished tile images until every visible tile at the same refinement
-## level is ready. Publishing a stage together removes the temporary checkerboard
-## that otherwise appears when adjacent satellite tiles finish on nearby frames.
-func _commit_coherent_local_stage() -> void:
-	if _required_keys.is_empty():
-		return
-	var target_stage := LOCAL_PREVIEW_GRIDS.size()
-	for cache_key in _required_keys:
-		if _tiles.has(cache_key):
-			target_stage = mini(target_stage, int(_tiles[cache_key].stage))
-	if target_stage >= LOCAL_PREVIEW_GRIDS.size():
-		return
-	for cache_key in _required_keys:
-		if not _tiles.has(cache_key):
-			return
-		var candidate: Dictionary = _tiles[cache_key]
-		if int(candidate.stage) == target_stage \
-				and not bool(candidate.stage_ready):
-			return
-	for cache_key in _required_keys:
-		var tile: Dictionary = _tiles[cache_key]
-		if int(tile.stage) != target_stage:
-			continue
-		var pending: Image = tile.pending_image
-		if not pending or pending.is_empty():
-			continue
-		tile.image = pending
-		(tile.texture as ImageTexture).update(pending)
-		_last_local_texture_uploads += 1
-		tile.pending_image = null
-		tile.stage_ready = false
-		tile.stage = target_stage + 1
-		tile.sample_cursor = 0
-		if int(tile.stage) < LOCAL_PREVIEW_GRIDS.size():
-			var next_grid := int(LOCAL_PREVIEW_GRIDS[int(tile.stage)]) + 1
-			tile.stage_image = Image.create(next_grid, next_grid, false,
-				Image.FORMAT_RGBA8)
-			var queued_key := str(cache_key)
-			if not _bake_queue.has(queued_key):
-				_bake_queue.append(queued_key)
-
-
-## Returns true after the final resolution was already complete.
-func _bake_tile_sample(tile: Dictionary) -> bool:
-	var stage := int(tile.stage)
-	if stage >= LOCAL_PREVIEW_GRIDS.size() or bool(tile.stage_ready):
-		return true
-	var tier: int = tile.tier
-	var tile_key: Vector2i = tile.key
-	var source_mpp := float(TILE_METERS_PER_PX[tier])
-	var tile_world := source_mpp * TILE_PX
-	var origin := Vector2(tile_key) * tile_world
-	var grid := int(LOCAL_PREVIEW_GRIDS[stage])
-	var sample_size := grid + 1
-	var cursor := int(tile.sample_cursor)
-	var sample_x := cursor % sample_size
-	var sample_z := floori(float(cursor) / float(sample_size))
-	# Include both tile edges. Adjacent tiles therefore sample the exact same
-	# boundary coordinates, eliminating seams after smooth upscaling.
-	var fraction := Vector2(sample_x, sample_z) / float(grid)
-	var point := origin + fraction * tile_world
-	var sample := _map_sample(point, tile_world / float(grid))
-	var color: Color = sample.color
-	if not bool(sample.get("water", false)):
-		var canopy := float(sample.get("tree_cover", 0.0))
-		if canopy > 0.08 and _pixel_hash(tile_key.x * grid + sample_x,
-				tile_key.y * grid + sample_z) < canopy:
-			color = color.lerp(Color("194f25"), canopy * 0.30)
-		var road := float(sample.get("road", 0.0))
-		if road > 0.12:
-			color = color.lerp(Color("9a7342"),
-				smoothstep(0.12, 0.8, road) * 0.72)
-	var stage_image: Image = tile.stage_image
-	stage_image.set_pixel(sample_x, sample_z, color)
-	cursor += 1
-	if cursor >= sample_size * sample_size:
-		# Reconstruct the low-frequency live terrain mask smoothly, then stamp the
-		# high-frequency satellite plate exactly once for this refinement stage.
-		var refined := stage_image.duplicate()
-		refined.resize(TILE_PX, TILE_PX, Image.INTERPOLATE_LANCZOS)
-		_stamp_satellite_detail(refined, Rect2i(0, 0, TILE_PX, TILE_PX),
-			Vector2i(tile_key.x * TILE_PX, tile_key.y * TILE_PX))
-		tile.pending_image = refined
-		tile.stage_ready = true
-		tile.sample_cursor = 0
-	else:
-		tile.sample_cursor = cursor
-	return false
-
-
-## Blend a generated, photoreal overhead luminance plate over a live terrain
-## color block. The PNG stores black/white detail at low alpha, so Image's native
-## C++ blend keeps the procedural biome hue while adding canopy, stone and soil
-## structure without another terrain query per output pixel.
-func _stamp_satellite_detail(destination: Image, destination_rect: Rect2i,
-		world_pixel_origin: Vector2i) -> void:
-	if not _satellite_detail_image:
-		_satellite_detail_image = SATELLITE_DETAIL_OVERLAY.get_image()
-	if not _satellite_detail_image or _satellite_detail_image.is_empty():
-		return
-	var overlay_size := _satellite_detail_image.get_size()
-	if overlay_size.x <= 0 or overlay_size.y <= 0:
-		return
-	var written_y := 0
-	while written_y < destination_rect.size.y:
-		var source_y := posmod(world_pixel_origin.y + written_y, overlay_size.y)
-		var copy_h := mini(destination_rect.size.y - written_y,
-			overlay_size.y - source_y)
-		var written_x := 0
-		while written_x < destination_rect.size.x:
-			var source_x := posmod(world_pixel_origin.x + written_x,
-				overlay_size.x)
-			var copy_w := mini(destination_rect.size.x - written_x,
-				overlay_size.x - source_x)
-			destination.blend_rect(_satellite_detail_image,
-				Rect2i(source_x, source_y, copy_w, copy_h),
-				destination_rect.position + Vector2i(written_x, written_y))
-			written_x += copy_w
-		written_y += copy_h
-
-
+## Total actual terrain evaluations through all local refinement stages.
 static func local_samples_per_complete_tile() -> int:
 	var samples := 0
 	for grid in LOCAL_PREVIEW_GRIDS:
@@ -1090,17 +715,11 @@ static func _pixel_hash(x: int, y: int) -> float:
 
 
 func _ensure_globe_atlas() -> void:
-	if _globe_texture:
-		return
-	_globe_texture = EARTH_ATLAS
-	_globe_stage = 1
-	_globe_sample_cursor = 0
+	pass
 
 
 func _bake_globe_samples(_maximum_samples: int) -> void:
-	_ensure_globe_atlas()
-	# Direct imported textures are already complete. This intentionally performs
-	# no PlanetTerrain sampling or ImageTexture updates on the render thread.
+	_pump_worker()
 
 
 func _update_hover(dt: float) -> void:
@@ -1121,26 +740,26 @@ func screen_to_world(screen_point: Vector2) -> Vector2:
 
 func world_to_screen(world_point: Vector2) -> Vector2:
 	var rect := map_rect()
-	var equivalent := nearest_equivalent_xz(world_point, _center,
-		planet_circumference_m())
+	var c := body_circumference()
+	var delta := (world_point - _center).abs()
+	# Most vector vertices are in the current local chart. Avoid a 54-candidate
+	# spherical-image search for every corner of every visible city building.
+	var equivalent := world_point if maxf(delta.x, delta.y) < c * .25 else nearest_equivalent_xz(world_point, _center, c)
 	var mpp := _view_span_m / maxf(rect.size.x, 1.0)
-	return rect.get_center() + (equivalent - _center) / maxf(mpp, 0.001)
+	return rect.get_center() + (equivalent - _center) / maxf(mpp, .001)
 
 
 func _draw() -> void:
-	if not _open:
-		return
+	if not _open: return
+	var draw_started := Time.get_ticks_usec()
+	_label_rects.clear()
 	_draw_backdrop()
 	var blend := globe_blend()
-	if selected_body == CelestialBody.MOON:
-		_draw_globe_view()
-	else:
-		var opacities := transition_opacities(blend)
-		if opacities.x > 0.001:
-			_draw_local_map(opacities.x)
-		if opacities.y > 0.001:
-			_draw_globe_view(opacities.y, transition_globe_scale(blend))
+	var opacities := transition_opacities(blend)
+	if opacities.x > .001: _draw_local_map(opacities.x)
+	if opacities.y > .001: _draw_globe_view(opacities.y, transition_globe_scale(blend))
 	_draw_chrome(blend)
+	_last_draw_usec = Time.get_ticks_usec() - draw_started
 
 
 func _draw_backdrop() -> void:
@@ -1171,8 +790,12 @@ func _draw_local_map(alpha := 1.0) -> void:
 		var top_left := rect.get_center() \
 			+ (Vector2(tile.key) * tile_world - _center) / mpp
 		var tile_rect := Rect2(top_left, Vector2.ONE * tile_world / mpp)
-		draw_texture_rect(tile.texture, tile_rect, false,
-			Color(1.0, 1.0, 1.0, alpha))
+		var clipped := tile_rect.intersection(rect)
+		if clipped.has_area():
+			var texture_size := Vector2(tile.texture.get_width(), tile.texture.get_height())
+			var region := tile_texture_region(clipped, tile_rect, texture_size)
+			draw_texture_rect_region(tile.texture, clipped, region, Color(1, 1, 1, alpha))
+	_draw_cartographic_features(rect, alpha)
 	_draw_lat_lon_grid(rect, alpha)
 	_draw_local_markers(rect, alpha)
 	# Vignette and crisp inner frame make placeholders/refined tiles read as one
@@ -1183,8 +806,16 @@ func _draw_local_map(alpha := 1.0) -> void:
 		_with_alpha(Color(0.58, 0.94, 0.76, 0.42), alpha), false, 1.0)
 
 
+static func tile_texture_region(clipped: Rect2, tile: Rect2, texture_size: Vector2) -> Rect2:
+	# Image samples include both world-space edges. Map the first/last sample
+	# centers to those edges; using the full texture width shifts landmarks and
+	# produces visible joins when coarse and final stages have different sizes.
+	return Rect2(Vector2.ONE * .5 + (clipped.position - tile.position) / tile.size * (texture_size - Vector2.ONE),
+		clipped.size / tile.size * (texture_size - Vector2.ONE))
+
+
 func _draw_lat_lon_grid(rect: Rect2, alpha := 1.0) -> void:
-	var circumference := planet_circumference_m()
+	var circumference := body_circumference()
 	var center_geo := world_xz_to_lon_lat(_center, circumference)
 	var degrees_across := rad_to_deg(_view_span_m * TAU / circumference)
 	var step_degrees := 0.01
@@ -1219,23 +850,17 @@ func _draw_lat_lon_grid(rect: Rect2, alpha := 1.0) -> void:
 
 
 func _draw_local_markers(rect: Rect2, alpha := 1.0) -> void:
-	for marker in markers_for_body(CelestialBody.EARTH):
+	for marker in markers_for_body(selected_body):
 		var pos3: Vector3 = marker.position
-		var base := world_to_screen(Vector2(pos3.x, pos3.z))
-		if not rect.grow(-5.0).has_point(base):
-			continue
-		var forward := marker_forward(float(marker.yaw))
-		var tip := base + forward * 14.0
+		var base := world_to_screen(coordinates_for_position(pos3, selected_body))
+		if not rect.grow(-7).has_point(base): continue
+		var forward := projected_heading(marker)
 		var side := forward.orthogonal()
-		var polygon := PackedVector2Array([
-			tip, base - forward * 7.0 + side * 6.0,
-			base - forward * 7.0 - side * 6.0])
-		var color := _with_alpha(
-			Color("ffe581") if bool(marker.local) else Color("58c8ff"), alpha)
+		var polygon := PackedVector2Array([base + forward * 14, base - forward * 7 + side * 6, base - forward * 7 - side * 6])
+		var color := _with_alpha(Color("ffe581") if marker.local else Color("58c8ff"), alpha)
 		draw_colored_polygon(polygon, color)
-		draw_polyline(polygon + PackedVector2Array([polygon[0]]),
-			_with_alpha(Color(0.015, 0.025, 0.03, 0.92), alpha), 2.0)
-		_draw_marker_name(base + Vector2(0, -13), str(marker.name), color, alpha)
+		draw_polyline(polygon + PackedVector2Array([polygon[0]]), Color("13222b"), 2, true)
+		_draw_marker_name(base + Vector2(0, -15), str(marker.name), color, alpha)
 
 
 func _draw_marker_name(position: Vector2, marker_name: String, color: Color,
@@ -1253,40 +878,19 @@ func _draw_marker_name(position: Vector2, marker_name: String, color: Color,
 
 func _draw_globe_view(alpha := 1.0, globe_scale := 1.0) -> void:
 	var rect := map_rect()
-	draw_rect(rect, _with_alpha(Color(0.008, 0.018, 0.045, 0.74), alpha))
-	var view_geo := world_xz_to_lon_lat(_center, planet_circumference_m())
-	var radius := minf(rect.size.y * 0.405, rect.size.x * 0.31) * globe_scale
-	var earth_center := rect.get_center()
+	draw_rect(rect, _with_alpha(Color("0b1822"), alpha))
+	var view_geo := world_xz_to_lon_lat(_center, body_circumference())
+	var radius := minf(rect.size.y * .44, rect.size.x * .4) * globe_scale
+	var center := rect.get_center()
 	if selected_body == CelestialBody.EARTH:
-		earth_center.x -= minf(radius * 0.34, rect.size.x * 0.08)
-		_draw_atmosphere(earth_center, radius, alpha)
-		_draw_textured_sphere(earth_center, radius, view_geo, false, alpha)
-		_draw_globe_markers(earth_center, radius, view_geo, alpha)
-		var moon_radius := maxf(radius * 0.17, 26.0)
-		var moon_center := earth_center + Vector2(radius * 1.35, -radius * 0.48)
-		_draw_moon_sphere(moon_center, moon_radius, view_geo, alpha)
-		_moon_globe_rect = Rect2(moon_center - Vector2.ONE * moon_radius * 1.35,
-			Vector2.ONE * moon_radius * 2.7)
-		draw_string(_font, moon_center + Vector2(-55, moon_radius + 24),
-			"MOON  ·  SELECT", HORIZONTAL_ALIGNMENT_CENTER, 110, 12,
-			_with_alpha(Color(0.82, 0.88, 1.0, 0.9), alpha))
+		_draw_atmosphere(center, radius, alpha)
+		_draw_textured_sphere(center, radius, view_geo, false, alpha)
+		_draw_globe_markers(center, radius, view_geo, alpha)
 	else:
-		_moon_globe_rect = Rect2()
-		var moon_center := rect.get_center()
-		_draw_moon_sphere(moon_center, radius, view_geo, alpha)
-		_draw_moon_markers(moon_center, radius, view_geo, alpha)
-		var earth_small_center := rect.position + Vector2(90, rect.size.y - 78)
-		_draw_atmosphere(earth_small_center, 48.0, alpha)
-		_draw_textured_sphere(earth_small_center, 48.0, view_geo, false, alpha)
-		draw_string(_font, rect.get_center() + Vector2(-180, radius + 36),
-			"LUNAR SURFACE  ·  DESTINATION VIEW", HORIZONTAL_ALIGNMENT_CENTER,
-			360, 15, _with_alpha(Color("dbe6ff"), alpha))
-		draw_string(_font, rect.get_center() + Vector2(-250, radius + 61),
-			"Local moon cartography unlocks with the lunar mission",
-			HORIZONTAL_ALIGNMENT_CENTER, 500, 12,
-			_with_alpha(Color(0.65, 0.72, 0.84, 0.86), alpha))
-	draw_rect(rect, _with_alpha(Color(0.58, 0.81, 1.0, 0.35), alpha),
-		false, 2.0)
+		_draw_moon_sphere(center, radius, view_geo, alpha)
+		_draw_moon_markers(center, radius, view_geo, alpha)
+	_draw_globe_landmarks(center, radius, view_geo, alpha)
+	draw_rect(rect, _with_alpha(Color("657b8a"), alpha), false, 1, true)
 
 
 func _draw_atmosphere(center: Vector2, radius: float, alpha := 1.0) -> void:
@@ -1392,12 +996,9 @@ func _sphere_mesh_for_view(view_lon_lat: Vector2, lunar := false) -> ArrayMesh:
 	return mesh
 
 
-## The 4K Moon is a direct imported resource shared by every atlas instance.
-## No image allocation, crater stamping, or per-frame refinement occurs here.
+## Generated lunar images are published exclusively by the map worker.
 func _ensure_moon_atlas() -> void:
-	if _moon_texture:
-		return
-	_moon_texture = MOON_ATLAS
+	pass
 
 
 func _draw_moon_sphere(center: Vector2, radius: float,
@@ -1408,9 +1009,11 @@ func _draw_moon_sphere(center: Vector2, radius: float,
 	var mesh := _sphere_mesh_for_view(view_lon_lat, true)
 	var transform := Transform2D(Vector2(radius, 0.0), Vector2(0.0, radius),
 		center)
-	draw_mesh(mesh, _moon_texture, transform, Color(1.0, 1.0, 1.0, alpha))
-	# The imported albedo already contains crater and maria detail, so the Moon is
-	# one texture draw plus the inexpensive limb accents.
+	if _moon_texture:
+		draw_mesh(mesh, _moon_texture, transform, Color(1.0, 1.0, 1.0, alpha))
+	else:
+		draw_circle(center, radius, _with_alpha(Color("848997"), alpha))
+	# Exact lunar relief is sampled once into the cached cartographic texture.
 	draw_arc(center, radius, 0.0, TAU, 128,
 		_with_alpha(Color(0.82, 0.88, 0.98, 0.72), alpha),
 		maxf(1.0, radius * 0.004), true)
@@ -1452,22 +1055,12 @@ func _draw_globe_markers(center: Vector2, radius: float,
 func _draw_moon_markers(center: Vector2, radius: float,
 		view_lon_lat: Vector2, alpha := 1.0) -> void:
 	for marker in markers_for_body(CelestialBody.MOON):
-		var position: Vector3 = marker.position
-		var projected := moon_marker_projection(position, float(marker.yaw),
-			center, radius, view_lon_lat)
-		if not bool(projected.visible):
-			continue
-		var marker_position: Vector2 = projected.position
-		var direction: Vector2 = projected.direction
-		var color := _with_alpha(
-			Color("ffe581") if bool(marker.local) else Color("58c8ff"), alpha)
-		draw_circle(marker_position, 5.5,
-			_with_alpha(Color(0.01, 0.02, 0.04, 0.9), alpha))
-		draw_circle(marker_position, 3.7, color)
-		draw_line(marker_position, marker_position + direction * 11.0,
-			color, 2.2, true)
-		_draw_marker_name(marker_position + Vector2(0, -8), str(marker.name),
-			color, alpha)
+		var coordinate := coordinates_for_position(marker.position, CelestialBody.MOON)
+		var projected := globe_projection(coordinate / MoonWorld.PLAYABLE_RADIUS_METERS, view_lon_lat, center, radius)
+		if not projected.visible: continue
+		var color := _with_alpha(Color("ffe581") if marker.local else Color("58c8ff"), alpha)
+		draw_circle(projected.position, 5, color, true, -1, true)
+		_draw_marker_name(projected.position + Vector2(0, -10), str(marker.name), color, alpha)
 
 
 func _draw_chrome(blend: float) -> void:
@@ -1478,7 +1071,7 @@ func _draw_chrome(blend: float) -> void:
 	draw_string(_font, Vector2(MAP_MARGIN, 31), "World map",
 		HORIZONTAL_ALIGNMENT_LEFT, -1, 24, MenuTheme.TEXT)
 	draw_string(_font, Vector2(MAP_MARGIN, 54),
-		"Explore Earth and the Moon",
+		"Terrain, streets and destinations",
 		HORIZONTAL_ALIGNMENT_LEFT, -1, 11, MenuTheme.MUTED)
 	var button_y := 18.0
 	_earth_button_rect = Rect2(size.x - 426, button_y, 90, 38)
@@ -1500,7 +1093,7 @@ func _draw_chrome(blend: float) -> void:
 		HORIZONTAL_ALIGNMENT_LEFT, -1, 12, MenuTheme.MUTED)
 	var right_status := ""
 	if selected_body == CelestialBody.MOON:
-		right_status = "MOON  •  1.62 m/s²  •  TRAVEL TARGET"
+		right_status = "MOON  ·  450 m PLAYABLE RADIUS  ·  SEEDED SURFACE"
 	elif blend >= 0.52:
 		right_status = "EARTH  •  %.0f km CIRCUMFERENCE" \
 			% (planet_circumference_m() / 1000.0)
@@ -1535,7 +1128,7 @@ func _draw_button(rect: Rect2, text_value: String, active: bool) -> void:
 
 
 func _draw_scale_bar(rect: Rect2) -> void:
-	if selected_body != CelestialBody.EARTH or globe_blend() >= 0.52:
+	if globe_blend() >= 0.52:
 		return
 	var mpp := _view_span_m / rect.size.x
 	var desired_world := mpp * 150.0
@@ -1573,7 +1166,16 @@ func cache_diagnostics() -> Dictionary:
 		"required": _required_keys.size(),
 		"last_local_samples": _last_baked_samples,
 		"last_local_texture_uploads": _last_local_texture_uploads,
-		"atlas_stage": _globe_stage,
+		"atlas_stage": _atlas_levels[0],
+		"moon_atlas_stage": _atlas_levels[1],
+		"worker_running": _worker.is_started(),
+		"worker_samples": _last_worker_samples,
+		"publish_usec": _last_publish_usec,
+		"update_usec": _last_update_usec,
+		"draw_usec": _last_draw_usec,
+		"context": _context_signature,
+		"source": "playable_generators",
+		"source_caches": _source_cache_stats,
 		"atlas_cursor": _globe_sample_cursor,
 		"last_atlas_samples": _last_globe_baked_samples,
 		"atlas_pixels": _globe_texture.get_width() * _globe_texture.get_height() \
@@ -1590,3 +1192,381 @@ func cache_diagnostics() -> Dictionary:
 		"last_moon_base_samples": 0,
 		"last_moon_crater_stamps": 0,
 	}
+
+
+func source_moon() -> MoonWorld:
+	if is_instance_valid(world):
+		var manager = world.get("expedition_manager")
+		if is_instance_valid(manager) and is_instance_valid(manager.moon_world):
+			return manager.moon_world
+	if not is_instance_valid(_moon_probe): _moon_probe = MoonWorld.new()
+	_moon_probe.moon_seed = Gen.world_seed ^ 0x4d4f4f4e
+	return _moon_probe
+
+
+func body_circumference() -> float:
+	return TAU * MoonWorld.PLAYABLE_RADIUS_METERS if selected_body == CelestialBody.MOON \
+		else planet_circumference_m()
+
+
+func _select_body(body: int) -> void:
+	if body == selected_body: return
+	_cartography.cancelled = true
+	_body_views[selected_body] = {"center": _target_center, "span": _target_span_m}
+	selected_body = body
+	var view: Dictionary = _body_views.get(body, {"center": Vector2.ZERO,
+		"span": 600.0 if body == CelestialBody.MOON else 8000.0})
+	_center = view.center
+	_target_center = _center
+	_target_span_m = view.span
+	_view_span_m = _target_span_m
+	_required_keys.clear()
+	_landmark_timer = 0.0
+	body_selected.emit(body)
+	queue_redraw()
+
+
+func coordinates_for_position(position3: Vector3, body: int) -> Vector2:
+	if body == CelestialBody.MOON:
+		var source := source_moon()
+		return Cartography.lunar_coordinate(source.to_local(position3) - MoonWorld.PLAYABLE_CENTER) \
+			if source.is_inside_tree() else Cartography.lunar_coordinate(position3 - MoonWorld.PLAYABLE_CENTER)
+	return Gen.canonical_planet_xz(Vector2(position3.x, position3.z))
+
+
+func position_for_coordinates(coordinate: Vector2, body: int) -> Vector3:
+	if body == CelestialBody.MOON:
+		var source := source_moon()
+		var point := source.surface_position(Cartography.lunar_direction(coordinate))
+		return source.to_global(point) if source.is_inside_tree() else point
+	var p := Gen.canonical_planet_xz(coordinate)
+	return Vector3(p.x, Gen.height(p.x, p.y), p.y)
+
+
+func projected_heading(marker: Dictionary) -> Vector2:
+	var p: Vector3 = marker.position
+	if selected_body == CelestialBody.EARTH: return marker_forward(float(marker.yaw))
+	var direction := Vector3.FORWARD
+	if bool(marker.local) and is_instance_valid(world.local_player):
+		direction = -world.local_player.rig.yaw_node.global_basis.z
+	else:
+		var source := source_moon()
+		var up := (source.to_local(p) - MoonWorld.PLAYABLE_CENTER).normalized()
+		direction = source.global_basis * (MoonWorld.surface_basis(up) * Basis(Vector3.UP, float(marker.yaw))).z * -1
+	var here := coordinates_for_position(p, selected_body)
+	var ahead := coordinates_for_position(p + direction * 2, selected_body)
+	var delta := nearest_equivalent_xz(ahead, here, body_circumference()) - here
+	return delta.normalized() if delta.length_squared() > .00001 else Vector2.UP
+
+
+func _source_options() -> Dictionary:
+	return {"seed": Gen.world_seed, "moon_seed": source_moon().moon_seed,
+		"frontier": Gen.frontier_world, "debug": Gen.debug_world}
+
+
+func _pump_worker() -> void:
+	# Only completed immutable Images cross back to the canvas thread. One
+	# texture publication per frame avoids a refinement-stage upload burst.
+	if _worker.is_started():
+		if _worker.is_alive():
+			var irrelevant := int(_worker_job.body) != selected_body
+			if _worker_job.kind == "atlas": irrelevant = irrelevant or globe_blend() < .01
+			else: irrelevant = irrelevant or not _required_keys.has(_worker_job.key) or globe_blend() >= .995
+			if irrelevant: _cartography.cancelled = true
+			return
+		var result: Dictionary = _worker.wait_to_finish()
+		if result.is_empty() and _worker_job.get("kind") == "tile" and _tiles.has(_worker_job.get("key")) and not _bake_queue.has(str(_worker_job.key)):
+			_bake_queue.append(str(_worker_job.key))
+		if not result.is_empty() and str(result.job.signature) == _context_signature:
+			var started := Time.get_ticks_usec()
+			var job: Dictionary = result.job
+			var image: Image = result.image
+			_last_worker_samples = int(result.samples)
+			_source_cache_stats = {"macro_entries": int(result.macro_cache_entries), "lunar_vertices": int(result.lunar_vertices)}
+			if job.kind == "atlas":
+				if int(job.body) == CelestialBody.EARTH: _globe_texture = ImageTexture.create_from_image(image)
+				else: _moon_texture = ImageTexture.create_from_image(image)
+				_atlas_levels[int(job.body)] = int(job.stage) + 1
+			elif _tiles.has(job.key):
+				var tile: Dictionary = _tiles[job.key]
+				tile.image = image
+				tile.texture = ImageTexture.create_from_image(image)
+				tile.stage = int(job.stage) + 1
+				_last_local_texture_uploads = 1
+				if int(tile.stage) < LOCAL_PREVIEW_GRIDS.size() and not _bake_queue.has(str(job.key)): _bake_queue.append(str(job.key))
+			_last_publish_usec = Time.get_ticks_usec() - started
+	if not _open: return
+	var job: Dictionary = {}
+	var body := selected_body
+	var atlas_stage: int = _atlas_levels[body]
+	if globe_blend() > .01 and atlas_stage < _atlas_stages.size():
+		var width: int = _atlas_stages[atlas_stage]
+		var circumference := body_circumference()
+		job = {"kind": "atlas", "body": body, "stage": atlas_stage,
+			"resolution": Vector2i(width + 1, width / 2 + 1),
+			"origin": Vector2(-circumference * .5, circumference * .25),
+			"extent": Vector2(circumference, -circumference * .5)}
+	elif globe_blend() < .995:
+		_prioritize_bakes()
+		for key in _bake_queue.duplicate():
+			if not _required_keys.has(key) or not _tiles.has(key): continue
+			var tile: Dictionary = _tiles[key]
+			var stage: int = tile.stage
+			if stage >= LOCAL_PREVIEW_GRIDS.size(): continue
+			_bake_queue.erase(key)
+			var tile_world := float(TILE_METERS_PER_PX[int(tile.tier)]) * TILE_PX
+			var grid: int = LOCAL_PREVIEW_GRIDS[stage]
+			job = {"kind": "tile", "key": key, "body": body, "stage": stage,
+				"resolution": Vector2i.ONE * (grid + 1),
+				"origin": Vector2(tile.key) * tile_world, "extent": Vector2.ONE * tile_world}
+			break
+	if job.is_empty(): return
+	job.options = _source_options()
+	job.signature = _context_signature
+	_worker_job = job
+	_cartography.cancelled = false
+	_worker.start(_cartography.bake.bind(job))
+
+
+func _exit_tree() -> void:
+	_cartography.cancelled = true
+	if _worker.is_started(): _worker.wait_to_finish()
+	_cartography.dispose()
+	if is_instance_valid(_moon_probe): _moon_probe.free()
+
+
+func _frontier() -> Node:
+	if not is_instance_valid(world): return null
+	var main := world.get_parent()
+	return main.get("frontier_controller") if is_instance_valid(main) else null
+
+
+func landmark_snapshot() -> Array[Dictionary]:
+	var result: Array[Dictionary] = []
+	if selected_body == CelestialBody.EARTH:
+		if Gen.airstrip_valid:
+			result.append({"id": "spaceport", "label": "Spaceport", "coordinate": Gen.airstrip_center,
+				"kind": "port", "priority": 1})
+			var launch := Gen.rocket_launch_position()
+			result.append({"id": "launch", "label": "Launch pad", "coordinate": Vector2(launch.x, launch.z), "kind": "port", "priority": 3})
+		if Gen.frontier_world:
+			result.append({"id": "crownreach", "label": "Crownreach · 30.1 sq mi", "coordinate": Plan.CENTER, "kind": "city", "priority": 0})
+			result.append({"id": "gardens", "label": "Lantern Gardens", "coordinate": Plan.PARK_CENTER, "kind": "park", "priority": 1})
+			for id: String in Towns.EARTH_ORIGINS:
+				result.append({"id": id, "label": str(FrontierSocieties.NAMES[id][0]), "coordinate": Towns.EARTH_ORIGINS[id], "kind": "town", "priority": 1})
+			for stop in Plan.stops():
+				var p: Vector3 = stop.position
+				result.append({"id": "transit:" + str(stop.id), "label": str(stop.name), "coordinate": Vector2(p.x, p.z), "kind": "transit", "priority": 4})
+	else:
+		result.append({"id": "landing", "label": "Landing pad", "coordinate": Vector2.ZERO, "kind": "port", "priority": 1})
+		for definition in [["farm", "Cheese farm"], ["market", "Crater & Curd"], ["aging", "Aging cellar"], ["observatory", "Observatory"], ["relay", "Oxygen relay"], ["crystal_garden", "Crystal garden"]]:
+			result.append({"id": str(definition[0]), "label": str(definition[1]),
+				"coordinate": Cartography.lunar_coordinate(MoonColony.facility_direction(definition[0])), "kind": "colony", "priority": 2})
+		if Gen.frontier_world:
+			for id: String in Towns.MOON_DIRECTIONS:
+				result.append({"id": "moon:" + id, "label": str(FrontierSocieties.NAMES[id][1]),
+					"coordinate": Cartography.lunar_coordinate(Towns.MOON_DIRECTIONS[id]), "kind": "town", "priority": 1})
+	var frontier := _frontier()
+	if is_instance_valid(frontier):
+		var waypoints: Array = [frontier.waypoint]
+		if is_instance_valid(frontier.city): waypoints.append(frontier.city.waypoint)
+		for waypoint: Dictionary in waypoints:
+			if waypoint.is_empty() or not waypoint.get("position") is Vector3: continue
+			var realm_body := CelestialBody.MOON if frontier.current_planet() == "moon" else CelestialBody.EARTH
+			if realm_body == selected_body:
+				result.push_front({"id": "waypoint", "label": str(waypoint.get("label", "Destination")),
+					"coordinate": coordinates_for_position(waypoint.position, selected_body), "kind": "waypoint", "priority": 0})
+		var settlement: Node = frontier.moon_settlement if selected_body == CelestialBody.MOON else frontier.earth_settlement
+		if is_instance_valid(settlement) and settlement.is_build_complete():
+			for entry: Dictionary in settlement.get_interactions():
+				if str(entry.kind) not in ["facility", "market", "board"]: continue
+				result.append({"id": "site:" + str(entry.id), "label": str(entry.label),
+					"coordinate": coordinates_for_position(entry.position, selected_body), "kind": "service", "priority": 5})
+	if selected_body == CelestialBody.MOON and Net.player_realm() == Net.PlayerRealm.MOON:
+		var manager = world.get("expedition_manager") if is_instance_valid(world) else null
+		if is_instance_valid(manager) and is_instance_valid(manager.moon_world.colony_world):
+			var waypoint: Dictionary = manager._colony_waypoint
+			var target: Vector3 = manager.moon_world.colony_world.interaction_position(str(waypoint.action), int(waypoint.target))
+			result.push_front({"id": "lunar_waypoint", "label": str(waypoint.title),
+				"coordinate": coordinates_for_position(target, selected_body), "kind": "waypoint", "priority": 0})
+
+	return result
+
+
+func city_footprints(bounds: Rect2) -> Array[Dictionary]:
+	if bounds == _footprint_view_bounds: return _footprint_view
+	var result: Array[Dictionary] = []
+	var municipal:=Rect2(Vector2(Plan.MIN_X,Plan.MIN_Z),Vector2(Plan.MAX_X-Plan.MIN_X,Plan.MAX_Z-Plan.MIN_Z))
+	if not bounds.intersects(municipal):return result
+	var query:=bounds.intersection(municipal)
+	var a := Plan.world_to_block(query.position)
+	var b := Plan.world_to_block(query.end.clamp(Vector2(Plan.MIN_X,Plan.MIN_Z),Vector2(Plan.MAX_X,Plan.MAX_Z)))
+	for x in range(maxi(0, a.x), mini(Plan.GRID_WIDTH - 1, b.x) + 1):
+		for z in range(maxi(0, a.y), mini(Plan.GRID_DEPTH - 1, b.y) + 1):
+			var key := Vector2i(x, z)
+			if not _outline_blocks.has(key): _outline_blocks[key] = Plan.block_buildings(key)
+			for building: Dictionary in _outline_blocks[key]:
+				var size3: Vector3 = building.size
+				var p3: Vector3 = building.position
+				var footprint := Rect2(Vector2(p3.x - size3.x * .5, p3.z - size3.z * .5), Vector2(size3.x, size3.z))
+				if bounds.intersects(footprint):
+					result.append({"id": building.id, "rect": footprint, "height": size3.y, "kind": building.kind})
+	# The near urban overlay is limited to a few hundred visible blocks, never
+	# retained as another 36,861-building city graph after repeated browsing.
+	if _outline_blocks.size() > 256:
+		var retained: Dictionary = {}
+		for key in _outline_blocks:
+			if key.x >= a.x and key.x <= b.x and key.y >= a.y and key.y <= b.y: retained[key] = _outline_blocks[key]
+		_outline_blocks = retained
+	_footprint_view_bounds = bounds
+	_footprint_view = result
+	return result
+
+
+func _vector_line(a: Vector2, b: Vector2, color: Color, width: float) -> void:
+	# Clip before drawing so a crossing road cannot obscure the atlas controls.
+	var points := Geometry2D.intersect_polyline_with_polygon(PackedVector2Array([a, b]),
+		PackedVector2Array([map_rect().position, Vector2(map_rect().end.x, map_rect().position.y), map_rect().end, Vector2(map_rect().position.x, map_rect().end.y)]))
+	for line in points:
+		if line.size() >= 2: draw_polyline(line, color, maxf(width, 1.0), true)
+
+
+func _map_rect_shape(bounds: Rect2, fill: Color, outline: Color) -> void:
+	var start := world_to_screen(bounds.position)
+	var projected := Rect2(start, world_to_screen(bounds.end) - start).abs()
+	var clipped := projected.intersection(map_rect())
+	if not clipped.has_area(): return
+	draw_rect(clipped, fill)
+	draw_rect(clipped, outline, false, 1.0, true)
+
+
+func feature_query_bounds() -> Rect2:
+	# Terrain may be viewed in an unfolded longitude/pole copy. Query authored
+	# geometry in canonical coordinates and project it back through that copy.
+	var extent := map_rect().size * _view_span_m / map_rect().size.x
+	return Rect2(canonical_planet_xz(_center, body_circumference()) - extent * .5, extent)
+
+
+func _draw_cartographic_features(rect: Rect2, alpha: float) -> void:
+	var mpp := _view_span_m / rect.size.x
+	var world_bounds := feature_query_bounds()
+	if selected_body == CelestialBody.EARTH:
+		if Gen.frontier_world:
+			var city_bounds := Rect2(Plan.MIN_X, Plan.MIN_Z, Plan.MAX_X - Plan.MIN_X, Plan.MAX_Z - Plan.MIN_Z)
+			if world_bounds.intersects(city_bounds):
+				_map_rect_shape(city_bounds, _with_alpha(Color("c9ceca"), alpha), _with_alpha(Color("687c81"), alpha))
+				if _view_span_m < 28000:
+					for i in range(Plan.GRID_WIDTH + 1):
+						var x := Plan.MIN_X + i * Plan.BLOCK_EXTENTS.x
+						_vector_line(world_to_screen(Vector2(x,Plan.MIN_Z)),world_to_screen(Vector2(x,Plan.MAX_Z)),_with_alpha(Color("eef1e6"),alpha),24/mpp)
+					for i in range(Plan.GRID_DEPTH + 1):
+						var z := Plan.MIN_Z + i * Plan.BLOCK_EXTENTS.y
+						_vector_line(world_to_screen(Vector2(Plan.MIN_X,z)),world_to_screen(Vector2(Plan.MAX_X,z)),_with_alpha(Color("eef1e6"),alpha),24/mpp)
+				if _view_span_m < 2200:
+					for road in city_minor_roads(world_bounds):
+						_vector_line(world_to_screen(road.a), world_to_screen(road.b), _with_alpha(Color("edf0e4"), alpha), Plan.LOCAL_ROAD_HALF_WIDTH * 2 / mpp)
+				if _view_span_m < 2200:
+					for footprint in city_footprints(world_bounds):
+						var tint := Color("8e9b9f").lerp(Color("425d73"), clampf(float(footprint.height) / 650.0, 0, 1))
+						_map_rect_shape(footprint.rect, _with_alpha(tint, alpha), _with_alpha(Color("647680"), alpha))
+				var park := Rect2(Plan.PARK_CENTER - Plan.PARK_HALF_EXTENTS, Plan.PARK_HALF_EXTENTS * 2)
+				_map_rect_shape(park, _with_alpha(Color("88b783"), alpha), _with_alpha(Color("659762"), alpha))
+				var pond := PackedVector2Array()
+				for i in range(65): pond.append(world_to_screen(Plan.pond_shore(i * TAU / 64)))
+				var clip_polygon := PackedVector2Array([rect.position, Vector2(rect.end.x, rect.position.y), rect.end, Vector2(rect.position.x, rect.end.y)])
+				for visible_pond in Geometry2D.intersect_polygons(pond, clip_polygon):
+					draw_colored_polygon(visible_pond, _with_alpha(Color("579aa8"), alpha))
+					draw_polyline(visible_pond + PackedVector2Array([visible_pond[0]]), _with_alpha(Color("386e89"), alpha), 1.5, true)
+
+			for road: Array in Towns.CONNECTING_ROADS:
+				for i in range(road.size() - 1): _vector_line(world_to_screen(road[i]), world_to_screen(road[i + 1]), _with_alpha(Color("dedbb5"), alpha), Towns.ROAD_HALF_WIDTH * 2 / mpp)
+			_vector_line(world_to_screen(Vector2(930, 0)), world_to_screen(Vector2(Plan.MIN_X, 0)), _with_alpha(Color("eee8c6"), alpha), 24 / mpp)
+			if _view_span_m < 120000:
+				for road in Highways.roads():
+					if road.kind!="divided" and _view_span_m>18000:continue
+					var points:PackedVector3Array=road.points
+					for i in range(points.size()-1):
+						var a:=Vector2(points[i].x,points[i].z)
+						var b:=Vector2(points[i+1].x,points[i+1].z)
+						if not world_bounds.grow(30).has_point(a) and not world_bounds.grow(30).has_point(b):continue
+						_vector_line(world_to_screen(a),world_to_screen(b),_with_alpha(Color("efb951") if road.kind=="divided" else Color("dfd8ad"),alpha),maxf(1.5,float(road.half_width)*2/mpp))
+				if _view_span_m<40000:
+					for access in Highways.access_points():
+						var coordinate:=Vector2(access.position.x,access.position.z)
+						if world_bounds.has_point(coordinate):_draw_feature_label(world_to_screen(coordinate),("H-2" if access.id=="settlement" else "EXIT "+str(access.id))+" · "+str(access.name),Color("f2c970"),alpha)
+		if _view_span_m < 30000:
+			for route: Dictionary in _source_roads:
+				if not world_bounds.intersects(route.bounds): continue
+				var points: PackedVector2Array = route.points
+				for i in range(points.size() - 1):
+					_vector_line(world_to_screen(points[i]), world_to_screen(points[i + 1]), _with_alpha(Color("dfd5b0"), alpha), Gen.ROAD_HALF_WIDTH * 2 / mpp)
+		if Gen.airstrip_valid and _view_span_m < 90000:
+			var axis := Vector2(sin(Gen.airstrip_heading), cos(Gen.airstrip_heading))
+			_vector_line(world_to_screen(Gen.airstrip_center - axis * Gen.AIRSTRIP_LENGTH * .5), world_to_screen(Gen.airstrip_center + axis * Gen.AIRSTRIP_LENGTH * .5), _with_alpha(Color("555d67"), alpha), maxf(3, Gen.AIRSTRIP_WIDTH / mpp))
+			if _view_span_m < 12000:
+				for feature in airfield_footprints():
+					var polygon := PackedVector2Array()
+					for corner: Vector2 in feature.polygon: polygon.append(world_to_screen(corner))
+					var clip := PackedVector2Array([rect.position, Vector2(rect.end.x, rect.position.y), rect.end, Vector2(rect.position.x, rect.end.y)])
+					for part in Geometry2D.intersect_polygons(polygon, clip):
+						draw_colored_polygon(part, _with_alpha(Color("88979c"), alpha))
+						draw_polyline(part + PackedVector2Array([part[0]]), _with_alpha(Color("4b6574"), alpha), 1.2, true)
+
+	for landmark in _landmark_cache:
+		var priority: int = landmark.priority
+		if priority >= 4 and _view_span_m > 7000: continue
+		if priority >= 5 and _view_span_m > 1800: continue
+		if priority >= 2 and _view_span_m > 90000 and selected_body == CelestialBody.EARTH: continue
+		var point := world_to_screen(landmark.coordinate)
+		if not rect.grow(-12).has_point(point): continue
+		var color := Color("f6d47e") if landmark.kind == "waypoint" else Color("173e59")
+		draw_circle(point, 4.2 if priority < 2 else 3.0, _with_alpha(color, alpha), true, -1, true)
+		_draw_feature_label(point, str(landmark.label), color, alpha)
+
+
+func _draw_feature_label(point: Vector2, label: String, color: Color, alpha: float) -> void:
+	var width := _font.get_string_size(label, HORIZONTAL_ALIGNMENT_LEFT, -1, 14).x + 14
+	for offset in [Vector2(9, -16), Vector2(-width - 9, -16), Vector2(9, 12), Vector2(-width - 9, 12), Vector2(9, -44), Vector2(-width - 9, -44), Vector2(9, 40), Vector2(-width - 9, 40)]:
+		var area := Rect2(point + offset, Vector2(width, 23))
+		if not map_rect().encloses(area): continue
+		var overlaps := false
+		for used in _label_rects:
+			if area.grow(3).intersects(used):
+				overlaps = true
+				break
+		if overlaps: continue
+		_label_rects.append(area)
+		if absf(offset.y) > 25:
+			var end := Vector2(clampf(point.x, area.position.x, area.end.x), clampf(point.y, area.position.y, area.end.y))
+			draw_line(point, end, _with_alpha(color, alpha * .65), 1.0, true)
+		draw_style_box(_rounded_box(_with_alpha(Color("f3f0df"), alpha * .94), _with_alpha(Color("a5b4b4"), alpha), 1, 5), area)
+		draw_string(_font, area.position + Vector2(7, 16), label, HORIZONTAL_ALIGNMENT_LEFT, -1, 14, _with_alpha(color, alpha))
+		return
+
+
+func _draw_globe_landmarks(center: Vector2, radius: float, geo: Vector2, alpha: float) -> void:
+	for landmark in _landmark_cache:
+		if int(landmark.priority) > 1: continue
+		var angle: Vector2 = landmark.coordinate * TAU / body_circumference()
+		var projected := globe_projection(angle, geo, center, radius)
+		if not projected.visible: continue
+		draw_circle(projected.position, 3, _with_alpha(Color("f0ce76"), alpha), true, -1, true)
+		_draw_feature_label(projected.position, str(landmark.label), Color("173e59"), alpha)
+
+
+func city_minor_roads(_bounds: Rect2) -> Array[Dictionary]:
+	# Rectangular city blocks contain rear courts, not an internal road lattice.
+	return []
+
+
+func airfield_footprints() -> Array[Dictionary]:
+	var result: Array[Dictionary] = []
+	for hangar: Dictionary in Gen.airstrip_hangar_layout():
+		var polygon := PackedVector2Array()
+		var dimensions: Vector3 = hangar.size
+		var transform := Transform3D(Basis(Vector3.UP, float(hangar.yaw)), hangar.pos)
+		for corner in [Vector3(-.5, 0, -.5), Vector3(.5, 0, -.5), Vector3(.5, 0, .5), Vector3(-.5, 0, .5)]:
+			var point: Vector3 = transform * (corner * dimensions)
+			polygon.append(Vector2(point.x, point.z))
+		result.append({"id": hangar.id, "polygon": polygon})
+	return result

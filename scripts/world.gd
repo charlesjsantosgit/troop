@@ -179,6 +179,7 @@ var _stream_safety_ops_last := 0
 var _stream_decoration_ops_last := 0
 var _stream_shells_built := 0
 var _stream_cancelled_jobs := 0
+var city_disasters:Node3D
 var local_player: MonkeyPlayer
 var expedition_manager: ExpeditionManager
 var frontier: Node
@@ -346,6 +347,8 @@ func begin_build() -> void:
 	# harmless; spawn_vehicle() reads their latest authoritative state instead.
 	if not Net.vehicle_claimed.is_connected(_on_vehicle_claimed):
 		Net.vehicle_claimed.connect(_on_vehicle_claimed)
+	if not Net.vehicle_crash_changed.is_connected(_on_vehicle_crash_changed):
+		Net.vehicle_crash_changed.connect(_on_vehicle_crash_changed)
 	if not Net.vehicle_released.is_connected(_on_vehicle_released):
 		Net.vehicle_released.connect(_on_vehicle_released)
 	if not Net.vehicle_request_finished.is_connected(_on_vehicle_request_finished):
@@ -607,6 +610,7 @@ func _connect_runtime_signals() -> void:
 		[Net.peer_defeated, _on_peer_defeated],
 		[Net.vehicle_claimed, _on_vehicle_claimed],
 		[Net.vehicle_released, _on_vehicle_released],
+		[Net.vehicle_crash_changed,_on_vehicle_crash_changed],
 		[Net.vehicle_request_finished, _on_vehicle_request_finished],
 		[Net.cycle_hour_changed, _on_shared_cycle_hour_changed],
 	]
@@ -935,11 +939,15 @@ func spawn_vehicle(kind: int, vid: String, pos: Vector3,
 		Vehicle.Kind.BIKE:
 			v = Motorcycle.new()
 		Vehicle.Kind.BOAT:
-			v = Airboat.new()
+			v = load("res://scripts/park_rowboat.gd").new() if vid.begins_with("v:park-rowboat-") else Airboat.new()
 		Vehicle.Kind.JET:
 			v = FighterJet.new()
 		_:
-			v = SafariJeep.new()
+			var model := preload("res://scripts/city_commerce.gd").model_from_vehicle_id(vid)
+			if model>=0:
+				v = load("res://scripts/city_car.gd").new()
+				v.configure_model(model)
+			else: v = SafariJeep.new()
 	v.setup(vid, self)
 	add_child(v)
 	v.set_effect_quality(_high_effects, _fullscreen_performance)
@@ -954,6 +962,7 @@ func spawn_vehicle(kind: int, vid: String, pos: Vector3,
 	if Net.active and Net.claimed_vehicles.has(vid) \
 			and int(Net.claimed_vehicles[vid]) != Net.local_id():
 		v.set_remote_controlled(true, int(Net.claimed_vehicles[vid]))
+	if Net.vehicle_crashes.has(vid): v.apply_replicated_crash(Net.vehicle_crashes[vid],Net.consume_vehicle_crash_event(vid))
 	return v
 
 
@@ -1232,6 +1241,9 @@ func _on_vehicle_request_finished(vid: String, accepted: bool, reason: String, r
 
 func _on_vehicle_spawn_registered(vid: String, kind: int, pos: Vector3,
 		yaw: float) -> void:
+	if vid.begins_with("v:city:") and vehicles.has(vid) and vehicles[vid].driver==null and not vehicles[vid].remote_controlled:
+		vehicles[vid].settle_at(pos,yaw)
+		return
 	if _build_stage != BuildStage.NOT_STARTED and _build_stage != BuildStage.COMPLETE:
 		_queue_build_vehicle(vid, kind, pos, yaw)
 		return
@@ -1436,7 +1448,7 @@ func respawn(p: MonkeyPlayer) -> void:
 func void_rescue_height(p: MonkeyPlayer) -> float:
 	if p == local_player and is_instance_valid(frontier) and is_instance_valid(frontier.city) \
 			and frontier.city.is_inside():
-		return -510.0
+		return frontier.city.interior.global_position.y - 10.0
 	if p == local_player and expedition_manager \
 			and is_instance_valid(expedition_manager):
 		return expedition_manager.lunar_void_rescue_height(p)
@@ -2123,7 +2135,13 @@ func _update_biome_ambience(dt: float) -> void:
 		_altitude_quality_low = false
 		_apply_effect_quality()
 	var night_fog := Color(0.055, 0.075, 0.13)
-	var fog_target := night_fog.lerp(_biome_fog_target,
+	# Urban sightlines extend for kilometres. Blend out the surrounding biome's
+	# dense ground haze across the same municipal transition as the terrain.
+	var city_air := Gen.CityTerrain.weight(Vector2(local_player.global_position.x,
+		local_player.global_position.z)) if Gen.frontier_world else 0.0
+	var local_fog := _biome_fog_target.lerp(Color(0.55, 0.63, 0.70), city_air)
+	var local_density := lerpf(_biome_density_target, 0.00012, city_air)
+	var fog_target := night_fog.lerp(local_fog,
 		0.16 + daylight_amount * 0.84)
 	var density_multiplier := lerpf(1.16, 1.0, daylight_amount)
 	var saturation_multiplier := 1.0
@@ -2142,7 +2160,7 @@ func _update_biome_ambience(dt: float) -> void:
 	_environment.fog_light_color = _environment.fog_light_color.lerp(
 		fog_target, 1.0 - exp(-0.42 * dt))
 	_environment.fog_density = lerpf(_environment.fog_density,
-		minf(_biome_density_target, 3.2 / current_view_distance) * density_multiplier * (1.0-_space_sky_weight),
+		minf(local_density, 3.2 / current_view_distance) * density_multiplier * (1.0-_space_sky_weight),
 		1.0 - exp(-0.42 * dt))
 	_environment.adjustment_saturation = lerpf(
 		_environment.adjustment_saturation,
@@ -3471,3 +3489,13 @@ func _apply_altitude_sky(altitude: float) -> void:
 			if value!=null: _photographic_space.material.set_shader_parameter(pair[0],value)
 	_environment.sky=_space_sky
 	_environment.fog_enabled=_ground_fog_enabled and weight<1.0
+
+
+func _on_vehicle_crash_changed(id: String, row: Dictionary, animate: bool) -> void:
+	var vehicle:=vehicle_by_id(id)
+	if vehicle==null: return
+	# The host's live physical machine already owns its crash side effects.
+	if Net.is_host and not vehicle.remote_controlled:
+		Net.consume_vehicle_crash_event(id)
+		return
+	vehicle.apply_replicated_crash(row,animate and Net.consume_vehicle_crash_event(id))

@@ -4,6 +4,8 @@ extends Node3D
 ## authorization; this node owns furniture, collision and nearby service points.
 signal interaction_requested(kind: String, property_id: String)
 
+const Penthouse = preload("res://scripts/city_penthouse.gd")
+const Furniture = preload("res://scripts/city_furniture.gd")
 const INTERACTION_RANGE := 2.9
 const DOOR_WIDTH := 1.8
 const DOOR_HEIGHT := 2.5
@@ -15,6 +17,7 @@ var _services: Dictionary = {}
 var _body: StaticBody3D
 var _batches: Dictionary = {}
 var _materials: Dictionary = {}
+var _penthouse: RefCounted
 
 func build(data: Dictionary) -> void:
 	property = data.duplicate(true)
@@ -24,6 +27,7 @@ func build(data: Dictionary) -> void:
 	_batches.clear()
 	_materials.clear()
 	_services.clear()
+	_penthouse = null
 	var housing := housing_type(data)
 	var warehouse := housing == "warehouse"
 	var premium := housing == "penthouse"
@@ -36,6 +40,12 @@ func build(data: Dictionary) -> void:
 	_body.collision_layer = 1
 	_body.collision_mask = 1
 	add_child(_body)
+	if premium:
+		_spawn = Penthouse.spawn_point()
+		_exit = Penthouse.exit_point()
+		_penthouse = Penthouse.new()
+		_penthouse.build(self, _body)
+		return
 	var width := dimensions.x
 	var depth := dimensions.z
 	var height := dimensions.y
@@ -95,10 +105,10 @@ static func housing_type(data: Dictionary) -> String:
 	return housing
 
 static func room_dimensions(data: Dictionary) -> Vector3:
+	if housing_type(data) == "penthouse": return Penthouse.dimensions()
 	var size := Vector3(8, 3.2, 7)
 	match housing_type(data):
 		"warehouse": size = Vector3(18, 5.4, 14)
-		"penthouse": size = Vector3(16, 3.6, 12)
 		"city_apartment": size = Vector3(12, 3.4, 10)
 		"suburban_home": size = Vector3(10, 3.2, 9)
 		"town_apartment": size = Vector3(9, 3.2, 8)
@@ -109,6 +119,10 @@ static func room_dimensions(data: Dictionary) -> Vector3:
 	return size
 
 static func service_layout(data: Dictionary) -> Dictionary:
+	if housing_type(data) == "penthouse":
+		var layout := Penthouse.service_layout()
+		for point in layout.values(): point["label"] = point.prompt
+		return layout
 	var size := room_dimensions(data)
 	var width := size.x
 	var depth := size.z
@@ -125,6 +139,16 @@ static func service_layout(data: Dictionary) -> Dictionary:
 		result.workbench = {"position": Vector3(width * 0.5 - 2.2, 0.8, -0.65), "prompt": "Property and local notices" if not str(data.get("service", "")).is_empty() else "Property details", "kind": "interior"}
 	for point in result.values(): point["label"] = point.prompt
 	return result
+
+func validation_layout() -> Dictionary:
+	return Penthouse.validation_layout() if housing_type(property) == "penthouse" else {}
+
+static func furniture_layout(data: Dictionary) -> Dictionary:
+	return Furniture.penthouse() if housing_type(data) == "penthouse" \
+		else Furniture.home(housing_type(data),room_dimensions(data))
+
+func update_time(hour: float, daylight: float) -> void:
+	if _penthouse != null: _penthouse.update_time(hour, daylight)
 
 func spawn_point() -> Vector3:
 	return _spawn
@@ -180,11 +204,11 @@ func _trim(width: float, depth: float, height: float, public_room := false) -> v
 func _build_home(width: float, depth: float, premium: bool, apartment: bool) -> void:
 	var bed := Vector3(-width * 0.5 + 1.25, 0, depth * 0.5 - 1.5)
 	_box("bed frame", Vector3(1.75, 0.34, 2.4), bed + Vector3(0, 0.3, 0), Color("664832"), true)
-	_box("mattress", Vector3(1.65, 0.25, 2.22), bed + Vector3(0, 0.59, 0), Color("e9e1d0"))
-	_box("duvet", Vector3(1.68, 0.15, 1.7), bed + Vector3(0, 0.79, -0.24), Color("728c7c"))
+	_box("mattress", Vector3(1.65, 0.25, 2.22), bed + Vector3(0, 0.59, 0), Color("e9e1d0"), true)
+	_box("duvet", Vector3(1.68, 0.15, 1.7), bed + Vector3(0, 0.79, -0.24), Color("728c7c"), true)
 	for x in [-0.42, 0.42]:
-		_box("pillow", Vector3(0.65, 0.17, 0.47), bed + Vector3(x, 0.82, 0.77), Color("f4edde"))
-	_box("headboard", Vector3(1.85, 0.95, 0.15), bed + Vector3(0, 0.78, 1.15), Color("664832"))
+		_box("pillow", Vector3(0.65, 0.17, 0.47), bed + Vector3(x, 0.82, 0.77), Color("f4edde"), true)
+	_box("headboard", Vector3(1.85, 0.95, 0.15), bed + Vector3(0, 0.78, 1.15), Color("664832"), true)
 	_add_service_sign("bed", "HOME", bed + Vector3(0, 1.65, 1.1), PI)
 	var storage := Vector3(width * 0.5 - 0.8, 0, depth * 0.5 - 0.85)
 	_shelf(storage, 1.35, false)
@@ -204,10 +228,10 @@ func _build_home(width: float, depth: float, premium: bool, apartment: bool) -> 
 	_box("rug", Vector3(2.4, 0.025, 2.3), Vector3(0, 0.018, 0.4), Color("bb9b68"))
 	if premium or apartment:
 		var sofa := Vector3(width * 0.5 - 1.0, 0, -depth * 0.5 + 1.5)
-		_box("sofa", Vector3(1.3, 0.43, 2.1), sofa + Vector3(0, 0.35, 0), Color("536e79"), true)
-		_box("sofa back", Vector3(0.23, 0.65, 2.1), sofa + Vector3(0.58, 0.7, 0), Color("536e79"))
+		_box("sofa", Vector3(1.3, 0.30, 2.1), sofa + Vector3(0, 0.255, 0), Color("536e79"), true)
+		_box("sofa back", Vector3(0.23, 0.65, 2.1), sofa + Vector3(0.58, 0.7, 0), Color("536e79"), true)
 		for z in [-0.66, 0.0, 0.66]:
-			_box("seat cushion", Vector3(0.97, 0.18, 0.59), sofa + Vector3(-0.08, 0.63, z), Color("69858b"))
+			_box("seat cushion", Vector3(0.97, 0.16, 0.59), sofa + Vector3(-0.08, 0.45, z), Color("69858b"), true)
 	_plant(Vector3(-width * 0.5 + 0.55, 0, -depth * 0.5 + 0.7))
 	if premium:
 		_plant(Vector3(width * 0.5 - 0.7, 0, depth * 0.5 - 2.6))

@@ -5,6 +5,7 @@ extends Control
 signal closed
 const MenuTheme = preload("res://scripts/menu_theme.gd")
 const InventoryTile = preload("res://scripts/inventory_tile.gd")
+const Plan = preload("res://scripts/city_plan.gd")
 var controller: Node
 var context: Dictionary = {}
 var _view: Dictionary = {}
@@ -22,6 +23,8 @@ var _structure := ""
 var _pending := false
 var _selected_item := ""
 var _selected_side := "backpack"
+var _retail_quantity := 1
+var _retail_item := ""
 var _quantity := 1
 var _tiles: Array = []
 var _motion: Tween
@@ -112,6 +115,8 @@ func _ready() -> void:
 	_resize_panel()
 
 func open(subject: Dictionary) -> void:
+	get_viewport().gui_release_focus()
+	_scroll.scroll_vertical = 0
 	context = subject.duplicate(true)
 	_structure = ""
 	_selected_item = ""
@@ -200,7 +205,9 @@ func _structure_key() -> String:
 	return JSON.stringify([str(context.get("kind", "info")), _building_id(), not own.is_empty(),
 		own.get("is_home", false), own.get("storage_included", true), _is_unavailable(), bag, storage, job.get("id", ""),
 		job.get("status", ""), job.get("carry_mode", ""), _view.get("job_catalog", []), _view.get("housing_catalog", []), _view.get("stops", []),
-		(_view.get("districts", []) as Array).map(func(d): return [d.get("id"), d.get("name"), d.get("kind")])])
+		(_view.get("districts", []) as Array).map(func(d): return [d.get("id"), d.get("name"), d.get("kind")]),
+		(_view.get("owned_vehicles",[]) as Array).map(func(row):return [row.get("id"),row.get("model")]),
+		(_view.get("retail_catalog", []) as Array).map(func(row): return [row.get("kind"), row.get("item"), row.get("label")])])
 
 func _rebuild() -> void:
 	var focus := get_viewport().gui_get_focus_owner()
@@ -216,7 +223,13 @@ func _rebuild() -> void:
 	var kind := str(context.get("kind", "info"))
 	_heading.text = str(context.get("name", "Crownreach"))
 	_subtitle.text = "CROWNREACH · " + _district_label()
-	if kind == "transit":
+	if kind in ["building", "interior", "info"] and not _retail_offer().is_empty():
+		_build_retail()
+	if kind in ["building","interior","info"] and preload("res://scripts/city_commerce.gd").category(Plan.building(_building_id()))=="dealership":
+		_build_dealership()
+	if kind.begins_with("civil_"):
+		preload("res://scripts/civil_panel.gd").build(_body,controller,context)
+	elif kind == "transit":
 		_build_transit()
 	elif kind == "storage":
 		_build_storage()
@@ -230,6 +243,9 @@ func _rebuild() -> void:
 		_build_workplace()
 	else:
 		_build_guide()
+	preload("res://scripts/resident_life_panel.gd").build(_body,controller,_view,context)
+	if kind=="building" and not _retail_offer().is_empty():
+		preload("res://scripts/civil_panel.gd").build(_body,controller,context)
 	call_deferred("_restore_focus", focus_key, scroll_y)
 
 func _refresh_live() -> void:
@@ -292,6 +308,76 @@ func _build_property() -> void:
 	else:
 		_button(actions, "Return outside", func(): _controller_action("exit_building"), "exit")
 		_body.add_child(MenuTheme.label("Walk to your cupboard for storage. Use your bed to set this as your home.", 12, MenuTheme.MUTED))
+
+
+func _retail_offer() -> Dictionary:
+	var building := Plan.building(_building_id())
+	if building.is_empty(): return {}
+	var offers := preload("res://scripts/city_commerce.gd").offers(building)
+	if offers.is_empty(): return {}
+	var result: Dictionary = offers[0].duplicate()
+	for row in offers:
+		if row.item==_retail_item: result = row.duplicate()
+	result["stock"] = int(_view.get("services",{}).get(result.service,{}).get("stock",{}).get(result.item,0))
+	return result
+
+
+func _can_buy_retail() -> bool:
+	var offer := _retail_offer()
+	return _physical("building") and not offer.is_empty() and _retail_quantity >= 1 and _retail_quantity <= 100 \
+		and int(offer.get("stock", 0)) >= _retail_quantity \
+		and int(_view.get("credits", 0)) >= int(offer.get("price", 0)) * _retail_quantity \
+		and _count_all(_bag_counts()) + _retail_quantity <= int(_view.get("backpack_capacity", 350))
+
+
+func _build_retail() -> void:
+	var offer := _retail_offer()
+	var card := _card(_body)
+	card.add_child(MenuTheme.label(preload("res://scripts/city_commerce.gd").name_for(Plan.building(_building_id())),19,MenuTheme.ACCENT))
+	var choices := OptionButton.new()
+	choices.set_meta("city_focus","retail_selector")
+	choices.custom_minimum_size.y = 38
+	var offers := preload("res://scripts/city_commerce.gd").offers(Plan.building(_building_id()))
+	for index in range(offers.size()):
+		var item:Dictionary=offers[index]
+		choices.add_item(str(item.label)+" · "+str(item.price)+" credits")
+		if item.item==offer.item:choices.select(index)
+	choices.item_selected.connect(func(index): _retail_item = str(offers[index].item); _refresh_live())
+	card.add_child(choices)
+	_live_label(card, func():
+		var current := _retail_offer()
+		return "%s · %s credits each · %s available" % [str(current.get("label", "Item")), _number(int(current.get("price", 0))), _number(int(current.get("stock", 0)))], 14)
+	var actions := _row(card)
+	var less := _button(actions, "−", func(): _retail_quantity = maxi(1, _retail_quantity - 1); _refresh_live(), "retail_minus")
+	less.disabled = not _physical("building")
+	_live_label(actions, func(): return str(_retail_quantity), 16)
+	var more := _button(actions, "+", func(): _retail_quantity = mini(100, _retail_quantity + 1); _refresh_live(), "retail_plus")
+	more.disabled = not _physical("building")
+	_action(actions, "Buy", func():
+		var current := _retail_offer()
+		_request("buy_store_item", {"building": _building_id(), "item": str(current.get("item", "")), "quantity": _retail_quantity}),
+		_can_buy_retail, "buy_store_item", true,
+		func(): return "Buy · %s credits" % _number(int(_retail_offer().get("price", 0)) * _retail_quantity))
+	_live_label(card, func():
+		if not _physical("building"): return "Visit this shop's front door to buy."
+		if int(_retail_offer().get("stock", 0)) == 0: return "Sold out. Nearby shops share the same finite supply."
+		return "Purchases go directly into your Earth backpack.", 12, MenuTheme.MUTED)
+
+func _build_dealership() -> void:
+	var card := _card(_body)
+	card.add_child(MenuTheme.label("CROWN MOTOR GALLERY",20,MenuTheme.ACCENT))
+	card.add_child(MenuTheme.label("Browse ten full-size vehicles. Your purchase includes a persistent garage space and delivery in the rear court.",12,MenuTheme.MUTED))
+	var fleet := preload("res://scripts/city_vehicle_models.gd").catalog()
+	fleet.sort_custom(func(a,b):return str(a.label)<str(b.label))
+	for spec in fleet:
+		var row := _row(card)
+		row.add_child(MenuTheme.label("%s · %.2fm × %.2fm · %s credits" % [spec.label,spec.length,spec.width,_number(int(spec.price))],13))
+		_action(row,"Buy",func():_request("buy_vehicle",{"building":_building_id(),"model":str(spec.id)}),
+			func():return _physical("building") and int(_view.get("credits",0))>=int(spec.price) and int(_view.get("vehicle_stock",{}).get(spec.id,0))>0 and _view.get("owned_vehicles",[]).size()<3,"buy_"+str(spec.id))
+	for owned in _view.get("owned_vehicles",[]):
+		var row := _row(card)
+		row.add_child(MenuTheme.label("Your "+str(owned.model).replace("_"," "),13,MenuTheme.ACCENT))
+		_action(row,"Collect at this dealer",func():_request("recall_vehicle",{"building":_building_id(),"vehicle":str(owned.id)}),func():return _physical("building"),"recall_"+str(owned.id))
 
 func _build_storage() -> void:
 	_heading.text = "Your storage"
@@ -460,7 +546,7 @@ func _build_transit() -> void:
 func _build_guide(include_heading := true) -> void:
 	if include_heading: _heading.text = "Crownreach · Lantern Square"
 	var city: Dictionary = _view.get("city", {})
-	_body.add_child(MenuTheme.label("%s residents · %s square miles" % [_number(int(city.get("population", 400000))), str(city.get("area_sq_mi", 205))], 18, MenuTheme.ACCENT))
+	_body.add_child(MenuTheme.label("%s residents · %.1f square miles" % [_number(int(city.get("population", Plan.RESIDENT_TARGET))), float(city.get("area_sq_mi", Plan.SQUARE_MILES))], 18, MenuTheme.ACCENT))
 	_body.add_child(MenuTheme.label("Start small, build a home, and work your way into the city. Property services belong to their doors and interiors.", 13, MenuTheme.MUTED))
 	_build_district_conditions()
 	var grid := GridContainer.new()
@@ -507,6 +593,13 @@ func _build_district_conditions() -> void:
 	_live_label(stats, func(): return "Working residents\n%s / %s" % [_number(int(_district().get("workforce", 0))), _number(int(_district().get("workforce_capacity", 0)))], 13)
 	_live_label(stats, func(): return "Service condition\n%s%% · %s shortages" % [roundi(float(_district().get("service_condition", 0)) * 100), _number(int(_district().get("shortages", 0)))], 13)
 	_live_label(card, func(): return "%s residents · %s" % [_number(int(_district().get("population", 0))), str(_district().get("kind", "")).replace("_", " ").capitalize()], 12, MenuTheme.MUTED)
+	_live_label(card, func():
+		var i: Dictionary = _district().get("infrastructure", {})
+		return "Electricity %d%% · Drinking water %d%% · Clinic service %d%% · Transport %d%%" % [roundi(float(i.get("power_ratio",1))*100),roundi(float(i.get("water_ratio",1))*100),roundi(float(i.get("clinic_ratio",1))*100),roundi(float(i.get("mobility_ratio",1))*100)], 13)
+	_live_label(card, func():
+		var i: Dictionary = _district().get("infrastructure", {})
+		return "Water reserve %.0f · Waste waiting %.1f · Recycling %.0f · Municipal fund %.0f" % [float(i.get("water_reserve",0)),float(i.get("waste_backlog",0)),float(i.get("recycled",0)),float(i.get("budget",0))], 12, MenuTheme.MUTED)
+	card.add_child(MenuTheme.label("District service units: electricity runs pumps and treatment; collection crews recover recyclable material. Tax receipts fund operations. Repairs restore infrastructure; shortages affect food production, clinics and work.", 12, MenuTheme.MUTED))
 	card.add_child(MenuTheme.label("Produce deliveries replenish the district's food. Maintenance work improves its services. Food shortages reduce the available workforce.", 12, MenuTheme.MUTED))
 
 func _district() -> Dictionary:
@@ -674,11 +767,14 @@ func _action(parent: Node, text: String, callback: Callable, allowed: Callable, 
 	return button
 
 func _focus_first() -> void:
+	# New subjects start at their first action after container reflow.
+	await get_tree().process_frame
 	if not visible: return
 	var controls := _body.find_children("*", "Button", true, false)
 	for control in controls:
 		if not control.disabled:
 			control.grab_focus()
+			_scroll.scroll_vertical = 0
 			return
 
 func _restore_focus(key: String, scroll_y: int) -> void:

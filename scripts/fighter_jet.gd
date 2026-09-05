@@ -93,6 +93,8 @@ var _burner_player: AudioStreamPlayer3D
 var _wingtip_trails: Array[GPUParticles3D] = []
 var _detail_body: Node3D
 var _far_silhouette: MeshInstance3D
+var _breakup_started := false
+var _breakup_report: Dictionary = {}
 
 
 func _init() -> void:
@@ -188,6 +190,44 @@ func _process(_dt: float) -> void:
 	var camera := get_viewport().get_camera_3d() if is_inside_tree() else null
 	_update_distance_lod(global_position.distance_to(camera.global_position) \
 		if camera else 0.0)
+
+
+func report_collision_impact(point: Vector3, normal: Vector3, closing_speed: float, other: Node = null) -> void:
+	var incoming := linear_velocity
+	super.report_collision_impact(point,normal,closing_speed,other)
+	if not wrecked: return
+	_start_breakup(incoming,normal,true)
+
+
+func _start_breakup(incoming: Vector3, normal: Vector3, animate: bool) -> void:
+	if _breakup_started or not is_instance_valid(_detail_body): return
+	_breakup_started = true
+	var holder: Node = world if is_instance_valid(world) else get_parent()
+	if not is_instance_valid(holder): return
+	var effects := holder.get_node_or_null("AircraftBreakupEffects") as AircraftBreakupEffects
+	if not is_instance_valid(effects):
+		effects = AircraftBreakupEffects.new()
+		effects.name = "AircraftBreakupEffects"
+		holder.add_child(effects)
+	_breakup_report = effects.break_apart(self,_detail_body,incoming,normal,animate)
+	_detail_body.visible = false
+	_far_silhouette.visible = false
+	for trail in _wingtip_trails: trail.emitting = false
+	throttle_setpoint = 0.0
+	afterburner = false
+
+
+func _apply_replicated_crash_presentation(row: Dictionary, animate: bool) -> void:
+	if wrecked:
+		_start_breakup(linear_velocity,(global_basis*Vector3(row.normal)).normalized(),animate)
+
+
+func crash_report() -> Dictionary:
+	var report := super.crash_report()
+	report["breakup"] = _breakup_started
+	report["breakup_geometry"] = _breakup_report.duplicate()
+	report.breakup_geometry.erase("remnant")
+	return report
 
 
 func mount_verb() -> String:
@@ -293,7 +333,7 @@ func _simulate(dt: float) -> void:
 		afterburner = false
 		_pitch_input = 0.0
 		_assisted_heading_active = false
-	if not has_drive_fuel():
+	if not has_drive_fuel() or wrecked:
 		throttle_setpoint = 0.0
 		afterburner = false
 	spool = move_toward(spool, throttle_setpoint, 0.42 * dt)
@@ -328,9 +368,9 @@ func _simulate(dt: float) -> void:
 	var thrust := THRUST_IDLE + THRUST_MIL * spool * pow(density / 1.225, 0.7)
 	if afterburner:
 		thrust += THRUST_AB_EXTRA * pow(density / 1.225, 0.8)
-	if not has_drive_fuel():
+	if not has_drive_fuel() or wrecked:
 		thrust = 0.0
-	apply_central_force(global_basis.z * thrust)
+	apply_central_force(global_basis.z * thrust * drive_power_factor())
 
 	var v := linear_velocity
 	var airspeed := v.length()
@@ -560,8 +600,8 @@ func apply_remote_state(pos: Vector3, yaw: float, aux: Vector3,
 	var remote_afterburner := aux.z >= REMOTE_AFTERBURNER_OFFSET
 	var remote_spool := aux.z - REMOTE_AFTERBURNER_OFFSET \
 		if remote_afterburner else aux.z
-	spool = clampf(remote_spool, 0.0, 1.0)
-	afterburner = remote_afterburner
+	spool = 0.0 if wrecked else clampf(remote_spool, 0.0, 1.0)
+	afterburner = remote_afterburner and not wrecked
 	engine.rpm = lerpf(62.0, 100.0, spool)
 	super(pos, yaw, Vector3(aux.x, aux.y, spool), vel)
 
@@ -658,6 +698,10 @@ func _build_far_silhouette() -> void:
 
 func _update_distance_lod(distance_m: float) -> void:
 	if not _detail_body or not _far_silhouette:
+		return
+	if _breakup_started:
+		_detail_body.visible = false
+		_far_silhouette.visible = false
 		return
 	var far := distance_m >= DETAIL_LOD_DISTANCE
 	_detail_body.visible = not far

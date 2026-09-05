@@ -1,0 +1,8 @@
+{
+  "version": "0.8.0.1",
+  "protocol": 18,
+  "installed_client_pck_sha256": "567c6122219918e6b3dbe3765beca56a26d6ee28e215d2ce9bdd13ffbf4b705b",
+  "runtime_files": 365,
+  "runtime_checksums_sha256": "0d420085f66537ce8f5154993d99f61dcf591a56f4d8f6293231b1e8c7339d10",
+  "local_build_sha256": "674ea5d0eab9191de33e1b52f95daddc6db47b119baca15b0ee9978f9efd0931"
+}

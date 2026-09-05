@@ -63,6 +63,7 @@ func configure(owner_world: Node3D) -> void:
 
 func _ready() -> void:
 	_font = ThemeDB.fallback_font
+	texture_filter = CanvasItem.TEXTURE_FILTER_LINEAR
 	clip_contents = true
 	mouse_filter = Control.MOUSE_FILTER_IGNORE
 	var settings := get_node_or_null("/root/Settings")
@@ -436,7 +437,7 @@ func _request_tiles_for_view(center: Vector2, window: float, rotation: float,
 		required[key] = true
 		if not _tiles[tier].has(key):
 			var image := Image.create(TILE_PX, TILE_PX, false,
-				Image.FORMAT_RGB8)
+				Image.FORMAT_RGBA8)
 			# A full-tile representative color is visible immediately. Subsequent
 			# row updates refine it, so turning cannot reveal black cache holes.
 			image.fill(_placeholder_color(tier, key))

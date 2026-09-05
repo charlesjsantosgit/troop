@@ -51,6 +51,8 @@ var _pending_kind := ""
 var _pending_town := ""
 var _pending_retry_at := 0
 var _pending_started_at := 0
+# Solar phase is independent of monotonic production/job/cargo simulation time.
+var _solar_clock_offset := 0.0
 
 
 func configure(main: Node, host: World, manager: ExpeditionManager,
@@ -206,13 +208,33 @@ func _process(delta: float) -> void:
 		for vehicle: Vehicle in world.vehicles.values():
 			if not vehicle.frontier_simulation:
 				vehicle.configure_frontier_fuel(simulation)
-		world.set_time_of_day_override(fmod(float(simulation.state.time), 1200.0) / 50.0)
+		world.set_time_of_day_override(solar_hour())
 		_update_sun()
 		_refresh_overlays()
 		backpack_changed.emit()
 	if _save_timer <= 0.0:
 		_save_timer = 20.0
 		save_progress()
+
+
+func solar_hour() -> float:
+	if not simulation:
+		return 12.0
+	return wrapf((float(simulation.state.time) + _solar_clock_offset) / 50.0, 0.0, 24.0)
+
+
+func set_solar_hour(hour: float) -> void:
+	if not is_finite(hour) or not simulation or _online:
+		return
+	_solar_clock_offset = wrapf(hour, 0.0, 24.0) * 50.0 - fmod(float(simulation.state.time), 1200.0)
+	world.set_time_of_day_override(solar_hour())
+	_update_sun()
+
+
+func clear_solar_hour() -> void:
+	_solar_clock_offset = 0.0
+	world.set_time_of_day_override(solar_hour())
+	_update_sun()
 
 
 func _sync_realm() -> void:
@@ -248,6 +270,7 @@ func _sync_realm() -> void:
 
 
 func _update_sun() -> void:
+	if not is_instance_valid(expedition): return
 	var moon := expedition.moon_world
 	if not is_instance_valid(moon) or not is_instance_valid(moon_site) or not moon.has_method("set_lunar_sun_direction"):
 		return

@@ -800,6 +800,12 @@ func render_frame(dt: float, physics_fraction: float = -1.0) -> void:
 	var height := DEATH_FOLLOW_HEIGHT if _death_view \
 		else (FIRST_PERSON_HEIGHT if first_person \
 		else (FRONT_VIEW_HEIGHT if front_view else THIRD_PERSON_HEIGHT))
+	if target.furniture_active():
+		if first_person:
+			target_pos = target.rig.head_p.to_global(Vector3(0,0.043,-0.152))
+			height = 0.0
+		else:
+			height = 0.80
 	var follow_rate := 30.0 if first_person else 22.0
 	if _vehicle_view:
 		# The vehicle supplies its own camera geometry: cockpit/helmet height

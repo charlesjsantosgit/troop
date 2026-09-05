@@ -18,7 +18,9 @@ static func fit_to(actor: Node3D, local_viewer: bool) -> Node3D:
 		rig.torso_p.add_child(pack)
 		pack._build(MonkeyRig.LOCAL_BODY_VISUAL_LAYER if local_viewer else 1)
 	var suit := actor.get_node_or_null("SpaceSuitSystem") as SpaceSuitSystem
-	pack.visible = not (suit and suit.equipped)
+	var resting: bool = actor.furniture_active() if actor is MonkeyPlayer \
+		else rig._anim_prev >= MonkeyRig.Anim.ENTER_SEAT and rig._anim_prev <= MonkeyRig.Anim.RISE
+	pack.visible = not (suit and suit.equipped) and not resting
 	return pack
 
 static func _material(color: String, roughness: float, metallic := 0.0) -> StandardMaterial3D:

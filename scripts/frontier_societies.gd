@@ -181,7 +181,7 @@ func city_view(identity: String, property_context: String = "") -> Dictionary:
 	return result
 
 func city_action(identity: String, kind: String, payload: Dictionary,
-		position: Vector3, time: float = -1.0) -> Dictionary:
+		position: Vector3, time: float = -1.0, context: Dictionary = {}) -> Dictionary:
 	var actor:=_actor(identity)
 	if not _valid_identity(identity) or not state.get("players",{}).has(actor):
 		return _result(false,"Register an authenticated resident first.")
@@ -189,7 +189,7 @@ func city_action(identity: String, kind: String, payload: Dictionary,
 	if city==null or not simulations.has("canopy"):
 		return _result(false,"Crownreach is unavailable.")
 	var authority_time:=float(state.time) if time<0.0 else time
-	var result: Dictionary=city.action(actor,kind,payload,simulations.canopy,position,authority_time)
+	var result: Dictionary=city.action(actor,kind,payload,simulations.canopy,position,authority_time,context)
 	state.city=city.state
 	return result
 
@@ -329,6 +329,10 @@ func _validated(candidate: Variant) -> Dictionary:
 		if not data.players.has(actor): return {}
 	for actor in city_check.state.active_jobs:
 		if not data.players.has(actor): return {}
+	for actor in city_check.state.resident_life:
+		if not data.players.has(actor): return {}
+	for actor in city_check.state.civil_law.residents:
+		if not data.players.has(actor): return {}
 	for town_id in data.claims:
 		var actor: Variant=data.claims[town_id]
 		if _town_parts(str(town_id)).is_empty() or not actor is String or not data.players.has(actor) or data.players[actor].claimed_town!=town_id: return {}
@@ -359,6 +363,7 @@ func _validated(candidate: Variant) -> Dictionary:
 			if quest.has("actor") and (not data.players.has(quest.actor) or not sim.state.quests.has(quest.get("template",""))): return {}
 		tested[id]=sim
 	if money!=STARTING_MONEY: return {}
+	if int(tested.canopy.state.accounts.get("civil_evidence",0))!=preload("res://scripts/civil_law.gd").escrow_total(city_check.state.civil_law): return {}
 	for actor in data.players:
 		for realm in ["earth","moon"]:
 			if int(data.players[actor].reserved[realm])!=int(reserved[actor][realm]): return {}

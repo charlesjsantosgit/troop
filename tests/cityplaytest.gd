@@ -84,18 +84,26 @@ func run(main: Node, capture := false) -> void:
 		"arrival releases movement after the whole foot placement has collision")
 	for i in range(240): await get_tree().physics_frame
 	check(city.city_world.get_child_count() < 200, "stream root remains bounded for a 2304-block city")
-	check(city.crowd.actors.size() <= 20, "local crowd and traffic obey independent actor caps")
+	var pedestrian_count := 0
+	var car_count := 0
+	for actor in city.crowd.actors:
+		if actor.car:
+			car_count += 1
+		else:
+			pedestrian_count += 1
+	check(pedestrian_count <= city.crowd.MAX_PEDESTRIANS and car_count <= city.crowd.MAX_CARS,
+		"local crowd and traffic obey their independent 64-person and 24-car limits")
 	var profiling := OS.get_cmdline_user_args().has("cityprofile")
 	if profiling:
 		# Diagnostic only: prepare the complete skyline before A/B rendering
 		# samples. This path is never used to claim streaming frame-time results.
-		while city.city_world.far_staged_block_count() < Plan.GRID_SIZE * Plan.GRID_SIZE:
+		while city.city_world.far_staged_block_count() < Plan.TOTAL_BLOCKS:
 			city.city_world._stage_one_far_block()
 		for i in range(90): await get_tree().process_frame
 	if capture or OS.get_cmdline_user_args().has("citysoak"):
 		var streaming_samples: Array[float] = []
 		var previous_stream := Time.get_ticks_usec()
-		while city.city_world.far_staged_block_count() < Plan.GRID_SIZE * Plan.GRID_SIZE:
+		while city.city_world.far_staged_block_count() < Plan.TOTAL_BLOCKS:
 			await get_tree().process_frame
 			if streaming_samples.size() % 120 == 0 or player.position.y < 7.8:
 				var ray := PhysicsRayQueryParameters3D.create(player.position + Vector3.UP * 2,

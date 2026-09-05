@@ -27,6 +27,7 @@ func run(_main=null) -> void:
 func run_checks() -> bool:
 	_catalog_and_aggregate_checks()
 	_offline_property_checks()
+	_retail_checks()
 	_job_checks()
 	_society_persistence_and_privacy_checks()
 	return passed==checks
@@ -40,9 +41,9 @@ func _catalog_and_aggregate_checks() -> void:
 	var snapshot: Dictionary=economy.view("player")
 	var census:=0
 	for district: Dictionary in snapshot.districts: census+=int(district.population)
-	_check(snapshot.city.population==400000 and census==400000 and snapshot.districts.size()==12,
-		"twelve aggregate districts represent exactly 400,000 residents")
-	_check(not economy.state.has("residents") and economy.state.size()<16,
+	_check(snapshot.city.population==100000 and census==100000 and snapshot.districts.size()==12,
+		"twelve aggregate districts represent exactly 100,000 residents")
+	_check(not economy.state.has("residents") and economy.state.size()<24,
 		"city census has no per-resident simulation records")
 	var catalog: Array=snapshot.housing_catalog
 	var tiers:={}
@@ -60,8 +61,8 @@ func _catalog_and_aggregate_checks() -> void:
 	_check(not generated.is_empty() and generated.id=="city_apartment"
 		and generated.building=="crownreach-b01-01-l01",
 		"ordinary deterministic housing buildings are purchasable beyond six landmarks")
-	_check(snapshot.job_catalog.size()==10 and snapshot.services.size()==11,
-		"three practical job families use exact physical service doors")
+	_check(snapshot.job_catalog.size()==12 and snapshot.services.size()==11,
+		"courier, maintenance, provisioning and restocking jobs use exact physical service doors")
 	var before_goods:=economy.total_goods("meal")
 	_check(economy.advance(460.0),"aggregate clock advances in one bounded calculation")
 	var advanced:=economy.view("player")
@@ -75,7 +76,7 @@ func _catalog_and_aggregate_checks() -> void:
 		"census counters do not mint or consume undelivered trade goods")
 	_check(economy.advance(1000000000.0) and int(economy.state.metrics.aggregate_intervals)==61
 		and int(economy.state.metrics.skipped_intervals)>0,
-		"huge time gaps skip bounded aggregate work instead of ticking 400,000 actors")
+		"huge time gaps skip bounded aggregate work instead of ticking 100,000 actors")
 	_check(imported.import_state(economy.state),"bounded long-horizon aggregate state remains valid")
 	_maximum_view_bound_check()
 
@@ -84,8 +85,8 @@ func _maximum_view_bound_check() -> void:
 	var economy=EconomyScript.new()
 	economy.new_game(2026,400.0)
 	var ids: Array=[]
-	for y in range(Plan.GRID_SIZE):
-		for x in range(Plan.GRID_SIZE):
+	for y in range(Plan.GRID_DEPTH):
+		for x in range(Plan.GRID_WIDTH):
 			for building: Dictionary in Plan.block_buildings(Vector2i(x,y)):
 				if not str(building.housing).is_empty(): ids.append(str(building.id))
 				if ids.size()>=EconomyScript.MAX_PROPERTIES: break
@@ -262,6 +263,171 @@ func _job_checks() -> void:
 	_restock_job_checks()
 
 
+func _retail_checks() -> void:
+	var sim=_world()
+	var catalog: Array=sim.city_view().retail_catalog
+	var offers: Array[Dictionary]=[
+		{"kind":"market","item":"banana","price":6,"service":"produce_market","building":"crownreach-b24-24-l00","stock":240},
+		{"kind":"restaurant","item":"meal","price":12,"service":"courier_depot","building":"crownreach-b22-24-l01","stock":600},
+		{"kind":"workshop","item":"spare_parts","price":28,"service":"maintenance_depot","building":"crownreach-b00-23-l12","stock":90},
+	]
+	_check(catalog.size()==3,"bounded retail catalog exposes three practical storefront categories")
+	for offer in offers:
+		var row: Dictionary={}
+		for candidate: Dictionary in catalog:
+			if candidate.kind==offer.kind: row=candidate
+		_check(not row.is_empty() and row.item==offer.item and row.price==offer.price
+			and row.service==offer.service and row.stock==offer.stock,
+			"%s publishes its exact price and finite shared stock"%offer.kind)
+		var shop: Dictionary=Plan.building(offer.building)
+		var wallet: int=sim.balance("player")
+		var treasury: int=sim.balance("treasury")
+		var money: int=sim.total_money()
+		var goods:=_combined_goods(sim,offer.item)
+		var bag: int=sim.stock("player_earth",offer.item)
+		var stock:=_city_stock(sim,offer.service,offer.item)
+		_check(shop.kind==offer.kind and sim.city_action("buy_store_item",
+			{"building":shop.id,"item":offer.item,"quantity":2},shop.door).ok,
+			"%s storefront sells its listed item at the actual park building door"%offer.kind)
+		_check(sim.balance("player")==wallet-int(offer.price)*2
+			and sim.balance("treasury")==treasury+int(offer.price)*2 and sim.total_money()==money
+			and sim.stock("player_earth",offer.item)==bag+2
+			and _city_stock(sim,offer.service,offer.item)==stock-2
+			and _combined_goods(sim,offer.item)==goods,
+			"%s sale moves exact existing goods and credits without minting"%offer.kind)
+	_check(sim.validate_state(sim.state),"all three storefront purchases retain a valid authoritative world")
+	_retail_rejection_checks()
+	_retail_shared_stock_checks()
+	_retail_persistence_checks(sim)
+	_retail_online_checks()
+
+
+func _retail_rejection_checks() -> void:
+	var sim=_world()
+	var shop: Dictionary=Plan.building("crownreach-b24-24-l00")
+	var purchase:={"building":shop.id,"item":"banana","quantity":1}
+	for quantity in [0,-1,1.5,101,"1",true,NAN,INF,1000000000]:
+		var malformed: Dictionary=purchase.duplicate(true)
+		malformed.quantity=quantity
+		_retail_reject(sim,malformed,shop.door,"retail rejects invalid quantity %s atomically"%str(quantity))
+	for change: Dictionary in [{"building":42},{"item":42},{"item":"meal"},
+		{"building":"crownreach-b00-99-l00"},{"building":"crownreach-b01-01-l04"},
+		{"price":1},{"service":"courier_depot"}]:
+		var malformed: Dictionary=purchase.duplicate(true)
+		malformed.merge(change,true)
+		_retail_reject(sim,malformed,shop.door,"retail rejects forged or mismatched payload %s"%JSON.stringify(change))
+	var missing: Dictionary=purchase.duplicate(true)
+	missing.erase("quantity")
+	_retail_reject(sim,missing,shop.door,"retail requires an explicit whole quantity")
+	_retail_reject(sim,purchase,shop.door+Vector3(18.1,0,0),"retail rejects a shopper beyond the trusted door range")
+	_retail_reject(sim,purchase,Vector3(NAN,0,0),"retail rejects a nonfinite trusted position")
+	var poor=_world()
+	poor._transfer("player","treasury",poor.balance("player"),"retail test empties wallet through a real transfer")
+	_retail_reject(poor,purchase,shop.door,"an unfunded shopper cannot remove shop stock")
+	var full=_world()
+	var occupied:=0
+	for quantity in full.state.inventories.player_earth.values(): occupied+=int(quantity)
+	full.state.locations.player_earth.capacity=occupied
+	_retail_reject(full,purchase,shop.door,"a full backpack cannot be charged or remove shop stock")
+
+
+func _retail_shared_stock_checks() -> void:
+	var sim=_world()
+	var first: Dictionary=Plan.building("crownreach-b24-24-l00")
+	var second: Dictionary=Plan.building("crownreach-b12-24-l00")
+	var goods:=_combined_goods(sim,"banana")
+	var money: int=sim.total_money()
+	var bag: int=sim.stock("player_earth","banana")
+	var all_bought:=true
+	var shops:=[first,second,first]
+	var quantities:=[100,100,40]
+	for index in range(3):
+		var shop: Dictionary=shops[index]
+		all_bought=all_bought and sim.city_action("buy_store_item",
+			{"building":shop.id,"item":"banana","quantity":quantities[index]},shop.door).ok
+	_check(first.id!=second.id and first.kind=="market" and second.kind=="market" and all_bought
+		and _city_stock(sim,"produce_market","banana")==0
+		and sim.stock("player_earth","banana")==bag+240
+		and _combined_goods(sim,"banana")==goods and sim.total_money()==money,
+		"two markets share and exactly exhaust the same 240 finite bananas with 100-unit boundary orders")
+	_retail_reject(sim,{"building":second.id,"item":"banana","quantity":1},second.door,
+		"an exhausted shared shop cannot sell one more item despite sufficient bag space and credits")
+	var stock_view:=0
+	for row: Dictionary in sim.city_view().retail_catalog:
+		if row.kind=="market": stock_view=int(row.stock)
+	_check(stock_view==0 and sim.validate_state(sim.state),"sold-out stock is visible and the depleted world remains valid")
+
+
+func _retail_persistence_checks(sim) -> void:
+	var path:="user://cityeconomytest-retail-save.json"
+	for suffix in ["",".bak",".tmp"]:
+		DirAccess.remove_absolute(ProjectSettings.globalize_path(path+suffix))
+	_check(sim.save_game(path),"retail inventory and wallet save through the real atomic checkpoint")
+	var loaded=_world()
+	var load_ok: bool=loaded.load_game(path)
+	var quantities_match:=true
+	# JSON preserves integer quantities as numeric values, not Variant int tags.
+	# Compare every known count through the public integer stock accessors.
+	for item in _all_items():
+		quantities_match=quantities_match and loaded.stock("player_earth",item)==sim.stock("player_earth",item)
+		for service in EconomyScript.SERVICE_IDS:
+			quantities_match=quantities_match and _city_stock(loaded,service,item)==_city_stock(sim,service,item)
+	_check(load_ok and loaded.balance("player")==sim.balance("player") and quantities_match,
+		"shop depletion and purchased backpack items survive save and reload exactly")
+	var legacy: Dictionary=sim.state.duplicate(true)
+	legacy.city.service_inventories.produce_market={}
+	legacy.city.service_inventories.maintenance_depot={}
+	_write_json(path,legacy)
+	var migrated=_world()
+	_check(migrated.load_game(path) and int(migrated.state.city.schema_version)==1
+		and migrated.state.city.service_inventories.size()==11
+		and migrated.state.city.service_inventories.produce_market.is_empty()
+		and migrated.state.city.service_inventories.maintenance_depot.is_empty(),
+		"existing schema-one saves retain empty retail stock without automatic refills or new service keys")
+	var market: Dictionary=Plan.building("crownreach-b24-24-l00")
+	_retail_reject(migrated,{"building":market.id,"item":"banana","quantity":1},market.door,
+		"loading an older empty shop cannot create opening stock on its first purchase")
+	for suffix in ["",".bak",".tmp"]:
+		DirAccess.remove_absolute(ProjectSettings.globalize_path(path+suffix))
+
+
+func _retail_reject(sim,payload: Dictionary,position: Vector3,label: String) -> void:
+	var before:=JSON.stringify(sim.state)
+	_check(not sim.city_action("buy_store_item",payload,position).ok
+		and JSON.stringify(sim.state)==before,label)
+
+
+func _retail_online_checks() -> void:
+	var societies=SocietiesScript.new()
+	societies.new_game(2026)
+	var identities:=["1".repeat(64),"2".repeat(64)]
+	var market: Dictionary=Plan.building("crownreach-b24-24-l00")
+	for identity in identities:
+		_check(societies.ensure_player(identity,"Shopper").ok,"online retail shopper has an authenticated funded account")
+	var money: int=societies.total_money()
+	var both_bought:=true
+	for identity in identities:
+		both_bought=both_bought and societies.city_action(identity,"buy_store_item",
+			{"building":market.id,"item":"banana","quantity":1},market.door).ok
+		var view: Dictionary=societies.city_view(identity)
+		both_bought=both_bought and view.credits==1794 and view.backpack_counts.banana==9
+	_check(both_bought and int(societies.state.city.service_inventories.produce_market.banana)==238
+		and societies.total_money()==money,
+		"two online shoppers share one finite shop while charging only their own wallets and crediting their own bags")
+	var before:=JSON.stringify(societies.export_state())
+	_check(not societies.city_action("f".repeat(64),"buy_store_item",
+		{"building":market.id,"item":"banana","quantity":1},market.door).ok
+		and JSON.stringify(societies.export_state())==before,
+		"an unregistered online identity cannot consume shared retail stock")
+	var restored=SocietiesScript.new()
+	restored.new_game(99)
+	_check(restored.import_state(societies.export_state())
+		and restored.city_view(identities[0]).backpack_counts.banana==9
+		and restored.city_view(identities[1]).backpack_counts.banana==9
+		and int(restored.state.city.service_inventories.produce_market.banana)==238,
+		"online retail depletion and both private purchases survive authority restart")
+
+
 func _courier_job_checks() -> void:
 	var sim=_world()
 	var source: Vector3=Plan.service("courier_depot").position
@@ -331,16 +497,19 @@ func _produce_job_checks() -> void:
 	var destination: Vector3=Plan.service("produce_market").position
 	var total_before:=_combined_goods(sim,"banana")
 	var money_before: int=sim.total_money()
+	var market_before:=_city_stock(sim,"produce_market","banana")
+	var initial_time:=float(sim.state.time)
 	_check(sim.city_action("start_job",{"job":"produce_provisioning"},source).ok
 		and sim.stock("player_earth","banana")==4,"produce provisioning loads four kilograms from real harvest stock")
 	var active: Dictionary=sim.city_view().active_job
 	_check(active.cargo=={"banana":4} and _combined_goods(sim,"banana")==total_before,
 		"produce remains conserved while visibly carried")
 	sim.state.time=float(active.ready_at)
+	var consumed_intervals:=floori(float(active.ready_at)/EconomyScript.AGGREGATE_INTERVAL)-floori(initial_time/EconomyScript.AGGREGATE_INTERVAL)
 	_check(sim.city_action("finish_job",{},destination).ok
-		and _city_stock(sim,"produce_market","banana")==4
-		and _combined_goods(sim,"banana")==total_before and sim.total_money()==money_before,
-		"Garden Row receives the exact crop and pays only funded credits")
+		and _city_stock(sim,"produce_market","banana")==market_before+4-consumed_intervals
+		and _combined_goods(sim,"banana")==total_before-consumed_intervals and sim.total_money()==money_before,
+		"Garden Row receives the exact crop, accounts for scheduled resident consumption and pays funded credits")
 	var empty=_world()
 	for crop in EconomyScript.CROP_ITEMS: empty.state.inventories.player_earth.erase(crop)
 	var baseline:=JSON.stringify(empty.state)
@@ -425,7 +594,7 @@ func _society_persistence_and_privacy_checks() -> void:
 	var migrated=SocietiesScript.new()
 	migrated.new_game(1)
 	_check(migrated.import_state(legacy) and migrated.city_view(identity_a).owned_properties.is_empty()
-		and migrated.state.city.population==400000,"older shared save migrates one empty Crownreach state")
+		and migrated.state.city.population==100000,"older shared save migrates one empty Crownreach state")
 	var intervals:=int(restored.state.city.metrics.aggregate_intervals)
 	for _i in range(60): restored.tick(1.0)
 	_check(int(restored.state.city.metrics.aggregate_intervals)==intervals+1,

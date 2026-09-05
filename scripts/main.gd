@@ -103,18 +103,82 @@ func _ready() -> void:
 		_show_menu()
 		return
 	match args[0]:
+		"vehicleimpactsnap":
+			mode = args[0]
+			var impact_capture = load("res://tests/vehicleimpacttest.gd").new()
+			add_child(impact_capture)
+			impact_capture.call_deferred("run",true)
+		"citymonkeyatlas":
+			mode = args[0]
+			var atlas_baker = load("res://tests/citymonkeyatlas.gd").new()
+			add_child(atlas_baker)
+			atlas_baker.call_deferred("run")
 		"frontiertraffictest":
 			mode = args[0]
 			var traffic_test = load("res://tests/frontiertraffictest.gd").new()
 			add_child(traffic_test)
 			traffic_test.call_deferred("run", self)
-		"cityeconomytest", "cityplantest", "cityuitest", "frontiertest", "lunarskytest", "rocketgroundingtest":
+		"civilnetworktest", "highwaytest", "residentlifetest", "civillawtest", "civilpoliceworldtest", "citydrivingtest", "citytrafficimpacttest", "vehicleimpacttest", "citydisastertest", "citylifetest", "cityeconomytest", "cityplantest", "cityuitest", "citytraffictest", "citysystemstest", "frontiertest", "lunarskytest", "rocketgroundingtest":
 			mode = args[0]
 			var expansion_test = load("res://tests/%s.gd" % args[0]).new()
 			add_child(expansion_test)
 			expansion_test.call_deferred("run")
 		"frontier":
 			_start_frontier(_rand_name())
+		"citypreview":
+			_start_frontier(_rand_name(), false)
+			var city_plan = preload("res://scripts/city_plan.gd")
+			frontier_controller.city._teleport(Vector3(city_plan.CENTER.x, city_plan.GROUND_Y + 1.2, city_plan.CENTER.y))
+			frontier_controller.simulation.state.time = 650.0
+			world.set_time_of_day_override(13.0)
+			world.local_player.cam.yaw = -PI * 0.25
+			world.local_player.cam.pitch = -0.12
+			frontier_controller.last_message = "Crownreach preview · 30 square miles · B opens the city guide. This preview does not save."
+		"penthousepreview":
+			_start_frontier(_rand_name(), false)
+			call_deferred("_open_penthouse_preview")
+		"cityremaketest", "cityremakesnap":
+			mode = args[0]
+			_start_frontier("CrownreachRemakeTester", false)
+			var city_test = load("res://tests/cityremaketest.gd").new()
+			add_child(city_test)
+			city_test.call_deferred("run", self, args[0] == "cityremakesnap")
+		"citypopulationbench":
+			mode = args[0]
+			_start_frontier("PopulationTester",false)
+			var population_bench = load("res://tests/citypopulationbench.gd").new()
+			add_child(population_bench)
+			population_bench.call_deferred("run",self)
+		"citytrafficsnap":
+			mode = args[0]
+			_start_frontier("TrafficTester", false)
+			var traffic_capture = load("res://tests/citytrafficcapture.gd").new()
+			add_child(traffic_capture)
+			traffic_capture.call_deferred("run", self)
+		"cityemergencytest", "cityemergencysnap":
+			mode=args[0]
+			_start_frontier("EmergencyTester",false)
+			var emergency_test=load("res://tests/cityemergencytest.gd").new()
+			add_child(emergency_test)
+			emergency_test.call_deferred("run",self,args[0]=="cityemergencysnap")
+		"parkactivitytest", "parkactivitysnap":
+			mode=args[0]
+			_start_frontier("ParkTester",false)
+			var park_test=load("res://tests/parkactivitytest.gd").new()
+			add_child(park_test)
+			park_test.call_deferred("run",self,args[0]=="parkactivitysnap")
+		"cityfurnituretest":
+			mode=args[0]
+			_start_frontier("FurnitureTester",false)
+			var furniture_test=load("res://tests/cityfurnituretest.gd").new()
+			add_child(furniture_test)
+			furniture_test.call_deferred("run",self)
+		"citypenthousetest", "citypenthousesnap":
+			mode = args[0]
+			_start_frontier("PenthouseTester", false)
+			var penthouse_test = load("res://tests/citypenthousetest.gd").new()
+			add_child(penthouse_test)
+			penthouse_test.call_deferred("run", self, args[0] == "citypenthousesnap")
 		"cityplaytest", "citycapture", "citysoak":
 			mode = args[0]
 			_start_frontier("CrownreachTester", false)
@@ -326,6 +390,12 @@ func _ready() -> void:
 			var wing_test = load("res://tests/wingtest.gd").new()
 			add_child(wing_test)
 			wing_test.call_deferred("run")
+		"cartographytest", "cartographysnap":
+			_start_frontier("Cartographer", false)
+			mode = args[0]
+			var map_test = load("res://tests/cartographytest.gd").new()
+			add_child(map_test)
+			map_test.call_deferred("run", self, args[0] == "cartographysnap")
 		"worldmaptest":
 			mode = "worldmaptest"
 			_start_solo("AtlasTester", 2026, 1)
@@ -915,6 +985,43 @@ func _start_debug_world(pname: String) -> void:
 func _start_solo(pname: String, seed_v: int, warm_r: int) -> void:
 	Net.solo(pname, seed_v)
 	_enter_world(pname, seed_v, warm_r)
+
+
+func _open_penthouse_preview() -> void:
+	var plan = preload("res://scripts/city_plan.gd")
+	var economy = preload("res://scripts/city_economy.gd")
+	var penthouse: Dictionary = plan.building("crownreach-b24-24-l02")
+	var spec: Dictionary = economy.property_spec(str(penthouse.id))
+	var city: Node = frontier_controller.city
+	var sim = frontier_controller.simulation
+	var allowance := maxi(0, int(spec.price) + 500 - sim.balance("player"))
+	if allowance > 0:
+		sim._transfer("treasury", "player", allowance, "Fresh penthouse preview allowance")
+	city._teleport(penthouse.door + Vector3.UP * 1.2)
+	var frames := 0
+	while city.arrival_pending() and frames < 600:
+		await get_tree().physics_frame
+		frames += 1
+	if city.arrival_pending():
+		frontier_controller.last_message = "The preview is still preparing the entrance ground."
+		return
+	var purchase: Dictionary = city.request_action("buy_home", {"building": penthouse.id})
+	if not purchase.get("ok", false):
+		frontier_controller.last_message = str(purchase.get("message", "Could not open the penthouse preview."))
+		return
+	city.enter_building(str(penthouse.id))
+	frames = 0
+	while city.arrival_pending() and frames < 600:
+		await get_tree().physics_frame
+		frames += 1
+	if city.arrival_pending() or not city.is_inside(): return
+	frontier_controller.set_solar_hour(17.5)
+	world.local_player.cam.set_first_person(true)
+	world.local_player.cam.yaw = city.interior.spawn_yaw()
+	world.local_player.cam.pitch = 0.0
+	city.close_panel()
+	frontier_controller.last_message = "Penthouse preview · E sits, reclines or sleeps; E or movement gets up. This fresh session does not save career progress."
+	print("PENTHOUSE_PREVIEW_READY property=%s position=%s" % [penthouse.id, str(world.local_player.global_position)])
 
 
 func _start_frontier(pname: String, load_saved := true) -> void:

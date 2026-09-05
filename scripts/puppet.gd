@@ -38,6 +38,7 @@ var _melee_combo := 0
 var _melee_attack_primed := false
 var _weapon_hand_transforms: Dictionary = {}
 var _remote_weapon_stowed := false
+var _furniture_gear_hidden := false
 var _state_weapon_stowed := false
 var _state_melee_mode := false
 var _state_healing_progress := 0.0
@@ -261,7 +262,19 @@ func _process(dt: float) -> void:
 		_melee_attack_primed = false
 	var should_stow := _externally_driven or _state_weapon_stowed \
 		or _melee_remaining > 0.0
+	var furniture_pose := _anim >= MonkeyRig.Anim.ENTER_SEAT and _anim <= MonkeyRig.Anim.RISE
+	if is_instance_valid(Net.frontier_network) and Net.frontier_network.get("city")!=null:
+		rig.furnished_room=Net.frontier_network.city.peer_in_furnished_room(peer_id,global_position)
+	if _furniture_gear_hidden and not furniture_pose:
+		rig.visible=true
+		gun.visible = _active_weapon_kind == Net.WEAPON_REVOLVER
+		shotgun.visible = _active_weapon_kind == Net.WEAPON_SHOTGUN
+		smg.visible = _active_weapon_kind == Net.WEAPON_SMG
+		sniper.visible = _active_weapon_kind == Net.WEAPON_SNIPER
 	_sync_remote_weapon_mount(should_stow)
+	if furniture_pose:
+		for weapon in [gun,shotgun,smg,sniper]: weapon.visible = false
+	_furniture_gear_hidden = furniture_pose
 	var sniper_rope_active := _swinging and not _externally_driven \
 		and _active_weapon_kind == Net.WEAPON_SNIPER and not should_stow
 	rig.set_sniper_rope_pose(sniper_rope_active,
@@ -354,7 +367,25 @@ func _process(dt: float) -> void:
 	var presentation_anim := MonkeyRig.Anim.CABIN if _externally_driven else _anim
 	rig.update_motion(dt, presentation_anim, _vel,
 		presentation_anim <= MonkeyRig.Anim.SPRINT, pivot)
+	if presentation_anim>=MonkeyRig.Anim.ENTER_SEAT and presentation_anim<=MonkeyRig.Anim.RISE \
+		and is_instance_valid(Net.frontier_network) and Net.frontier_network.get("city")!=null:
+		var frame:Dictionary=Net.frontier_network.city.furniture_sample(peer_id,global_position)
+		_apply_city_furniture_frame(frame)
+
 	_update_water_effects()
+
+
+func _apply_city_furniture_frame(frame:Dictionary)->bool:
+	if rig==null:return false
+	rig.visible=not frame.is_empty()
+	if frame.is_empty():return false
+	# Project packet interpolation onto the approved articulated trajectory;
+	# a straight interpolation chord must not cut through a bed or armrest.
+	rig.top_level=true
+	rig.physics_interpolation_mode=Node.PHYSICS_INTERPOLATION_MODE_OFF
+	rig.global_transform=Transform3D(Basis.IDENTITY,frame.root)
+	rig.apply_furniture_pose(frame)
+	return true
 
 
 func _sync_surface_basis() -> void:

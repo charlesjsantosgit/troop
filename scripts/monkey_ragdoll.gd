@@ -1,8 +1,8 @@
 class_name MonkeyRagdoll
 extends Node3D
-## A lightweight procedural physics double for a defeated monkey. Each major
-## limb is a rigid body joined at the anatomical pivot. Lethal headshots omit
-## the neck joint so the head becomes an independent physics body.
+## A physical articulated copy of the actual player model. Existing rigid-body
+## joints own motion; visible parts are transferred directly from MonkeyRig.
+## Lethal headshots omit the neck joint so the head moves independently.
 
 const TORSO_CENTER := Vector3(0, 0.86, 0)
 const HEAD_CENTER := Vector3(0, 1.18, 0)
@@ -38,7 +38,7 @@ func configure(display_name: String, spawn_position: Vector3, spawn_yaw: float,
 	_initial_velocity = initial_velocity
 	_impact_impulse = impact_impulse
 	head_detached = detach_head
-	standing_height = height_metres
+	standing_height = clampf(height_metres, MonkeyRig.NPC_MIN_HEIGHT, MonkeyRig.NPC_MAX_HEIGHT)
 	_configured = true
 
 
@@ -50,6 +50,7 @@ func _ready() -> void:
 		_spawn_position)
 	_build()
 	_apply_stature()
+	_install_canonical_visuals()
 	_release_bodies()
 
 
@@ -58,103 +59,20 @@ func follow_target() -> Node3D:
 
 
 func _build() -> void:
-	var fur: Color = MonkeyRig.FURS[
-		absi(hash(_display_name)) % MonkeyRig.FURS.size()]
-	var fur_material: Material = Visuals.fur_material(fur)
-	var skin_material: Material = Visuals.skin_material()
-	var dark_material := StandardMaterial3D.new()
-	dark_material.albedo_color = Color(0.13, 0.1, 0.08)
-	var white_material := StandardMaterial3D.new()
-	white_material.albedo_color = Color(0.96, 0.96, 0.94)
-	var blush_material := StandardMaterial3D.new()
-	blush_material.albedo_color = Color(1.0, 0.43, 0.48)
-	blush_material.roughness = 0.72
-
+	# Keep the proven rigid-body masses, collision dimensions and joint layout.
+	# No independently authored body/face/tail render geometry is created here.
 	torso = _body("Torso", TORSO_CENTER, 2.2)
-	_add_capsule(torso, 0.20, 0.58, fur_material)
-	var belly := _sphere(0.13, skin_material)
-	belly.position = Vector3(0, 0.19, -0.10)
-	belly.scale = Vector3(0.9, 1.25, 0.55)
-	torso.add_child(belly)
-	winter_scarf = MeshInstance3D.new()
-	winter_scarf.name = "WinterScarf"
-	winter_scarf.mesh = MonkeyRig.shared_winter_scarf_mesh()
-	winter_scarf.material_override = MonkeyRig.shared_winter_scarf_material(_display_name)
-	winter_scarf.position = Vector3(0.0, -0.25, 0.0)
-	winter_scarf.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-	winter_scarf.visibility_range_end = 62.0
-	winter_scarf.visible = SeasonalCycle.active_season == SeasonalCycle.Season.WINTER
-	torso.add_child(winter_scarf)
 	_add_capsule_collision(torso, 0.20, 0.58)
-	_add_tail(torso, fur_material)
-
 	head = _body("Head", HEAD_CENTER, 0.72)
-	_add_sphere(head, 0.18, fur_material)
-	var face := _sphere(0.13, skin_material)
-	face.position = Vector3(0, -0.02, -0.088)
-	face.scale = Vector3(1.0, 0.95, 0.6)
-	head.add_child(face)
-	var muzzle := _sphere(0.072, skin_material)
-	muzzle.position = Vector3(0, -0.064, -0.153)
-	muzzle.scale = Vector3(1.05, 0.78, 0.42)
-	head.add_child(muzzle)
-	for side in [-1.0, 1.0]:
-		var ear := _sphere(0.072, fur_material)
-		ear.position = Vector3(side * 0.175, 0.06, 0.01)
-		ear.scale = Vector3(0.55, 1.0, 0.9)
-		head.add_child(ear)
-		var inner_ear := _sphere(0.047, skin_material)
-		inner_ear.position = Vector3(side * 0.175, 0.06, -0.046)
-		inner_ear.scale = Vector3(0.38, 0.70, 0.52)
-		head.add_child(inner_ear)
-		var eye := _sphere(0.031, white_material)
-		eye.position = Vector3(side * 0.058, 0.043, -0.152)
-		eye.scale = Vector3(0.90, 1.05, 0.32)
-		head.add_child(eye)
-		var pupil := _sphere(0.0115, dark_material)
-		pupil.position = Vector3(side * 0.058, 0.043, -0.166)
-		pupil.scale = Vector3(1.0, 1.0, 0.28)
-		head.add_child(pupil)
-		var eye_glint := _sphere(0.0035, white_material)
-		eye_glint.position = Vector3(side * 0.055, 0.047, -0.170)
-		eye_glint.scale = Vector3(0.8, 0.8, 0.45)
-		head.add_child(eye_glint)
-		var cheek := _sphere(0.018, blush_material)
-		cheek.position = Vector3(side * 0.092, -0.033, -0.148)
-		cheek.scale = Vector3(1.18, 0.60, 0.24)
-		head.add_child(cheek)
-	_add_cute_smile(head, dark_material)
 	_add_sphere_collision(head, 0.18)
-
-	var upper_arm_left := _limb("UpperArmLeft",
-		Vector3(0.245, 0.93, 0), 0.058, MonkeyRig.ARM_A, fur_material, 0.34)
-	var lower_arm_left := _limb("LowerArmLeft",
-		Vector3(0.27, 0.68, 0), 0.052, MonkeyRig.ARM_B, fur_material, 0.26)
-	var upper_arm_right := _limb("UpperArmRight",
-		Vector3(-0.245, 0.93, 0), 0.058, MonkeyRig.ARM_A, fur_material, 0.34)
-	var lower_arm_right := _limb("LowerArmRight",
-		Vector3(-0.27, 0.68, 0), 0.052, MonkeyRig.ARM_B, fur_material, 0.26)
-	_add_joint_cover(lower_arm_left, Vector3(0, MonkeyRig.ARM_B * 0.5, 0),
-		0.061, fur_material, "ElbowJoint")
-	_add_joint_cover(lower_arm_right, Vector3(0, MonkeyRig.ARM_B * 0.5, 0),
-		0.061, fur_material, "ElbowJoint")
-	_add_paw(lower_arm_left, skin_material)
-	_add_paw(lower_arm_right, skin_material)
-
-	var upper_leg_left := _limb("UpperLegLeft",
-		Vector3(0.115, 0.44, 0), 0.068, MonkeyRig.LEG_A, fur_material, 0.52)
-	var lower_leg_left := _limb("LowerLegLeft",
-		Vector3(0.115, 0.17, 0), 0.058, MonkeyRig.LEG_B, fur_material, 0.42)
-	var upper_leg_right := _limb("UpperLegRight",
-		Vector3(-0.115, 0.44, 0), 0.068, MonkeyRig.LEG_A, fur_material, 0.52)
-	var lower_leg_right := _limb("LowerLegRight",
-		Vector3(-0.115, 0.17, 0), 0.058, MonkeyRig.LEG_B, fur_material, 0.42)
-	_add_joint_cover(lower_leg_left, Vector3(0, MonkeyRig.LEG_B * 0.5, 0),
-		0.071, fur_material, "KneeJoint")
-	_add_joint_cover(lower_leg_right, Vector3(0, MonkeyRig.LEG_B * 0.5, 0),
-		0.071, fur_material, "KneeJoint")
-	_add_foot(lower_leg_left, skin_material)
-	_add_foot(lower_leg_right, skin_material)
+	var upper_arm_left := _limb("UpperArmLeft", Vector3(0.245, 0.93, 0), 0.058, MonkeyRig.ARM_A, 0.34)
+	var lower_arm_left := _limb("LowerArmLeft", Vector3(0.27, 0.68, 0), 0.052, MonkeyRig.ARM_B, 0.26)
+	var upper_arm_right := _limb("UpperArmRight", Vector3(-0.245, 0.93, 0), 0.058, MonkeyRig.ARM_A, 0.34)
+	var lower_arm_right := _limb("LowerArmRight", Vector3(-0.27, 0.68, 0), 0.052, MonkeyRig.ARM_B, 0.26)
+	var upper_leg_left := _limb("UpperLegLeft", Vector3(0.115, 0.44, 0), 0.068, MonkeyRig.LEG_A, 0.52)
+	var lower_leg_left := _limb("LowerLegLeft", Vector3(0.115, 0.17, 0), 0.058, MonkeyRig.LEG_B, 0.42)
+	var upper_leg_right := _limb("UpperLegRight", Vector3(-0.115, 0.44, 0), 0.068, MonkeyRig.LEG_A, 0.52)
+	var lower_leg_right := _limb("LowerLegRight", Vector3(-0.115, 0.17, 0), 0.058, MonkeyRig.LEG_B, 0.42)
 
 	if not head_detached:
 		_joint("NeckJoint", torso, head, Vector3(0, 1.08, 0))
@@ -172,6 +90,58 @@ func _build() -> void:
 	_joint("HipRightJoint", torso, upper_leg_right, Vector3(-0.115, HIP_Y, 0))
 	_joint("KneeRightJoint", upper_leg_right, lower_leg_right,
 		Vector3(-0.115, 0.30, 0))
+
+
+func _install_canonical_visuals() -> void:
+	var source := MonkeyRig.new()
+	source.name = "CanonicalDeathModelSource"
+	source.visible = false
+	add_child(source)
+	source.setup(_display_name, false)
+	source.set_standing_height(standing_height)
+	source.reset_pose_state()
+	# The longstanding physics body names use the opposite left/right convention.
+	# Associate by the actual signed anatomical side; meshes keep their complete
+	# world transforms, materials and vertex data while moving to physical bodies.
+	var owners: Array = [
+		[source.head_p, head],
+		[source.el_l, get_node("LowerArmRight")], [source.sh_l, get_node("UpperArmRight")],
+		[source.el_r, get_node("LowerArmLeft")], [source.sh_r, get_node("UpperArmLeft")],
+		[source.kn_l, get_node("LowerLegRight")], [source.hip_l, get_node("UpperLegRight")],
+		[source.kn_r, get_node("LowerLegLeft")], [source.hip_r, get_node("UpperLegLeft")]]
+	var smile := Node3D.new()
+	smile.name = "Smile"
+	head.add_child(smile)
+	var parts: Array = []
+	for mesh: MeshInstance3D in source.find_children("*", "MeshInstance3D", true, false):
+		if mesh.mesh == null or mesh.mesh is ImmediateMesh: continue
+		var scarf := mesh.name == "WinterScarf"
+		var visible_part := true
+		var ancestor: Node = mesh
+		var is_smile := false
+		while ancestor != source:
+			if ancestor is Node3D and not ancestor.visible and not scarf: visible_part = false
+			is_smile = is_smile or ancestor.name == "Smile"
+			ancestor = ancestor.get_parent()
+		if not visible_part: continue
+		var owner_body: Node3D = torso
+		for pair in owners:
+			if pair[0].is_ancestor_of(mesh):
+				owner_body = pair[1]
+				break
+		parts.append([mesh, smile if is_smile else owner_body, str(source.get_path_to(mesh))])
+	for index in range(parts.size()):
+		var part: Array = parts[index]
+		var mesh: MeshInstance3D = part[0]
+		mesh.reparent(part[1], true)
+		mesh.layers = 1
+		mesh.set_meta("canonical_model", "MonkeyRig")
+		mesh.set_meta("canonical_source", part[2])
+		mesh.set_meta("canonical_index", index)
+		if mesh.name == "WinterScarf": winter_scarf = mesh
+	set_meta("canonical_model", "MonkeyRig")
+	set_meta("canonical_parts", parts.size())
+	source.free()
 
 
 func set_winter_scarf_visible(active: bool) -> void:
@@ -239,9 +209,8 @@ func _body(body_name: String, local_position: Vector3,
 
 
 func _limb(body_name: String, local_position: Vector3, radius: float,
-		height: float, material: Material, body_mass: float) -> RigidBody3D:
+		height: float, body_mass: float) -> RigidBody3D:
 	var body := _body(body_name, local_position, body_mass)
-	_add_capsule(body, radius, height, material)
 	_add_capsule_collision(body, radius, height)
 	return body
 
@@ -255,93 +224,6 @@ func _joint(joint_name: String, a: RigidBody3D, b: RigidBody3D,
 	add_child(joint)
 	joint.node_a = joint.get_path_to(a)
 	joint.node_b = joint.get_path_to(b)
-
-
-func _add_tail(parent: Node3D, material: Material) -> void:
-	var tail_root := Node3D.new()
-	tail_root.position = Vector3(0, -0.22, 0.13)
-	parent.add_child(tail_root)
-	var previous := tail_root
-	for index in range(4):
-		var segment := Node3D.new()
-		segment.position = Vector3(0, 0, 0.14)
-		segment.rotation.x = 0.18 + float(index) * 0.08
-		previous.add_child(segment)
-		var mesh := _capsule(0.04 - float(index) * 0.006, 0.20, material)
-		mesh.rotation.x = PI * 0.5
-		mesh.position = Vector3(0, 0, 0.08)
-		segment.add_child(mesh)
-		previous = segment
-
-
-func _add_paw(parent: Node3D, material: Material) -> void:
-	var paw := _sphere(0.062, material)
-	paw.position = Vector3(0, -MonkeyRig.ARM_B * 0.52, 0)
-	parent.add_child(paw)
-
-
-func _add_foot(parent: Node3D, material: Material) -> void:
-	var foot := _sphere(0.075, material)
-	foot.position = Vector3(0, -MonkeyRig.LEG_B * 0.52, -0.035)
-	foot.scale = Vector3(0.9, 0.55, 1.35)
-	parent.add_child(foot)
-
-
-func _add_joint_cover(parent: Node3D, local_position: Vector3, radius: float,
-		material: Material, joint_name: String) -> void:
-	var joint := _sphere(radius, material)
-	joint.name = joint_name
-	joint.position = local_position
-	parent.add_child(joint)
-
-
-func _add_capsule(parent: Node3D, radius: float, height: float,
-		material: Material) -> void:
-	parent.add_child(_capsule(radius, height, material))
-
-
-func _add_sphere(parent: Node3D, radius: float, material: Material) -> void:
-	parent.add_child(_sphere(radius, material))
-
-
-func _capsule(radius: float, height: float, material: Material) -> MeshInstance3D:
-	var mesh_instance := MeshInstance3D.new()
-	var mesh := CapsuleMesh.new()
-	mesh.radius = radius
-	mesh.height = maxf(height, radius * 2.1)
-	mesh.radial_segments = 8
-	mesh.rings = 4
-	mesh_instance.mesh = mesh
-	mesh_instance.material_override = material
-	return mesh_instance
-
-
-func _sphere(radius: float, material: Material) -> MeshInstance3D:
-	var mesh_instance := MeshInstance3D.new()
-	var mesh := SphereMesh.new()
-	mesh.radius = radius
-	mesh.height = radius * 2.0
-	mesh.radial_segments = 8
-	mesh.rings = 5
-	mesh_instance.mesh = mesh
-	mesh_instance.material_override = material
-	return mesh_instance
-
-
-func _add_cute_smile(parent: Node3D, material: Material) -> void:
-	var smile := Node3D.new()
-	smile.name = "Smile"
-	parent.add_child(smile)
-	for index in range(7):
-		var t := float(index) / 6.0
-		var curve := sin(t * PI)
-		var bead := _sphere(0.0067, material)
-		bead.position = Vector3(
-			lerpf(-0.033, 0.033, t),
-			-0.089 - curve * 0.018,
-			-0.178 - curve * 0.0015)
-		bead.scale = Vector3(1.04, 0.88, 0.56)
-		smile.add_child(bead)
 
 
 func _add_capsule_collision(parent: CollisionObject3D, radius: float,

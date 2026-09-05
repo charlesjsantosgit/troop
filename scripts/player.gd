@@ -10,6 +10,8 @@ signal health_changed(current: float, maximum: float)
 signal defeated_by(source: Node3D)
 signal bandages_changed(count: int)
 signal bullet_hit_confirmed(headshot: bool, damage: float)
+signal furniture_leave_requested
+signal furniture_blocked(message: String)
 
 enum S { GROUND, AIR, SWING, SLIDE, SWIM }
 
@@ -24,6 +26,8 @@ const OVERSPEED_DRAG := 5.0
 # vine swings or downhill slides lose their established momentum.
 const FREEFALL_ACCELERATION := 9.81
 const DEFAULT_COLLISION_SAFE_MARGIN := 0.001
+const Furniture = preload("res://scripts/city_furniture.gd")
+const FurnitureMotion=preload("res://scripts/city_furniture_motion.gd")
 # TROOP keeps the Moon in a remote vertical coordinate band so Earth and lunar
 # players can coexist in one physics space. Its precision-safe y=48,000 origin
 # still uses ~4 mm float increments, so a two-centimetre recovery margin keeps
@@ -98,6 +102,7 @@ var display_name := "Monkey"
 var is_local := true
 var is_ai := false
 var world: Node3D
+var resident_stamina_multiplier := 1.0
 var health := MAX_HEALTH
 var bandages := 0
 var healing_remaining := 0.0
@@ -152,6 +157,20 @@ var melee_attack_primed := false
 var fly_mode := false
 var vehicle: Vehicle = null
 var expedition_locked := false
+var furniture_data: Dictionary = {}
+var furniture_leave_pending := false
+var _furniture_anim := -1
+var _furniture_time := 0.0
+var _furniture_saved_view := -1
+var _furniture_saved_camera_angles := Vector2.ZERO
+var _furniture_motion: RefCounted
+var _furniture_path: Array = []
+var _furniture_entry_path: Array = []
+var _furniture_frame: Dictionary = {}
+var _furniture_path_blocked := false
+var furniture_last_error := ""
+var furniture_clearance_blocker := ""
+var _furniture_request_msec := 0
 var _expedition_saved_rig_yaw := 0.0
 var _vehicle_exit_cd := 0.0
 var _collision_shape: CollisionShape3D
@@ -299,8 +318,12 @@ func _physics_process(dt: float) -> void:
 	supply_notice_remaining = maxf(supply_notice_remaining - dt, 0.0)
 	_invulnerable_t = maxf(_invulnerable_t - dt, 0.0)
 	if defeated:
+		if furniture_active(): cancel_furniture()
 		if melee_primed or melee_attack_primed or melee_attack_remaining > 0.0:
 			cancel_melee_input()
+		return
+	if furniture_active():
+		_step_furniture(dt)
 		return
 	if expedition_locked or arrival_locked:
 		if melee_primed or melee_attack_primed or melee_attack_remaining > 0.0:
@@ -843,7 +866,7 @@ func is_all_fours() -> bool:
 
 func is_weapon_stowed() -> bool:
 	return melee_mode or is_healing() or is_all_fours() or state == S.SWIM \
-		or vehicle != null or expedition_locked or rocket_cabin_view
+		or vehicle != null or expedition_locked or rocket_cabin_view or furniture_active()
 
 
 ## First-person sprinting keeps the viewmodel in frame even though the weapon is
@@ -852,7 +875,7 @@ func is_weapon_stowed() -> bool:
 func is_weapon_visually_stowed() -> bool:
 	if _first_person_weapons_requested:
 		return melee_mode or is_healing() or state == S.SWIM \
-			or vehicle != null or expedition_locked or rocket_cabin_view
+			or vehicle != null or expedition_locked or rocket_cabin_view or furniture_active()
 	return is_weapon_stowed()
 
 
@@ -885,6 +908,8 @@ func _sync_weapon_presentation(force := false) -> void:
 	shotgun.visible = not defeated and not rocket_cabin_view and active_weapon == shotgun
 	smg.visible = not defeated and not rocket_cabin_view and active_weapon == smg
 	sniper.visible = not defeated and not rocket_cabin_view and active_weapon == sniper
+	if furniture_active():
+		for weapon in weapons: weapon.visible = false
 
 
 func _weapon_back_transform(weapon: Node3D) -> Transform3D:
@@ -1360,6 +1385,7 @@ func apply_planet_wrap(canonical_xz: Vector2, yaw_delta: float) -> void:
 func set_expedition_locked(locked: bool) -> void:
 	var changed := expedition_locked != locked
 	if locked:
+		if furniture_active(): cancel_furniture()
 		melee_mode = false
 		cancel_melee_input()
 		if changed:
@@ -1384,7 +1410,7 @@ func set_expedition_locked(locked: bool) -> void:
 		# reasserting the on-foot state repairs either arrival order instead of
 		# leaving an unlocked boolean with a disabled capsule on the Moon.
 		if _collision_shape:
-			_collision_shape.set_deferred("disabled", false)
+			_collision_shape.set_deferred("disabled", furniture_active())
 		collision_layer = 1
 		collision_mask = 1
 		if changed:
@@ -1395,6 +1421,183 @@ func set_expedition_locked(locked: bool) -> void:
 	expedition_locked = locked
 	if changed:
 		_sync_weapon_presentation(true)
+
+
+func furniture_active() -> bool:
+	return not furniture_data.is_empty()
+
+
+func furniture_can_enter(item: Dictionary) -> bool:
+	furniture_last_error=""
+	if furniture_active() or defeated or vehicle!=null or expedition_locked or arrival_locked:
+		furniture_last_error="Stand safely beside the furniture first."
+		return false
+	var tester:=FurnitureMotion.new()
+	tester.setup(self,rig)
+	var path:Array=item.get("motion_path",FurnitureMotion.entry(item,global_position,rig.yaw_angle()))
+	if item.has("motion_path") and global_position.distance_to(path[0].root)>0.16:
+		furniture_last_error="You moved away from the furniture approach. Try again beside the seat."
+		return false
+	if not tester.preflight(path,true):
+		furniture_clearance_blocker=tester.last_blocker
+		furniture_last_error="The furniture approach is blocked. Move into the clear space beside it."
+		return false
+	return true
+
+func begin_furniture(item: Dictionary) -> bool:
+	if not furniture_can_enter(item):
+		_furniture_notice(furniture_last_error)
+		return false
+	if state==S.SWING:_release(false)
+	if fly_mode:set_fly_mode(false)
+	cancel_melee_input()
+	melee_mode=false
+	healing_remaining=0.0
+	furniture_data=item.duplicate(true)
+	_furniture_path=item.get("motion_path",FurnitureMotion.entry(item,global_position,rig.yaw_angle())).duplicate(true)
+	_furniture_entry_path=_furniture_path.duplicate(true)
+	furniture_data.root=FurnitureMotion.sample(_furniture_path,FurnitureMotion.duration(_furniture_path)).root
+	_furniture_time=0.0
+	_furniture_anim=Furniture.ENTER_SEAT
+	_furniture_frame=FurnitureMotion.sample(_furniture_path,0.0)
+	_furniture_path_blocked=false
+	furniture_leave_pending=false
+	velocity=Vector3.ZERO
+	state=S.GROUND
+	_furniture_motion=FurnitureMotion.new()
+	_furniture_motion.setup(self,rig)
+	# The standing capsule is replaced by active anatomical compound shapes.
+	# Every visible body group stays collidable throughout the interaction.
+	rig.top_level=true
+	rig.physics_interpolation_mode=Node.PHYSICS_INTERPOLATION_MODE_OFF
+	_furniture_motion.activate(_furniture_frame)
+	_collision_shape.set_deferred("disabled",true)
+	if cam:
+		_furniture_saved_view=cam.preferred_view_mode
+		_furniture_saved_camera_angles=Vector2(cam.yaw,cam.pitch)
+		cam.set_view_mode(CameraRig.ViewMode.FRONT)
+		cam.yaw=float(item.yaw)
+		cam.pitch=-0.08
+	_sync_weapon_presentation(true)
+	FieldBackpack.fit_to(self,is_local)
+	return true
+
+
+func can_stand_at(destination: Vector3) -> bool:
+	if not destination.is_finite() or _collision_shape == null: return false
+	var query := PhysicsShapeQueryParameters3D.new()
+	query.shape = _collision_shape.shape
+	query.transform = Transform3D(Basis.IDENTITY,destination+_collision_shape.position)
+	query.collision_mask = collision_mask
+	query.exclude = [get_rid()]
+	query.margin = 0.012
+	if not get_world_3d().direct_space_state.intersect_shape(query,1).is_empty(): return false
+	var ray := PhysicsRayQueryParameters3D.create(destination+Vector3.UP*0.15,
+		destination-Vector3.UP*0.25,collision_mask,[get_rid()])
+	var floor_hit := get_world_3d().direct_space_state.intersect_ray(ray)
+	return not floor_hit.is_empty() and (floor_hit.normal as Vector3).y >= 0.65
+
+
+func furniture_can_leave(destination:Vector3)->bool:
+	if not furniture_active() or not can_stand_at(destination):
+		furniture_last_error="The standing space is blocked. Wait for a clear exit."
+		return false
+	var path:=FurnitureMotion.reverse(_furniture_entry_path,minf(_furniture_time,FurnitureMotion.duration(_furniture_entry_path)),destination)
+	if not _furniture_motion.preflight(path,true):
+		furniture_last_error="The route out is blocked. You can stand when it is clear."
+		return false
+	return true
+
+func rise_from_furniture(destination: Vector3, approved_path: Array = []) -> bool:
+	if not furniture_active():return false
+	var path:Array=approved_path if not approved_path.is_empty() else FurnitureMotion.reverse(
+		_furniture_entry_path,minf(_furniture_time,FurnitureMotion.duration(_furniture_entry_path)),destination)
+	var clear:bool=can_stand_at(destination) and _furniture_motion.preflight(path,true)
+	if not clear and approved_path.is_empty():
+		furniture_leave_pending=false
+		furniture_last_error="The route out is blocked. You can stand when it is clear."
+		_furniture_notice(furniture_last_error)
+		return false
+	# An obstacle may move after authority approves the exit. Keep the approved
+	# RISE state but hold the current colliding pose until its first sweep clears.
+	var held_frame:=_furniture_frame.duplicate(true)
+
+	_furniture_path=path.duplicate(true)
+	_furniture_anim=Furniture.RISE
+	_furniture_time=0.0
+	_furniture_frame=held_frame
+	_furniture_path_blocked=not clear
+	furniture_leave_pending=false
+	return true
+
+func cancel_furniture() -> void:
+	if not furniture_active():return
+	if _furniture_motion!=null:
+		_furniture_motion.release()
+		_furniture_motion=null
+	furniture_data.clear()
+	_furniture_path.clear()
+	_furniture_entry_path.clear()
+	_furniture_frame.clear()
+	_furniture_anim=-1
+	furniture_leave_pending=false
+	velocity=Vector3.ZERO
+	state=S.AIR
+	if _collision_shape:_collision_shape.set_deferred("disabled",false)
+	if rig:
+		rig.top_level=false
+		rig.transform=Transform3D.IDENTITY
+		rig.physics_interpolation_mode=Node.PHYSICS_INTERPOLATION_MODE_INHERIT
+		rig.reset_pose_state(true)
+	if cam and _furniture_saved_view>=0:
+		cam.set_view_mode(_furniture_saved_view)
+		cam.yaw=_furniture_saved_camera_angles.x
+		cam.pitch=_furniture_saved_camera_angles.y
+	_furniture_saved_view=-1
+	_sync_weapon_presentation(true)
+	FieldBackpack.fit_to(self,is_local)
+
+func _step_furniture(dt: float) -> void:
+	var inp:=_gather()
+	velocity=Vector3.ZERO
+	state=S.GROUND
+	var total:=FurnitureMotion.duration(_furniture_path)
+	var next_time:=minf(total,_furniture_time+minf(dt,1.0/30.0))
+	var next_frame:=FurnitureMotion.sample(_furniture_path,next_time)
+	var previous:Array[Transform3D]=_furniture_motion.frame_shapes(_furniture_frame)
+	if _furniture_motion.clear_frame(next_frame,previous):
+		# Each bone envelope has already swept its translation and angular arc.
+		# Advance the colliding body only after that articulated sweep succeeds.
+		global_position=next_frame.root
+		_furniture_frame=next_frame
+		_furniture_time=next_time
+		_furniture_motion.update_colliders(_furniture_frame)
+		_furniture_path_blocked=false
+		if _furniture_time>=total-0.001:
+			if _furniture_anim==Furniture.RISE:
+				if can_stand_at(global_position):
+					cancel_furniture()
+					return
+			else:_furniture_anim=Furniture.resting_animation(furniture_data.mode)
+	else:
+		_furniture_motion.update_colliders(_furniture_frame)
+		if not _furniture_path_blocked:
+			furniture_last_error="The path is blocked. Wait for it to clear or press E to return."
+			_furniture_notice(furniture_last_error)
+		_furniture_path_blocked=true
+	var movement_requests_exit:bool=inp.dir.length_squared()>0.01 and Time.get_ticks_msec()-_furniture_request_msec>=400
+	if _furniture_anim!=Furniture.RISE and not furniture_leave_pending \
+			and (inp.interact_just or inp.jump_just or movement_requests_exit):
+		furniture_leave_pending=true
+		_furniture_request_msec=Time.get_ticks_msec()
+		furniture_leave_requested.emit()
+	_replicate_expedition_pose(dt)
+
+
+func _furniture_notice(message:String)->void:
+	supply_notice=message
+	supply_notice_remaining=4.0
+	furniture_blocked.emit(message)
 
 
 func _replicate_expedition_pose(dt: float) -> void:
@@ -1443,6 +1646,7 @@ func _st_ground(dt: float, inp: Dictionary) -> void:
 		galloping = false
 		target = SPRINT_SPEED if inp.sprint else WALK_SPEED
 
+	if inp.sprint or galloping: target *= resident_stamina_multiplier
 	if roll_t > 0.0:
 		hvel = hvel.move_toward(Vector3.ZERO, 2.0 * dt)
 	elif wish.length() > 0.1:
@@ -1902,6 +2106,7 @@ func _release(pop: bool) -> void:
 
 
 func _anim() -> int:
+	if furniture_active(): return _furniture_anim
 	if expedition_locked:
 		return MonkeyRig.Anim.CABIN
 	if vehicle:
@@ -2051,6 +2256,11 @@ func _process(dt: float) -> void:
 		rig.update_motion(dt, _anim(), velocity, true, _active_pivot())
 		_update_motion_effects(_anim())
 		return
+	if furniture_active():
+		rig.global_position=_furniture_frame.root
+		rig.apply_furniture_pose(_furniture_frame)
+		return
+
 	if rig.top_level \
 			or rig.physics_interpolation_mode == Node.PHYSICS_INTERPOLATION_MODE_OFF:
 		# Covers an externally freed/despawned vehicle that bypassed the ordinary
@@ -2148,7 +2358,7 @@ func exit_vehicle(bail := false) -> void:
 	if Net.active:
 		var aux := v.state_aux()
 		Net.release_vehicle(v.vid,
-			[v.global_position, v.yaw_angle(), aux.x, aux.y])
+			[v.global_position, v.yaw_angle(), aux.x, aux.y],v.crash_state())
 	global_position = exit_pos
 	velocity = v.linear_velocity * (0.85 if bail else 0.25)
 	if bail:
@@ -2202,7 +2412,7 @@ func _st_vehicle(dt: float, inp: Dictionary) -> void:
 			false, Vector3.ZERO, 0.0, PackedVector3Array(), weapon_slot - 1,
 			true, false,
 			int(active_weapon.ammo) if active_weapon else 0, false,
-			0.0, false, vehicle.kind, vehicle.vid, vehicle.state_aux())
+			0.0, false, vehicle.kind, vehicle.vid, vehicle.state_aux(),vehicle.crash_state())
 
 
 ## Hard decelerations while driving hurt: light hits bruise, a violent crash
@@ -2276,6 +2486,7 @@ func admin_heal() -> void:
 
 
 func admin_teleport(destination: Vector3) -> void:
+	cancel_furniture()
 	cancel_melee_input()
 	if vehicle:
 		exit_vehicle()
@@ -2285,6 +2496,7 @@ func admin_teleport(destination: Vector3) -> void:
 	_sync_lunar_frame()
 	state = S.AIR
 	velocity = Vector3.ZERO
+	if rig:rig.reset_pose_state(true)
 	_reset_lunar_camera_sample()
 	reset_physics_interpolation()
 	if cam:

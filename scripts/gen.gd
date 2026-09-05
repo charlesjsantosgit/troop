@@ -2353,6 +2353,8 @@ func vehicle_layout(cx: int, cz: int) -> Array:
 ## exact canonical owning chunk and must actually win that chunk's seeded roll.
 ## Admin-delivered and test-only ids are not generated world definitions.
 func vehicle_definition_by_id(vehicle_id: String) -> Dictionary:
+	if frontier_world and vehicle_id.begins_with("v:park-rowboat-"):
+		return preload("res://scripts/city_park_layout.gd").boat_definition(vehicle_id)
 	if debug_world or vehicle_id.is_empty():
 		return {}
 	match vehicle_id:

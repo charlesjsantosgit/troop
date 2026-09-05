@@ -46,17 +46,77 @@ jobs:
       - name: Install flyctl
         uses: superfly/flyctl-actions/setup-flyctl@ed8efb33836e8b2096c7fd3ba1c8afe303ebbff1
 
-      - name: Deploy dedicated server
+      - name: Verify installed client source identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          sha256sum --check packaging/server-runtime.sha256 > /tmp/runtime-checks.log
+          cat packaging/server-deployment.json
+          echo "All installed-client runtime source hashes match."
+
+      - name: Build matching dedicated server
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
           FLY_APP_NAME: ${{ secrets.FLY_APP_NAME }}
         shell: bash
-        run: >-
-          test -n "${FLY_API_TOKEN:-}" &&
-          test -n "${FLY_APP_NAME:-}" &&
-          flyctl deploy
-          --app "$FLY_APP_NAME"
-          --config fly.toml
-          --ha=false
-          --remote-only
-          --wait-timeout 10m
+        run: |
+          set -euo pipefail
+          test -n "${FLY_API_TOKEN:-}"
+          test -n "${FLY_APP_NAME:-}"
+          mkdir -p artifacts/server-deployment
+          flyctl deploy --app "$FLY_APP_NAME" --config fly.toml \
+            --ha=false --remote-only --build-only --push \
+            --image-label "installed-0.8.0.1-${GITHUB_SHA}" \
+            --wait-timeout 10m 2>&1 | tee artifacts/server-deployment/build.log
+
+      - name: Preserve current server and snapshot world volume
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+          FLY_APP_NAME: ${{ secrets.FLY_APP_NAME }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 hosting/server_rollout_guard.py prepare \
+            --app "$FLY_APP_NAME" --evidence artifacts/server-deployment \
+            --candidate-image "registry.fly.io/${FLY_APP_NAME}:installed-0.8.0.1-${GITHUB_SHA}"
+
+      - name: Deploy verified image
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+          FLY_APP_NAME: ${{ secrets.FLY_APP_NAME }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          flyctl deploy --app "$FLY_APP_NAME" --config fly.toml \
+            --image "registry.fly.io/${FLY_APP_NAME}:installed-0.8.0.1-${GITHUB_SHA}" \
+            --ha=false --update-only --wait-timeout 10m \
+            2>&1 | tee artifacts/server-deployment/deploy.log
+
+      - name: Verify running image and retained world volume
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+          FLY_APP_NAME: ${{ secrets.FLY_APP_NAME }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 hosting/server_rollout_guard.py verify \
+            --app "$FLY_APP_NAME" --evidence artifacts/server-deployment
+          for attempt in $(seq 1 12); do
+            flyctl logs --app "$FLY_APP_NAME" --no-tail > /tmp/server-boot.log
+            if grep -E 'DEDICATED_SERVER_READY version=0[.]8[.]0[.]1 protocol=18 ' /tmp/server-boot.log > artifacts/server-deployment/ready.log; then
+              cat artifacts/server-deployment/ready.log
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "Matching server readiness was not observed." >&2
+          exit 1
+
+      - name: Retain deployment and rollback evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: server-deployment-${{ github.sha }}
+          path: artifacts/server-deployment/
+          if-no-files-found: warn
+          retention-days: 7

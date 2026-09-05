@@ -1245,11 +1245,11 @@ func city_view(property_context: String = "") -> Dictionary:
 	result.now=float(state.time)
 	return result
 
-func city_action(kind: String, payload: Dictionary, position: Vector3, time: float = -1.0) -> Dictionary:
+func city_action(kind: String, payload: Dictionary, position: Vector3, time: float = -1.0, context: Dictionary = {}) -> Dictionary:
 	var city = _city()
 	if city==null: return _result(false,"Crownreach is unavailable in this world.")
 	var authority_time := float(state.time) if time<0.0 else time
-	var result: Dictionary=city.action("player",kind,payload,self,position,authority_time)
+	var result: Dictionary=city.action("player",kind,payload,self,position,authority_time,context)
 	state.city=city.state
 	return result
 
@@ -1320,6 +1320,11 @@ func validate_state(candidate: Variant) -> bool:
 		var city=CityScript.new()
 		if not city.import_state(data.city) or int(city.state.seed)!=int(data.get("seed",-1)) \
 				or float(city.state.last_time)>float(data.get("time",-1))+0.0001: return false
+		if int(data.accounts.get("civil_evidence",0))!=preload("res://scripts/civil_law.gd").escrow_total(city.state.civil_law): return false
+		for actor in city.state.resident_life:
+			if actor!="player": return false
+		for actor in city.state.civil_law.residents:
+			if actor!="player": return false
 		for property: Dictionary in city.state.properties.values():
 			if property.owner!="player": return false
 		for actor in city.state.homes:

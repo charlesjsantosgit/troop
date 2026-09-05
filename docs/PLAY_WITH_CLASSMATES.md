@@ -95,10 +95,25 @@ ad-hoc signed, so first-install approval may still be required.
 
 Press **I** for your backpack. At a merchant, press **E**, select a stock or backpack tile, choose a quantity, then **Buy** or **Sell**. The two grids show the same finite inventory used for planting and jobs. Personal pockets remain available in the backpack; Earth and Moon town supplies move through the cargo terminal.
 
-## Crownreach housing and jobs
+## Crownreach housing and jobs in the local remake
+
+The city remake is currently a local source change using **network protocol 18**. Multiplayer needs a matching updated server and client. The existing public release and hosted server have not been updated by this city work.
 
 In the village, open **B → Places → Crownreach → Find transit** and follow the gold marker. Press **E** at the stop; a ticket costs **6 credits**. Choose **Lantern Square** or a district/workplace. In Crownreach, **B** opens the city guide.
 
+When running the source project locally, **Play Crownreach.command** opens a fresh daytime preview directly in Lantern Square. This preview does not save career progress. Use normal career transit to visit with your existing character and inventory.
+
+**Play Penthouses.command** opens a fresh, interactive sunset preview inside the new luxury penthouse. Explore the living room, kitchen, bedroom and upstairs study; the stairs and glass railings are physical. The cupboard and bed work normally. This preview uses a temporary career and does not change existing saves. In a normal career, a penthouse costs **4,800 credits** at its entrance.
+
 Press **E** at an entrance to inspect its property or jobs. A cottage costs **450 credits**. After buying, enter and use **E** at its cupboard for real backpack storage or at the bed to set your respawn home. Courier work starts at **Westgate Courier Depot**; a sealed parcel uses a separate job slot. Follow its destination, wait for the work timer and finish at the matching workplace to earn wages.
 
-Crownreach covers about 205 square miles. Its 400,000 residents are represented by district simulation with a bounded nearby crowd. Individual players own properties; claiming an existing town does not transfer ownership of the entire city.
+Markets, restaurants and workshops have a **SHOP** card at their doors. Buy bananas for **6 credits**, meals for **12 credits** or spare parts for **28 credits**. Choose a quantity and press **Buy** to move real stock into your backpack. Shops share finite supply; sold-out shelves need restocking. Buying goods does not require purchasing the property.
+
+Crownreach's remade city covers about **30 square miles**, approximately **5.432 by 14.319 kilometres**, with 264-by-900-foot buildable blocks. Smaller neighborhood buildings surround the downtown towers, including the **199.8-metre Beacon** and **647.8-metre Crownreach Spire**. Transit connects the center, neighborhoods and workplaces. Its **100,000 monkey residents** are represented by district simulation and a bounded physical crowd, with visible distant traffic and pedestrians. Every resident and driver uses the player's monkey model at heights from **5 ft 7 in to 6 ft 2 in**. Individual players own properties; claiming an existing town does not transfer ownership of the entire city.
+
+Choose **Lantern Gardens** at a transit stop for the **3.11-square-kilometre Lantern Central Park**: trees, walking paths, a cycle loop, dog walkers, yoga and social terraces. Its large lake has four usable rowboats. Press **E** at a docked boat to board; row and steer with the normal movement controls, and use E to leave when there is a safe landing. The park interior stays clear of cars.
+
+Visit a **Crown Motor Gallery** to purchase and collect an owned car. Ten distinct road models have life-size cabins and visible monkey drivers. Shops offer ten categories of finite goods. For admins, **`/vehicle`** opens the searchable A–Z vehicle grid. Crashes can disable vehicles; severe aircraft impacts damage actual building geometry and dispatch fire and construction crews. Buildings finish rebuilding at **06:00 the following game day**.
+
+
+The current local penthouse uses the actual city outside its windows. Press **E** at chairs, couches or beds to sit, recline or sleep; press E, a movement key or jump to stand when there is clear space. The separate bedside home marker still sets your respawn address. `/time 21:30`, `/time day`, `/time night` and `/time clear` work through the admin command system. Press **X** for the progressively refined map of the actual Earth or Moon. The city guide shows power, water, waste and service conditions alongside new street and collection-fleet maintenance jobs.

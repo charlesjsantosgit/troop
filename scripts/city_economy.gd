@@ -1,14 +1,19 @@
 class_name CityEconomy
 extends RefCounted
 
-## Durable, bounded economy for Crownreach. The 400,000-resident census is
+## Durable, bounded economy for Crownreach. The 100,000-resident census is
 ## represented by twelve aggregate district rows; player property, storage and
 ## job records remain finite and are backed by FrontierSim's real wallet/bag.
+const Life = preload("res://scripts/resident_life.gd")
+const Law = preload("res://scripts/civil_law.gd")
 const Plan = preload("res://scripts/city_plan.gd")
 
+const Commerce = preload("res://scripts/city_commerce.gd")
+const Fleet = preload("res://scripts/city_vehicle_models.gd")
+const Infrastructure = preload("res://scripts/city_infrastructure.gd")
 const VERSION := 1
-const POPULATION := 400000
-const AREA_SQ_MI := 204.96
+const POPULATION := Plan.RESIDENT_TARGET
+const AREA_SQ_MI := Plan.SQUARE_MILES
 const ACTION_RANGE := 18.0
 const MAX_PROPERTIES := 512
 const MAX_PROPERTIES_PER_ACTOR := 8
@@ -17,6 +22,12 @@ const MAX_LEDGER := 128
 const MAX_ADVANCE_INTERVALS := 60
 const AGGREGATE_INTERVAL := 60.0
 const PROPERTY_ACCOUNT := "treasury"
+const MAX_RETAIL_QUANTITY := 100
+const RETAIL := {
+	"market":{"kind":"market","item":"banana","label":"Fresh bananas","price":6,"service":"produce_market"},
+	"restaurant":{"kind":"restaurant","item":"meal","label":"Prepared meal","price":12,"service":"courier_depot"},
+	"workshop":{"kind":"workshop","item":"spare_parts","label":"Spare parts","price":28,"service":"maintenance_depot"},
+}
 
 const HOUSING := {
 	"cottage": {"id":"cottage","label":"Village cottage","price":450,
@@ -96,6 +107,17 @@ const JOBS := {
 		"description":"Bring one spare part to the East Market waterworks.",
 		"start_service":"maintenance_depot","destination_service":"maintenance_site_east",
 		"duration":70.0,"reward":115,"requires":{"spare_parts":1},"cargo":{"spare_parts":1}},
+	"maintenance_roads": {
+		"id":"maintenance_roads","kind":"maintenance","label":"Street crew repair",
+		"description":"Bring a spare part to Northlight's street crew to restore road service.",
+		"start_service":"maintenance_depot","destination_service":"maintenance_site_north",
+		"duration":65.0,"reward":110,"requires":{"spare_parts":1},"cargo":{"spare_parts":1}},
+	"maintenance_sanitation": {
+		"id":"maintenance_sanitation","kind":"maintenance","label":"Collection fleet repair",
+		"description":"Repair the collection fleet at East Market's utility works using a spare part.",
+		"start_service":"maintenance_depot","destination_service":"maintenance_site_east",
+		"duration":65.0,"reward":110,"requires":{"spare_parts":1},"cargo":{"spare_parts":1}},
+
 	"produce_provisioning": {
 		"id":"produce_provisioning","kind":"produce_provisioning","label":"Produce provisioning",
 		"description":"Supply four kilograms of your own fresh produce to Garden Row.",
@@ -132,6 +154,8 @@ func new_game(world_seed: int = 2026, start_time: float = 400.0) -> void:
 		"last_time":maxf(0.0,start_time),
 		"population":POPULATION,
 		"properties":{},
+		"resident_life":Life.new_state(),"civil_law":Law.new_state(),
+		"incidents":{},"owned_vehicles":{},"vehicle_stock":{},"next_vehicle_id":1,"retail_revision":1,
 		"homes":{},
 		"active_jobs":{},
 		"service_inventories":{},
@@ -150,12 +174,41 @@ func new_game(world_seed: int = 2026, start_time: float = 400.0) -> void:
 	state.service_inventories.courier_depot = {
 		"meal":600,"spare_parts":240,"packaging":900,
 	}
+	state.service_inventories.produce_market = {"banana":240}
+	state.service_inventories.maintenance_depot = {"spare_parts":90}
+
+	_provision_retail(state)
+	for spec in Fleet.catalog(): state.vehicle_stock[spec.id] = 24
 
 
 func import_state(candidate: Variant) -> bool:
+	if candidate is Dictionary and candidate.get("population") == 400000 and candidate.get("districts") is Array and candidate.districts.size() == 12:
+		candidate = candidate.duplicate(true)
+		var refreshed := _new_districts()
+		for i in range(12):
+			if not candidate.districts[i] is Dictionary: return false
+			for key in ["population","workforce_capacity","workforce","food_demand"]:
+				candidate.districts[i][key] = refreshed[i][key]
+		candidate.population = POPULATION
+	if candidate is Dictionary:
+		candidate = candidate.duplicate(true)
+		if not candidate.has("incidents"):candidate["incidents"]={}
+		if not candidate.has("resident_life"):candidate["resident_life"]=Life.new_state()
+		if not candidate.has("civil_law"):candidate["civil_law"]=Law.new_state()
+		if not candidate.has("owned_vehicles"):
+			candidate["owned_vehicles"] = {}
+			candidate["vehicle_stock"] = {}
+			candidate["next_vehicle_id"] = 1
+			for spec in Fleet.catalog(): candidate.vehicle_stock[spec.id] = 24
+		if not candidate.has("retail_revision") and candidate.get("service_inventories") is Dictionary:
+			_provision_retail(candidate)
+			candidate["retail_revision"] = 1
 	if not _valid_state(candidate):
 		return false
 	state = (candidate as Dictionary).duplicate(true)
+	for district in state.districts:
+		if not district.has("infrastructure"):
+			district["infrastructure"] = Infrastructure.create()
 	return true
 
 
@@ -218,6 +271,7 @@ func view(actor: String, sim=null, property_context: String = "") -> Dictionary:
 		"city":{"name":"Crownreach","area_sq_mi":AREA_SQ_MI,
 			"population":POPULATION,"center":[Plan.CENTER.x,Plan.CENTER.y],
 			"bounds":[Plan.MIN_X,Plan.MIN_Z,Plan.MAX_X,Plan.MAX_Z]},
+		"resident_life":resident_view(actor),
 		"credits":0,
 		"backpack_counts":{},
 		"backpack_capacity":350,
@@ -232,7 +286,9 @@ func view(actor: String, sim=null, property_context: String = "") -> Dictionary:
 		"job_catalog":jobs,
 		"active_job":active,
 		"services":service_view,
-		"districts":state.districts.duplicate(true),
+		"retail_catalog":retail_catalog(),
+		"owned_vehicles":owned_vehicles(actor),"vehicle_stock":state.vehicle_stock.duplicate(),
+		"districts":_public_districts(),
 		"metrics":public_metrics,
 	}
 	if sim!=null:
@@ -241,7 +297,7 @@ func view(actor: String, sim=null, property_context: String = "") -> Dictionary:
 
 
 func action(actor: String, kind: String, payload: Dictionary, sim,
-		position: Vector3, time: float) -> Dictionary:
+		position: Vector3, time: float, authority_context: Dictionary = {}) -> Dictionary:
 	if state.is_empty():
 		return _result(false,"Crownreach has not been initialized.")
 	if not _valid_actor(actor) or not _valid_position(position):
@@ -252,6 +308,8 @@ func action(actor: String, kind: String, payload: Dictionary, sim,
 		return _result(false,"This city action used an invalid authority time.")
 	if time+0.0001 < float(state.last_time):
 		return _result(false,"This city action arrived older than the city record.")
+	if state.get("incidents",{}).has(str(payload.get("building",payload.get("property","")))):
+		return _result(false,"This building is closed for emergency reconstruction until tomorrow morning.")
 	var player_location := str(sim.inventory_location(actor,"earth"))
 	if not sim.state.inventories.has(player_location):
 		return _result(false,"The resident's Earth backpack is unavailable.")
@@ -263,6 +321,16 @@ func action(actor: String, kind: String, payload: Dictionary, sim,
 		return _result(false,"The city clock could not advance.")
 	var result: Dictionary
 	match kind:
+		"life_consume", "life_rest", "life_clinic":
+			var life=Life.new();life.state=state.resident_life
+			result=life.action(kind,payload,sim,actor,position,time,authority_context)
+			state.resident_life=life.state
+		"buy_vehicle":
+			result = _buy_vehicle(actor,payload,sim,position,time)
+		"recall_vehicle":
+			result = _recall_vehicle(actor,payload,position)
+		"buy_store_item":
+			result=_buy_store_item(actor,payload,sim,position,time)
 		"buy_home":
 			result=_buy_home(actor,payload,sim,position,time)
 		"store_item":
@@ -282,19 +350,137 @@ func action(actor: String, kind: String, payload: Dictionary, sim,
 	return result
 
 
+func retail_catalog() -> Array:
+	var rows: Array = []
+	for kind in ["market","restaurant","workshop"]:
+		var row: Dictionary = RETAIL[kind].duplicate(true)
+		row["stock"] = int(state.service_inventories[row.service].get(row.item,0))
+		rows.append(row)
+	return rows
+
+
+func _buy_store_item(actor: String, payload: Dictionary, sim, position: Vector3, time: float) -> Dictionary:
+	if payload.size()!=3 or not payload.keys().all(func(key): return key in ["building","item","quantity"]) \
+			or not payload.get("building") is String or not payload.get("item") is String:
+		return _result(false,"Choose a shop item and quantity; prices are set by the shop.")
+	var building_id := str(payload.building)
+	if building_id.length()>80:
+		return _result(false,"Choose a real Crownreach shop.")
+	var building := Plan.building(building_id)
+	if building.is_empty() or Commerce.offers(building).is_empty():
+		return _result(false,"This building is not a retail store.")
+	if not _near(position,building.door):
+		return _result(false,"Visit this shop's front door before buying.")
+	var offer: Dictionary = {}
+	var item := str(payload.item)
+	for row in Commerce.offers(building):
+		if row.item == item: offer = row
+	if offer.is_empty(): return _result(false,"Choose an item sold by this store.")
+	var quantity := _quantity(payload.quantity)
+	if item!=str(offer.item) or quantity<1 or quantity>MAX_RETAIL_QUANTITY:
+		return _result(false,"Choose the shop's listed item and a whole quantity from 1 to 100.")
+	var inventory: Dictionary = state.service_inventories[offer.service]
+	if int(inventory.get(item,0))<quantity:
+		return _result(false,"The shop does not have that many in stock.")
+	var price := int(offer.price)*quantity
+	if int(sim.balance(actor))<price:
+		return _result(false,"This purchase costs %d credits." % price)
+	var player_location := str(sim.inventory_location(actor,"earth"))
+	if not sim._has_room(player_location,quantity):
+		return _result(false,"Your Earth backpack is full.")
+	# Finite shared stock, actual backpack goods and actual credits change only
+	# after all checks; normal save rollback covers both authoritative models.
+	_remove_inventory(inventory,{item:quantity})
+	sim._add_goods(player_location,item,quantity)
+	sim._transfer(actor,PROPERTY_ACCOUNT,price,"Crownreach shop purchase "+building_id)
+	sim._record("goods",{"from":"city_service:"+str(offer.service),"to":player_location,
+		"item":item,"quantity":quantity})
+	_record("retail_purchase",{"actor":actor,"building":building_id,"item":item,
+		"quantity":quantity,"credits":price,"time":time})
+	return _result(true,"Bought %d %s for %d credits." % [quantity,item.replace("_"," "),price])
+
+
+func _provision_retail(data: Dictionary) -> void:
+	for shop in Commerce.SHOPS.values():
+		if not data.service_inventories.get(shop.service) is Dictionary: continue
+		for item: Array in shop.items:
+			if not data.service_inventories[shop.service].has(item[0]):
+				data.service_inventories[shop.service][item[0]] = 60
+
+
+func owned_vehicles(actor: String) -> Array:
+	var result: Array = []
+	for id in state.get("owned_vehicles",{}):
+		var record: Dictionary = state.owned_vehicles[id]
+		if record.owner==actor:
+			var row := record.duplicate(true)
+			row["id"] = id
+			row.erase("owner")
+			result.append(row)
+	return result
+
+
+func _vehicle_delivery(id: String, record: Dictionary, dealer: Dictionary) -> Dictionary:
+	var at := Commerce.delivery_position(dealer,int(id.get_slice(":",3)))
+	return {"id":id,"model":record.model,"position":[at.x,at.y,at.z],"yaw":0.0}
+
+
+func _buy_vehicle(actor: String,payload: Dictionary,sim,position: Vector3,time: float) -> Dictionary:
+	if payload.size()!=2 or not payload.get("building") is String or not payload.get("model") is String:
+		return _result(false,"Choose a dealership and a listed vehicle.")
+	var dealer := Plan.building(payload.building)
+	var index := Fleet.index_for_id(payload.model)
+	if dealer.is_empty() or Commerce.category(dealer)!="dealership" or not _near(position,dealer.door):
+		return _result(false,"Visit a Crown Motor Gallery entrance first.")
+	if index<0: return _result(false,"Choose a listed vehicle model.")
+	var spec := Fleet.spec(index)
+	if state.owned_vehicles.size()>=64 or owned_vehicles(actor).size()>=3:
+		return _result(false,"Your garage holds three vehicles.")
+	if int(state.vehicle_stock.get(spec.id,0))<1: return _result(false,"This model is sold out.")
+	if sim.balance(actor)<int(spec.price): return _result(false,"You need %d credits for this vehicle." % int(spec.price))
+	var id := "v:city:%s:%d" % [spec.id,int(state.next_vehicle_id)]
+	var record := {"owner":actor,"model":spec.id,"building":dealer.id,"price_paid":int(spec.price),"purchased_at":time}
+	state.owned_vehicles[id] = record
+	state.next_vehicle_id += 1
+	state.vehicle_stock[spec.id] -= 1
+	sim._transfer(actor,PROPERTY_ACCOUNT,int(spec.price),"Vehicle purchase "+id)
+	_record("vehicle_purchase",{"actor":actor,"vehicle":id,"credits":int(spec.price),"time":time})
+	var result := _result(true,"Your %s is ready in the delivery court. Walk around the building and press E to drive." % str(spec.label))
+	result["vehicle"] = _vehicle_delivery(id,record,dealer)
+	return result
+
+
+func _recall_vehicle(actor: String,payload: Dictionary,position: Vector3) -> Dictionary:
+	if payload.size()!=2 or not payload.get("building") is String or not payload.get("vehicle") is String:
+		return _result(false,"Choose a dealership and one of your vehicles.")
+	var dealer := Plan.building(payload.building)
+	var record: Dictionary = state.owned_vehicles.get(payload.vehicle,{})
+	if dealer.is_empty() or Commerce.category(dealer)!="dealership" or not _near(position,dealer.door):
+		return _result(false,"Visit a dealership to collect your vehicle.")
+	if record.is_empty() or record.owner!=actor: return _result(false,"You do not own this vehicle.")
+	record.building = dealer.id
+	var result := _result(true,"Vehicle ready in the delivery court.")
+	result["vehicle"] = _vehicle_delivery(payload.vehicle,record,dealer)
+	return result
+
+
 func advance(to_time: float) -> bool:
 	if state.is_empty() or not is_finite(to_time) or to_time < float(state.last_time):
 		return false
+	preload("res://scripts/city_incident_state.gd").advance(state.incidents,to_time)
 	var previous_interval := floori(float(state.last_time) / AGGREGATE_INTERVAL)
 	var requested := maxi(0,floori(to_time / AGGREGATE_INTERVAL)-previous_interval)
 	var intervals := mini(requested,MAX_ADVANCE_INTERVALS)
 	if intervals > 0:
 		_consume_service_goods(intervals)
 		for district: Dictionary in state.districts:
+			if not district.has("infrastructure"):
+				district["infrastructure"] = Infrastructure.create()
+			Infrastructure.advance(district, intervals)
 			var kind:=str(district.kind)
 			var production_rate:=6 if kind in ["produce","food"] else (2 if kind=="residential" else 1)
 			var demand_rate:=maxi(1,ceili(float(district.population)/10000.0))
-			var production:=production_rate*intervals
+			var production:=floori(float(production_rate*intervals)*Infrastructure.productive_fraction(district))
 			var requested_food:=demand_rate*intervals
 			var available:=int(district.food_stock)+production
 			var consumption:=mini(available,requested_food)
@@ -304,7 +490,7 @@ func advance(to_time: float) -> bool:
 			district.shortages=_bounded_counter(int(district.shortages)+missed)
 			var condition_loss:=float(intervals)*0.0008+float(missed)*0.002
 			district.service_condition=clampf(float(district.service_condition)-condition_loss,0.25,1.0)
-			var employment_factor:=(0.90 if missed>0 else 1.0)*(0.75+0.25*float(district.service_condition))
+			var employment_factor:=(0.90 if missed>0 else 1.0)*(0.75+0.25*float(district.service_condition))*(0.6+0.4*Infrastructure.productive_fraction(district))
 			district.workforce=roundi(float(district.workforce_capacity)*employment_factor)
 			district.production_units = _bounded_counter(int(district.production_units)+production)
 			district.consumption_units = _bounded_counter(int(district.consumption_units)+consumption)
@@ -553,6 +739,7 @@ func _finish_job(actor: String, sim, position: Vector3, time: float) -> Dictiona
 	if district_id >= 0 and district_id < state.districts.size():
 		state.districts[district_id].completed_jobs = int(state.districts[district_id].completed_jobs)+1
 		if active.kind=="maintenance":
+			Infrastructure.repair(state.districts[district_id], str(active.destination_service), str(active.job))
 			state.districts[district_id].service_condition=minf(1.0,float(state.districts[district_id].service_condition)+0.12)
 		elif active.kind=="courier":
 			state.districts[district_id].service_condition=minf(1.0,float(state.districts[district_id].service_condition)+0.015)
@@ -560,13 +747,19 @@ func _finish_job(actor: String, sim, position: Vector3, time: float) -> Dictiona
 	_record("job_completed",{"actor":actor,"job":active.job,"credits":active.reward,
 		"cargo":active.cargo.duplicate(true),"time":time})
 	state.active_jobs.erase(actor)
-	return _result(true,"Work complete. The city paid %d credits."%int(active.reward))
+	var life=Life.new();life.state=state.resident_life
+	var reserved_payroll:=0
+	for remaining:Dictionary in state.active_jobs.values():reserved_payroll+=int(remaining.reward)
+	var progress:Dictionary=life.record_job(actor,str(active.id),str(active.kind),int(active.reward),sim,time,reserved_payroll)
+	state.resident_life=life.state
+	return _result(true,"Work complete. The city paid %d credits, including %d career bonus."%[int(active.reward)+int(progress.get("bonus",0)),int(progress.get("bonus",0))])
 
 
 func _valid_state(candidate: Variant) -> bool:
 	if not candidate is Dictionary:
 		return false
 	var data: Dictionary = candidate
+	if not Life.valid(data.get("resident_life")) or not Law.valid(data.get("civil_law")):return false
 	for key in ["properties","homes","active_jobs","service_inventories","metrics"]:
 		if not data.get(key) is Dictionary:
 			return false
@@ -579,6 +772,21 @@ func _valid_state(candidate: Variant) -> bool:
 			or not _valid_integer(data.get("population"),POPULATION,POPULATION) \
 			or not _valid_integer(data.get("next_job_id"),1,1000000000):
 		return false
+	if not preload("res://scripts/city_incident_state.gd").valid(data.get("incidents")):return false
+	for incident in data.incidents.values():
+		if float(incident.created)>float(data.last_time)+.001:return false
+	if not data.get("owned_vehicles") is Dictionary or data.owned_vehicles.size()>64 or not data.get("vehicle_stock") is Dictionary or data.vehicle_stock.size()!=Fleet.CATALOG.size() or not _valid_integer(data.get("next_vehicle_id"),1,1000000000): return false
+	for spec in Fleet.catalog():
+		if not _valid_integer(data.vehicle_stock.get(spec.id),0,24): return false
+	var garage_counts: Dictionary = {}
+	for id in data.owned_vehicles:
+		var car: Variant = data.owned_vehicles[id]
+		if not id is String or not id.begins_with("v:city:") or not car is Dictionary or Commerce.model_from_vehicle_id(id)<0: return false
+		if not _valid_actor(car.get("owner","")) or not car.get("model") is String or Fleet.index_for_id(car.model)!=Commerce.model_from_vehicle_id(id): return false
+		if not car.get("building") is String or Commerce.category(Plan.building(car.building))!="dealership": return false
+		if not _valid_integer(car.get("price_paid"),1,1000000) or not _valid_number(car.get("purchased_at"),0,float(data.last_time)): return false
+		garage_counts[car.owner] = int(garage_counts.get(car.owner,0))+1
+		if garage_counts[car.owner]>3 or int(id.get_slice(":",3))>=int(data.next_vehicle_id): return false
 	if data.properties.size()>MAX_PROPERTIES or data.homes.size()>64 \
 			or data.active_jobs.size()>MAX_ACTIVE_JOBS or data.ledger.size()>MAX_LEDGER:
 		return false
@@ -682,16 +890,31 @@ func _valid_districts(rows: Array) -> bool:
 				or not _valid_integer(row.get("job_minutes"),0,1000000000000000) \
 				or not _valid_integer(row.get("completed_jobs"),0,1000000000):
 			return false
+		if row.has("infrastructure") and not Infrastructure.valid(row.infrastructure):
+			return false
 		population += int(row.population)
 	return population == POPULATION
+
+
+func _public_districts() -> Array:
+	var rows: Array = state.districts.duplicate(true)
+	# Public panels need current service and reserve figures, not the full
+	# persistent accounting history. Keep the worst-case 512-property RPC bounded.
+	for row in rows:
+		var stored: Dictionary = row.get("infrastructure", Infrastructure.create())
+		var current := {}
+		for key in ["power_ratio","water_ratio","clinic_ratio","mobility_ratio","water_reserve","waste_backlog","recycled","budget"]:
+			current[key] = stored[key]
+		row["infrastructure"] = current
+	return rows
 
 
 func _new_districts() -> Array:
 	var populations: Array[int] = []
 	populations.resize(12)
 	populations.fill(0)
-	for y in range(Plan.GRID_SIZE):
-		for x in range(Plan.GRID_SIZE):
+	for y in range(Plan.GRID_DEPTH):
+		for x in range(Plan.GRID_WIDTH):
 			var key := Vector2i(x,y)
 			populations[Plan.district_for_block(key)] += Plan.block_population(key)
 	var result: Array = []
@@ -702,6 +925,7 @@ func _new_districts() -> Array:
 			"population":population,"workforce_capacity":capacity,"workforce":capacity,
 			"food_stock":72+int(row.id)*3,"food_demand":maxi(1,ceili(float(population)/10000.0)),
 			"service_condition":0.92-float(int(row.id)%4)*0.01,"shortages":0,
+			"infrastructure":Infrastructure.create(),
 			"production_units":0,"consumption_units":0,"job_minutes":0,"completed_jobs":0})
 	return result
 
@@ -939,3 +1163,7 @@ static func _valid_integer(value: Variant, minimum: float, maximum: float) -> bo
 
 static func _result(ok: bool, message: String) -> Dictionary:
 	return {"ok":ok,"message":message}
+
+func resident_view(actor: String) -> Dictionary:
+	var life=Life.new();life.state=state.get("resident_life",{})
+	return life.view(actor)

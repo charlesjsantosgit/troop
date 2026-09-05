@@ -59,6 +59,7 @@ var _physics_viewport: SubViewport
 var _moon_sampler: MoonWorld
 var sites: Dictionary = {}
 var traffic: Dictionary = {}
+var civil: Node
 var city: Node
 var _build_queue: Array = []
 var _vehicle_motion: Dictionary = {}
@@ -70,6 +71,9 @@ func _ready() -> void:
 	city = load("res://scripts/city_network.gd").new()
 	city.name = "CityNetwork"
 	add_child(city)
+	civil=load("res://scripts/civil_authority.gd").new()
+	civil.name="CivilAuthority"
+	add_child(civil)
 
 
 func start_authority(seed_value: int, persist := false) -> Error:
@@ -128,6 +132,7 @@ func start_authority(seed_value: int, persist := false) -> Error:
 
 func stop() -> void:
 	if is_instance_valid(city): city.reset()
+	if is_instance_valid(civil): civil.reset()
 	if authoritative and societies and persistence_enabled and society_ready:
 		if not societies.save_game(storage_path):
 			push_error("Shared society checkpoint could not be saved at shutdown.")
@@ -257,6 +262,7 @@ func prepare_player_vehicle(vehicle_id: String, kind: int, peer_id: int) -> bool
 		last_vehicle_error = storage_error if not storage_error.is_empty() \
 			else "The shared vehicle registry is not ready."
 		return false
+	if vehicle_id.begins_with("v:park-rowboat-") and not Gen.vehicle_definition_by_id(vehicle_id).is_empty(): return true
 	if not societies.state.vehicle_fuel.has(vehicle_id):
 		var checkpoint: Dictionary = societies.export_state() if persistence_enabled else {}
 		var tank: Dictionary = societies.register_vehicle(vehicle_id, kind)
