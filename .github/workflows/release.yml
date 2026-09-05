@@ -211,7 +211,10 @@ jobs:
             "$GODOT_BIN" --headless --path . --fixed-fps 60 \
               --quit-after "$TEST_FRAMES" -- "$MODE" 2>&1 | tee "$TEST_LOG"
             grep -Eq "^${TEST_PREFIX} (result=)?[0-9]+/[0-9]+ PASS$" "$TEST_LOG"
-            ! grep -q 'SCRIPT ERROR:' "$TEST_LOG"
+            if grep -q 'SCRIPT ERROR:' "$TEST_LOG"; then
+              echo "::error::Godot reported a script error; see the test log above."
+              exit 1
+            fi
           done
           for MODE in frontierpedestriantest frontiercrowdtest fieldbackpackfittest; do
             TEST_LOG="$RUNNER_TEMP/$MODE.log"
@@ -219,7 +222,10 @@ jobs:
               --script "res://tests/$MODE.gd" 2>&1 | tee "$TEST_LOG"
             SENTINEL="$(printf '%s' "$MODE" | tr '[:lower:]' '[:upper:]')"
             grep -Eq "^${SENTINEL}( [0-9]+/[0-9]+)? PASS$" "$TEST_LOG"
-            ! grep -q 'SCRIPT ERROR:' "$TEST_LOG"
+            if grep -q 'SCRIPT ERROR:' "$TEST_LOG"; then
+              echo "::error::Godot reported a script error; see the test log above."
+              exit 1
+            fi
           done
           for MODE in frontiersocietiestest frontiervisualtest frontiertowngeographytest frontierreliabilitytest frontierorderingtest spacephototest frontierpavingtest avatarheighttest; do
             TEST_LOG="$RUNNER_TEMP/troop-$MODE.log"
@@ -227,12 +233,18 @@ jobs:
             "$GODOT_BIN" --headless --path . --quit-after 30000 \
               --script "res://tests/$MODE.gd" 2>&1 | tee "$TEST_LOG"
             grep -Eq "^${TEST_PREFIX} [0-9]+/[0-9]+ PASS$" "$TEST_LOG"
-            ! grep -q 'SCRIPT ERROR:' "$TEST_LOG"
+            if grep -q 'SCRIPT ERROR:' "$TEST_LOG"; then
+              echo "::error::Godot reported a script error; see the test log above."
+              exit 1
+            fi
           done
           "$GODOT_BIN" --headless --path . --script res://tests/frontiertutorialtest.gd \
             2>&1 | tee "$RUNNER_TEMP/troop-tutorial.log"
           grep -Eq '^FRONTIERTUTORIAL [0-9]+/[0-9]+ PASS$' "$RUNNER_TEMP/troop-tutorial.log"
-          ! grep -q 'SCRIPT ERROR:' "$RUNNER_TEMP/troop-tutorial.log"
+          if grep -q 'SCRIPT ERROR:' "$RUNNER_TEMP/troop-tutorial.log"; then
+            echo "::error::Godot reported a script error; see the test log above."
+            exit 1
+          fi
           python3 tests/run_frontier_network.py --godot "$GODOT_BIN" --project .
           for MODE in terraincoveragetest terrainmorphtest; do
             TEST_LOG="$RUNNER_TEMP/troop-$MODE.log"
@@ -255,7 +267,10 @@ jobs:
             "$GODOT_BIN" --headless --path . --fixed-fps 60 \
               --quit-after 30000 -- "$MODE" 2>&1 | tee "$TEST_LOG"
             grep -Eq "^${TEST_PREFIX} (result=)?[0-9]+/[0-9]+ PASS$" "$TEST_LOG"
-            ! grep -q 'SCRIPT ERROR:' "$TEST_LOG"
+            if grep -q 'SCRIPT ERROR:' "$TEST_LOG"; then
+              echo "::error::Godot reported a script error; see the test log above."
+              exit 1
+            fi
           done
           python3 tests/run_city_network.py --godot "$GODOT_BIN" --project .
 

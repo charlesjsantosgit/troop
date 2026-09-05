@@ -47,6 +47,7 @@ class ProjectionNetwork extends Node:
 class ProjectionPlayer extends Node3D:
 	var vehicle: Node
 	var expedition_locked := false
+	var arrival_locked := false
 
 class ProjectionWorld extends Node3D:
 	var local_player: Node3D
@@ -250,7 +251,14 @@ func _check_controller_guards() -> void:
 	controller._on_result(22, "buy_home", {"ok": false, "message": "This property is already owned."})
 	_check(controller._pending == 0 and controller.last_message == "This property is already owned.",
 		"a matching denied result clears waiting and preserves the authoritative reason")
+	player.arrival_locked = true
+	player.expedition_locked = true
+	# Keep the player alive across the controller's actual exit-tree callback.
+	world.reparent(root)
 	controller.free()
+	_check(not player.arrival_locked and player.expedition_locked,
+		"controller cleanup releases the arrival hold without changing the rocket lock")
+	world.free()
 
 func _check_rooms() -> void:
 	var room := InteriorScript.new()
