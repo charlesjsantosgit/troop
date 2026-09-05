@@ -72,10 +72,12 @@ const VIEW_ALTITUDE_FLOOR := 10.0
 ## six kilometres overhead merely to fill a horizontal shader fade.
 const FLIGHT_TERRAIN_NEAR_FADE := 0.0
 const STREAMED_WILDERNESS_VEHICLE_LIMIT := 16
+const VEHICLE_ENTRY_TIMEOUT_MS := 5000
 const STREAM_DETAIL_ENQUEUED_META := &"stream_detail_enqueued_usec"
 const DEFEAT_VIEW_TIME := 2.35
 const MELEE_RADIUS := 0.88
 const MELEE_DAMAGE := [24.0, 29.0, 38.0]
+const MELEE_PRIMED_DAMAGE_MULTIPLIER := 1.5
 const LIGHTING_UPDATE_STEP := 0.05
 const SKY_UPDATE_STEP := 0.50
 const CLOCK_RESYNC_STEP := 1.0
@@ -183,6 +185,8 @@ var frontier: Node
 var puppets: Dictionary = {}         # peer id -> Puppet
 var vehicles: Dictionary = {}        # stable vehicle id -> Vehicle node
 var _pending_vehicle_entry := ""     # vid awaiting the host's seat claim
+var _pending_vehicle_entry_started_msec := 0
+var _pending_vehicle_entry_request_id := 0
 var _spawned_vehicle_ids: Dictionary = {}  # dedupe for currently retained spawns
 var _streamed_vehicle_sources: Dictionary = {} # wilderness id -> origin chunk
 var _retained_wilderness_vehicle_ids: Dictionary = {} # mounted once -> session citizen
@@ -344,6 +348,8 @@ func begin_build() -> void:
 		Net.vehicle_claimed.connect(_on_vehicle_claimed)
 	if not Net.vehicle_released.is_connected(_on_vehicle_released):
 		Net.vehicle_released.connect(_on_vehicle_released)
+	if not Net.vehicle_request_finished.is_connected(_on_vehicle_request_finished):
+		Net.vehicle_request_finished.connect(_on_vehicle_request_finished)
 	for vehicle_id in Net.vehicle_spawn_definitions:
 		var definition: Dictionary = Net.vehicle_spawn_definitions[vehicle_id]
 		_queue_build_vehicle(str(vehicle_id), int(definition.get("kind", -1)),
@@ -601,6 +607,7 @@ func _connect_runtime_signals() -> void:
 		[Net.peer_defeated, _on_peer_defeated],
 		[Net.vehicle_claimed, _on_vehicle_claimed],
 		[Net.vehicle_released, _on_vehicle_released],
+		[Net.vehicle_request_finished, _on_vehicle_request_finished],
 		[Net.cycle_hour_changed, _on_shared_cycle_hour_changed],
 	]
 	for binding in bindings:
@@ -1151,25 +1158,76 @@ func _enter_vehicle_target(player: Node3D, v: Vehicle) -> bool:
 		if v.driver == player:
 			_mark_wilderness_vehicle_touched(v.vid)
 		return true
+	if not _pending_vehicle_entry.is_empty():
+		_vehicle_entry_notice("Waiting for the vehicle seat…")
+		return true
 	_pending_vehicle_entry = v.vid
-	if Net.request_vehicle(v.vid):
+	_pending_vehicle_entry_started_msec = Time.get_ticks_msec()
+	_pending_vehicle_entry_request_id = _pending_vehicle_entry_request_id + 1 \
+		if _pending_vehicle_entry_request_id < 2147483647 else 1
+	_vehicle_entry_notice("Boarding %s…" % v.display_name())
+	if Net.request_vehicle(v.vid, _pending_vehicle_entry_request_id):
 		return true
 	_pending_vehicle_entry = ""
+	_vehicle_entry_notice("That seat is unavailable. Try another vehicle.")
 	return false
+
+
+func _vehicle_entry_notice(message: String) -> void:
+	if is_instance_valid(local_player):
+		local_player.supply_notice = message
+		local_player.supply_notice_remaining = 3.0
+
+
+func _vehicle_entry_still_wanted(v: Vehicle) -> bool:
+	return is_instance_valid(local_player) and is_instance_valid(v) \
+		and not local_player.defeated and not local_player.expedition_locked \
+		and local_player.vehicle == null \
+		and local_player.global_position.distance_squared_to(v.interaction_position()) \
+			<= Vehicle.ENTER_RANGE * Vehicle.ENTER_RANGE
+
+
+func _update_pending_vehicle_entry() -> void:
+	if _pending_vehicle_entry.is_empty():
+		return
+	var v := vehicle_by_id(_pending_vehicle_entry)
+	if not Net.active or not _vehicle_entry_still_wanted(v):
+		_pending_vehicle_entry = ""
+		return
+	var elapsed := Time.get_ticks_msec() - _pending_vehicle_entry_started_msec
+	if elapsed >= VEHICLE_ENTRY_TIMEOUT_MS:
+		_pending_vehicle_entry = ""
+		_vehicle_entry_notice("The seat request timed out. Check ping, then press E to retry.")
 
 
 func _on_vehicle_claimed(vid: String, claimant_id: int) -> void:
 	var v := vehicle_by_id(vid)
 	if claimant_id == Net.local_id():
-		if _pending_vehicle_entry == vid and v and local_player \
-				and is_instance_valid(local_player):
+		var wanted := _pending_vehicle_entry == vid and _vehicle_entry_still_wanted(v) \
+			and Time.get_ticks_msec() - _pending_vehicle_entry_started_msec < VEHICLE_ENTRY_TIMEOUT_MS
+		if _pending_vehicle_entry == vid:
+			_pending_vehicle_entry = ""
+		if wanted:
 			local_player.enter_vehicle(v)
 			if v.driver == local_player:
 				_mark_wilderness_vehicle_touched(v.vid)
-		_pending_vehicle_entry = ""
+		# A late grant must not teleport a player who walked away or leave a
+		# vehicle permanently occupied by a request they no longer want.
+		if not is_instance_valid(local_player) or local_player.vehicle != v or v == null:
+			Net.release_vehicle(vid, [])
 		return
+	if _pending_vehicle_entry == vid:
+		_pending_vehicle_entry = ""
+		_vehicle_entry_notice("Another player took that seat. Try another vehicle.")
 	if v:
 		v.set_remote_controlled(true, claimant_id)
+
+
+func _on_vehicle_request_finished(vid: String, accepted: bool, reason: String, request_id: int) -> void:
+	if accepted or _pending_vehicle_entry != vid or request_id != _pending_vehicle_entry_request_id:
+		return
+	_pending_vehicle_entry = ""
+	_vehicle_entry_notice(reason if not reason.is_empty() else "That seat is unavailable. Try again nearby.")
 
 
 func _on_vehicle_spawn_registered(vid: String, kind: int, pos: Vector3,
@@ -1425,10 +1483,21 @@ func perform_melee(shooter: Node3D, origin: Vector3, direction: Vector3,
 	var combo_index := posmod(combo, MELEE_DAMAGE.size())
 	var impulse := strike_direction * (5.0 + combo_index * 1.25) \
 		+ Vector3.UP * (1.1 + combo_index * 0.45)
-	best_target.take_damage(MELEE_DAMAGE[combo_index], shooter, impulse)
+	best_target.take_damage(melee_damage_for_combo(combo), shooter, impulse)
 	Sfx.play_at("melee_hit",
 		best_target.global_position + Vector3.UP * 0.75, -3.0)
 	return best_target
+
+
+## Network strikes encode the authoritative primed bit in combos 3..5. Values
+## outside that canonical range remain ordinary combos instead of gaining an
+## accidental damage bonus from malformed input.
+static func melee_damage_for_combo(encoded_combo: int) -> float:
+	var combo_index := posmod(encoded_combo, MELEE_DAMAGE.size())
+	var primed := encoded_combo >= MELEE_DAMAGE.size() \
+		and encoded_combo < MELEE_DAMAGE.size() * 2
+	return MELEE_DAMAGE[combo_index] * (MELEE_PRIMED_DAMAGE_MULTIPLIER \
+		if primed else 1.0)
 
 
 func _on_network_bullet(shooter_id: int, origin: Vector3,
@@ -1757,6 +1826,7 @@ static func gameplay_camera_far_distance(streamed_distance: float,
 func _process(dt: float) -> void:
 	if not is_build_complete():
 		return
+	_update_pending_vehicle_entry()
 	_t += dt
 	_update_day_night(dt)
 	if _earth_streaming_enabled:

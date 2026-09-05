@@ -265,6 +265,10 @@ func _run() -> void:
 		and cross_realm_combat_relay_rejected and transit_combat_rejected,
 		"bullet and melee origins stay near the accepted actor and relay only inside one active realm")
 	net.player_realms[77] = net.PlayerRealm.EARTH
+	net._peer_on_foot_positions[77] = Vector3(10.0, 2.0, 10.0)
+	_check_melee_prime(net)
+
+	net.player_realms[77] = net.PlayerRealm.EARTH
 	net.player_realms[88] = net.PlayerRealm.MOON
 	net._peer_on_foot_positions[77] = Vector3(10.0, 2.0, 10.0)
 	_check(net._admin_target_fingerprint(77, 88) == fingerprint_a \
@@ -596,3 +600,90 @@ func _check(condition: bool, label: String, info := "") -> void:
 		print("  [ok] " + label)
 	else:
 		print("  [FAIL] " + label + ((" :: " + info) if info != "" else ""))
+
+
+func _check_melee_prime(net: Node) -> void:
+	var was_active: bool = net.active
+	net.active = false
+	net._reset_melee_state()
+	var origin := Vector3(10.0, 3.0, 10.0)
+	_check(net._valid_melee(origin, Vector3.FORWARD, 0) \
+		and net._valid_melee(origin, Vector3.FORWARD, 5) \
+		and not net._valid_melee(origin, Vector3.FORWARD, -1) \
+		and not net._valid_melee(origin, Vector3.FORWARD, 6) \
+		and not net._valid_melee(origin, Vector3.ZERO, 3),
+		"melee wire format accepts exactly six canonical strike codes and bounded directions")
+	net._remember_melee_mode(77, 0, false, true, true,
+		false, 0.0, false, -1)
+	_check(net._can_prime_melee(77) and net._canonical_melee_combo(77, 5) == 2,
+		"eligible melee mode alone cannot forge the primed damage marker")
+	net._host_set_melee_primed(77, true)
+	_check(net.is_melee_primed(77) and net._canonical_melee_combo(77, 3) == 3 \
+		and net._canonical_melee_combo(77, 4) == 4 \
+		and net._canonical_melee_combo(77, 5) == 5,
+		"a held authority-accepted stance preserves all three canonical primed combos")
+	net._host_set_melee_primed(77, false)
+	var released_at: int = net._melee_prime_released_msec[77]
+	net._host_set_melee_primed(77, false)
+	_check(not net.is_melee_primed(77) \
+		and net._melee_prime_released_msec[77] == released_at \
+		and net._canonical_melee_combo(77, 4) == 4 \
+		and net._canonical_melee_combo(77, 4) == 1,
+		"release permits one latched strike, repeated release neither refreshes nor duplicates it")
+	net._host_set_melee_primed(77, true)
+	net._host_set_melee_primed(77, false)
+	net._melee_prime_released_msec[77] = Time.get_ticks_msec() \
+		- net.MELEE_PRIME_RELEASE_MSEC - 1
+	_check(net._canonical_melee_combo(77, 5) == 2,
+		"release allowance expires after the actual 620 ms strike duration")
+	var invalid_modes := [
+		[2, false, true, true, false, 0.0, false, -1],
+		[0, false, false, true, false, 0.0, false, -1],
+		[0, false, true, false, false, 0.0, false, -1],
+		[6, true, true, true, false, 0.0, false, -1],
+		[11, false, true, true, false, 0.0, false, -1],
+		[0, false, true, true, true, 0.0, false, -1],
+		[0, false, true, true, false, 0.5, false, -1],
+		[3, false, true, true, false, 0.0, true, -1],
+		[13, false, true, true, false, 0.0, false, 0],
+		[32, false, true, true, false, 0.0, false, -1],
+	]
+	var modes_clear := true
+	for mode in invalid_modes:
+		net._remember_melee_mode(77, 0, false, true, true,
+			false, 0.0, false, -1)
+		net._host_set_melee_primed(77, true)
+		net._host_set_melee_primed(77, false)
+		net._remember_melee_mode.callv([77] + mode)
+		net._host_set_melee_primed(77, true)
+		modes_clear = modes_clear and not net.is_melee_primed(77) \
+			and not net._melee_prime_released_msec.has(77) \
+			and net._canonical_melee_combo(77, 3) == 0
+	_check(modes_clear,
+		"sprint, guns, mode exit, swing, swim, reload, healing, flight and vehicles clear stance and release grace")
+	net._remember_melee_mode(77, 0, false, true, true,
+		false, 0.0, false, -1)
+	net._host_set_melee_primed(77, true)
+	net._mark_melee_defeated(77)
+	net._remember_melee_mode(77, 0, false, true, true,
+		false, 0.0, false, -1)
+	net._host_set_melee_primed(77, true)
+	_check(not net.is_melee_primed(77) and net._canonical_melee_combo(77, 3) == 0,
+		"defeat blocks a stale in-flight melee state from reviving ready stance")
+	net._remember_melee_mode(77, 0, false, false, false,
+		false, 0.0, false, -1)
+	net._remember_melee_mode(77, 0, false, true, true,
+		false, 0.0, false, -1)
+	net._host_set_melee_primed(77, true)
+	_check(net.is_melee_primed(77),
+		"a fresh non-melee respawn state permits subsequent deliberate ready stance")
+	net._clear_peer_realm_position(77)
+	_check(not net.is_melee_primed(77) and not net._melee_prime_released_msec.has(77),
+		"realm handoff erases the old stance and strike allowance")
+	net._melee_primed[77] = true
+	net._melee_prime_released_msec[77] = Time.get_ticks_msec()
+	net._reset_melee_state()
+	_check(net._melee_primed.is_empty() and net._melee_prime_eligible.is_empty() \
+		and net._melee_prime_released_msec.is_empty() and net._melee_defeated.is_empty(),
+		"session reset leaves no peer stance, eligibility or released-strike state")
+	net.active = was_active

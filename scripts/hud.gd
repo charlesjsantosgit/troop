@@ -7,9 +7,11 @@ enum ScopeTarget { NONE, BODY, HEAD }
 
 const SNIPER_SCOPE_RANGE := 800.0
 const FPS_REFRESH_SECONDS := 0.25
+const ConnectionQualityScript := preload("res://scripts/connection_quality.gd")
 
 var player  # MonkeyPlayer
 var fps_label: Label
+var connection_label: Label
 var score_label: Label
 var speed_label: Label
 var speed_fill: ColorRect
@@ -88,6 +90,12 @@ func _ready() -> void:
 	fps_label.text = "FPS --"
 	fps_label.add_theme_color_override("font_color", Color(0.72, 1.0, 0.58, 0.92))
 	add_child(fps_label)
+	connection_label = _label(13)
+	connection_label.name = "ConnectionQuality"
+	connection_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	connection_label.position = Vector2(margin + 84, margin)
+	connection_label.visible = false
+	add_child(connection_label)
 
 	score_label = _label(24)
 	score_label.position = Vector2(margin, margin + 24)
@@ -543,6 +551,8 @@ func _process(dt: float) -> void:
 			if minimap.visible else 0.0)
 	var weapon = player.active_weapon if player.active_weapon else player.gun
 	var front_camera: bool = player.cam != null and player.cam.front_view
+	var primed_melee: bool = player.melee_attack_primed \
+		if player.melee_attack_remaining > 0.0 else player.melee_primed
 	_update_sniper_scope(weapon, front_camera)
 	var aircraft_aim_active := _update_aircraft_aim_reticle(front_camera)
 	spread_label.visible = not _sniper_scope_active and not aircraft_aim_active
@@ -557,7 +567,8 @@ func _process(dt: float) -> void:
 			roundi(player.BANDAGE_HEAL), "▰".repeat(bandage_fill),
 			"▱".repeat(8 - bandage_fill)]
 	elif player.melee_mode:
-		ammo_label.text = "MELEE MODE\nLMB COMBO  ·  Q DRAW WEAPON"
+		ammo_label.text = ("PRIMED  ·  +50% DAMAGE" if primed_melee else "MELEE") \
+			+ "\nLMB COMBO  ·  Q DRAW WEAPON"
 	elif weapon:
 		var is_shotgun := weapon is PumpShotgun
 		var is_smg := weapon is SMG
@@ -614,7 +625,8 @@ func _process(dt: float) -> void:
 	if player.is_healing():
 		reticle_color = Color(0.32, 1.0, 0.42, 0.96)
 	if player.melee_mode:
-		reticle_color = Color(0.62, 1.0, 0.32, 0.96)
+		reticle_color = Color(1.0, 0.78, 0.34, 0.96) if primed_melee \
+			else Color(0.62, 1.0, 0.32, 0.96)
 	crosshair.visible = not front_camera and not _sniper_scope_active \
 		and not aircraft_aim_active
 	if front_camera or aircraft_aim_active:
@@ -629,8 +641,9 @@ func _process(dt: float) -> void:
 		if player.melee_mode:
 			crosshair.set_state(CombatCrosshair.Mode.PLUS, 0.0,
 				reticle_color, false, 0.0, 0.0)
-			spread_label.text = "MELEE  •  3-HIT COMBO"
-			spread_label.modulate = Color(0.65, 1.0, 0.34)
+			spread_label.text = "PRIMED  •  +50% DAMAGE" if primed_melee \
+				else "HOLD RMB TO PRIME"
+			spread_label.modulate = reticle_color
 		elif weapon is PumpShotgun:
 			# The shotgun pattern is centered inside the same movement/swing
 			# cone as every other weapon, so add the half-angles for a truthful
@@ -700,7 +713,7 @@ func _process(dt: float) -> void:
 	elif front_camera:
 		hint.text = "FRONT VIEW  ·  C cycle camera  ·  hold RMB to aim"
 	elif player.melee_mode:
-		hint.text = "MELEE MODE  ·  LMB three-hit combo  ·  Q draw weapon  ·  1/2/3/4 equip"
+		hint.text = "LMB combo  ·  Hold RMB to prime (+50% damage)  ·  Q draw weapon"
 	elif player.state == 2:  # SWING
 		hint.text = "W pump · A/D steer · scroll reel · SPACE jump off · release E · LMB fire"
 	elif player.state == 4:  # SWIM
@@ -747,6 +760,10 @@ func _update_fps_meter(dt: float) -> void:
 	if _fps_refresh_remaining > 0.0 or fps_label == null:
 		return
 	_fps_refresh_remaining = FPS_REFRESH_SECONDS
+	var connection := ConnectionQualityScript.sample(Net)
+	connection_label.visible = bool(connection.visible)
+	connection_label.text = str(connection.text)
+	connection_label.add_theme_color_override("font_color", Color("e9bc74") if connection.warning else Color("b0b6be"))
 	var measured_fps := maxi(0, roundi(Engine.get_frames_per_second()))
 	if measured_fps == _displayed_fps:
 		return

@@ -128,7 +128,7 @@ func _world_point(site: FrontierSite, coordinates: Array) -> Vector3:
 
 
 func _collect_exclusions(node: Node, settlement: Node3D, excluded: Array[RID]) -> void:
-	if node is CollisionObject3D and not settlement.is_ancestor_of(node):
+	if node is CollisionObject3D and (not settlement.is_ancestor_of(node) or node is FrontierCitizen):
 		excluded.append(node.get_rid())
 	for child in node.get_children():
 		_collect_exclusions(child, settlement, excluded)

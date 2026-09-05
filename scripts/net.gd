@@ -18,6 +18,8 @@ signal peer_state(id: int, pos: Vector3, yaw: float, vel: Vector3, anim: int,
 	vehicle_id: String, vehicle_aux: Vector3)
 signal vehicle_claimed(vehicle_id: String, claimant_id: int)
 signal vehicle_released(vehicle_id: String, rest: Array)
+signal vehicle_request_finished(vehicle_id: String, accepted: bool,
+	reason: String, request_id: int)
 signal vehicle_spawn_registered(vehicle_id: String, vehicle_kind: int,
 	position: Vector3, yaw: float)
 signal score_changed
@@ -49,8 +51,11 @@ signal moon_colony_result(action: String, ok: bool, reason: String)
 
 const PORT := 30623
 const MAX_CLIENTS := 24
-const CHANNEL_COUNT := 2
-const PROTOCOL_VERSION := 13
+# Channel 0 carries core control and player state, 1 carries voice/traffic,
+# 2 carries latency-sensitive actions and seat ownership, and 3 carries large
+# personalized society views with application-level backpressure.
+const CHANNEL_COUNT := 4
+const PROTOCOL_VERSION := 14
 const MAX_NAME_LENGTH := 20
 const REGISTRATION_TIMEOUT_SECONDS := 5.0
 const MAX_STATE_PACKETS_PER_SECOND := 30
@@ -102,6 +107,12 @@ const MOON_CHEESE_SHOP_RANGE := 12.0
 # realm, while still leaving ample headroom for high-altitude Earth flight.
 const MOON_REALM_MIN_Y := 36000.0
 const MAX_COMBAT_ORIGIN_DISTANCE := 12.0
+# A strike snapshots RMB at wind-up; one released stance may finish that strike.
+const MELEE_PRIME_RELEASE_MSEC := 620
+const MELEE_PRIME_RETRY_MSEC := 150
+# Wire animation IDs: MonkeyRig.Anim SPRINT, SWING, SWIM, RIDE, PILOT, CABIN.
+# Keep the headless authority independent of the rendered rig/vehicle scripts.
+const MELEE_INELIGIBLE_ANIMS := [2, 6, 11, 13, 14, 15]
 const ADMIN_NONCE_BYTES := 32
 const ADMIN_BOOTSTRAP_PROOF_BYTES := 32
 const ADMIN_GRANT_UNCHANGED := 0
@@ -194,6 +205,15 @@ var _moon_colony_flying_peers: Dictionary = {}
 ## write player saves. Tests may opt into their own user:// test directory.
 var _moon_colony_storage_root := ""
 
+var _melee_primed: Dictionary = {} # public authority-confirmed held stance
+var _melee_prime_eligible: Dictionary = {} # authority: accepted movement mode
+var _melee_prime_released_msec: Dictionary = {} # authority: one latched strike
+var _melee_defeated: Dictionary = {} # cleared by a fresh non-melee respawn state
+var _local_melee_prime_requested := false
+var _local_melee_prime_sent := false
+var _local_melee_prime_eligible := false
+var _local_melee_prime_attempt_msec := -1000
+
 var _wired := false
 var _registered: Dictionary = {}
 var _rate_windows: Dictionary = {}
@@ -208,6 +228,7 @@ func local_id() -> int:
 
 
 func _reset_expedition_state(include_local_player: bool) -> void:
+	_reset_melee_state()
 	player_realms = {1: PlayerRealm.EARTH} if include_local_player else {}
 	rocket_state = {
 		"phase": RocketMissionPhase.EARTH_READY,
@@ -360,7 +381,8 @@ static func configure_transport(peer: ENetMultiplayerPeer) -> void:
 
 static func configure_server_transport(peer: ENetMultiplayerPeer) -> void:
 	# Godot 4.7 (5b4e0cb0f) passes max_channels + 2 as incoming bandwidth
-	# in create_server. Our two channels therefore advertise four bytes/second,
+	# in create_server. A small channel count therefore advertises only a few
+	# bytes per second,
 	# causing ENet to discard nearly all incoming voice/movement datagrams.
 	# Restore the requested unlimited budget before any client handshake.
 	peer.get_host().bandwidth_limit(0, 0)
@@ -978,6 +1000,7 @@ func _on_connection_failed() -> void:
 
 
 func _on_server_disconnected() -> void:
+	_reset_melee_state()
 	active = false
 	is_admin = false
 	_client_registration_challenge_used = false
@@ -1010,6 +1033,9 @@ func _on_peer_disconnected(id: int) -> void:
 	_release_vehicles_of_peer(id)
 	_remove_peer_from_rocket(id)
 	player_realms.erase(id)
+	_clear_melee_prime(id)
+	_melee_prime_eligible.erase(id)
+	_melee_defeated.erase(id)
 	_registered.erase(id)
 	_pending_registrations.erase(id)
 	_peer_on_foot_positions.erase(id)
@@ -1180,6 +1206,8 @@ func _finish_registration(id: int, pname: String, fingerprint: String,
 		effective_game_version(), claimed_vehicles, vehicle_rests,
 		vehicle_spawn_definitions, player_realms, expedition_state_snapshot())
 	_broadcast_expedition_state()
+	for primed_peer in _melee_primed:
+		rpc_id(id, "cl_melee_primed", int(primed_peer), true)
 	if is_instance_valid(frontier_network):
 		frontier_network.register_peer(id)
 	roster_changed.emit()
@@ -1228,6 +1256,9 @@ func cl_roster(new_names: Dictionary, new_scores: Dictionary) -> void:
 	roster_changed.emit()
 	score_changed.emit()
 	for peer_id in departed:
+		_clear_melee_prime(peer_id)
+		_melee_prime_eligible.erase(peer_id)
+		_melee_defeated.erase(peer_id)
 		peer_left.emit(peer_id)
 
 
@@ -2022,9 +2053,14 @@ func send_state(pos: Vector3, yaw: float, vel: Vector3, anim: int,
 		vehicle_id := "", vehicle_aux := Vector3.ZERO) -> void:
 	if not active:
 		return
+	_local_melee_prime_eligible = _melee_mode_eligible(anim, swinging,
+		weapon_stowed, melee_mode, weapon_reloading, healing_progress, flying,
+		vehicle_kind)
 	if is_host:
 		_remember_authoritative_state_position(local_id(), pos, vehicle_kind,
 			vehicle_id)
+		_remember_melee_mode(local_id(), anim, swinging, weapon_stowed,
+			melee_mode, weapon_reloading, healing_progress, flying, vehicle_kind)
 		_moon_colony_flying_peers[local_id()] = flying
 		rpc("cl_state", local_id(), pos, yaw, vel, anim, swinging, anchor,
 			rope_tail, wraps, weapon_kind, weapon_stowed, melee_mode,
@@ -2035,6 +2071,7 @@ func send_state(pos: Vector3, yaw: float, vel: Vector3, anim: int,
 			rope_tail, wraps, weapon_kind, weapon_stowed, melee_mode,
 			weapon_ammo, weapon_reloading, healing_progress, flying,
 			vehicle_kind, vehicle_id, vehicle_aux)
+	_try_send_melee_prime()
 
 
 @rpc("any_peer", "call_remote", "unreliable_ordered", 0)
@@ -2056,6 +2093,8 @@ func srv_state(pos: Vector3, yaw: float, vel: Vector3, anim: int,
 		return
 	_remember_authoritative_state_position(sender, pos, vehicle_kind, vehicle_id)
 	_moon_colony_flying_peers[sender] = authorized_flying
+	_remember_melee_mode(sender, anim, swinging, weapon_stowed, melee_mode,
+		weapon_reloading, healing_progress, authorized_flying, vehicle_kind)
 	peer_state.emit(sender, pos, yaw, vel, anim, swinging, anchor, rope_tail,
 		wraps, weapon_kind, weapon_stowed, melee_mode, weapon_ammo,
 		weapon_reloading, healing_progress, authorized_flying, vehicle_kind,
@@ -2315,15 +2354,16 @@ func _canonical_vehicle_kind(vehicle_id: String) -> int:
 	_vehicle_positions[vehicle_id] = spawn_position
 	return vehicle_kind
 
-func request_vehicle(vehicle_id: String) -> bool:
-	if not _valid_vehicle_id(vehicle_id) or claimed_vehicles.has(vehicle_id):
+func request_vehicle(vehicle_id: String, request_id: int = 0) -> bool:
+	if not _valid_vehicle_id(vehicle_id) or claimed_vehicles.has(vehicle_id) \
+			or request_id < 0 or request_id > 0x7fffffff:
 		return false
 	if not active:
 		_apply_vehicle_claim(vehicle_id, local_id())
 		return true
 	if is_host:
-		return _host_claim_vehicle(vehicle_id, local_id())
-	rpc_id(1, "srv_request_vehicle", vehicle_id)
+		return _host_claim_vehicle(vehicle_id, local_id(), request_id)
+	rpc_id(1, "srv_request_vehicle", vehicle_id, request_id)
 	return true
 
 
@@ -2338,34 +2378,56 @@ func release_vehicle(vehicle_id: String, rest: Array) -> void:
 		rpc_id(1, "srv_release_vehicle", vehicle_id, rest)
 
 
-@rpc("any_peer", "call_remote", "reliable", 0)
-func srv_request_vehicle(vehicle_id: String) -> void:
+@rpc("any_peer", "call_remote", "reliable", 2)
+func srv_request_vehicle(vehicle_id: String, request_id: int) -> void:
 	var sender := multiplayer.get_remote_sender_id()
-	if _registered_peer(sender) and _allow_rate(sender, "vehicle_claim", 8):
-		_host_claim_vehicle(vehicle_id, sender)
+	if not _registered_peer(sender) or request_id < 0 or request_id > 0x7fffffff:
+		return
+	if not _allow_rate(sender, "vehicle_claim", 8):
+		_reply_vehicle_request(sender, vehicle_id, false,
+			"Please wait a moment before trying that seat again.", request_id)
+		return
+	_host_claim_vehicle(vehicle_id, sender, request_id)
 
 
-@rpc("any_peer", "call_remote", "reliable", 0)
+@rpc("any_peer", "call_remote", "reliable", 2)
 func srv_release_vehicle(vehicle_id: String, rest: Array) -> void:
 	var sender := multiplayer.get_remote_sender_id()
 	if _registered_peer(sender) and _allow_rate(sender, "vehicle_claim", 8):
 		_host_release_vehicle(vehicle_id, sender, rest)
 
 
-func _host_claim_vehicle(vehicle_id: String, claimant_id: int) -> bool:
-	if _canonical_vehicle_kind(vehicle_id) < 0 or not names.has(claimant_id) \
-			or (claimant_id != local_id() \
-			and not _vehicle_claim_in_range(claimant_id, vehicle_id)) \
-			or (not claimed_vehicles.has(vehicle_id)
-			and claimed_vehicles.size() >= MAX_VEHICLE_CLAIMS):
+func _host_claim_vehicle(vehicle_id: String, claimant_id: int,
+		request_id: int = 0) -> bool:
+	var kind := _canonical_vehicle_kind(vehicle_id)
+	if kind < 0 or not names.has(claimant_id):
+		_reply_vehicle_request(claimant_id, vehicle_id, false,
+			"This vehicle is unavailable.", request_id)
+		return false
+	if claimant_id != local_id() \
+			and not _vehicle_claim_in_range(claimant_id, vehicle_id):
+		_reply_vehicle_request(claimant_id, vehicle_id, false,
+			"Move closer to the vehicle and try again.", request_id)
+		return false
+	if not claimed_vehicles.has(vehicle_id) \
+			and claimed_vehicles.size() >= MAX_VEHICLE_CLAIMS:
+		_reply_vehicle_request(claimant_id, vehicle_id, false,
+			"This server's vehicle registry is full.", request_id)
 		return false
 	if claimed_vehicles.has(vehicle_id):
 		if claimant_id != local_id():
 			rpc_id(claimant_id, "cl_vehicle_claimed", vehicle_id,
 				int(claimed_vehicles[vehicle_id]))
+		_reply_vehicle_request(claimant_id, vehicle_id, false,
+			"That vehicle is already in use.", request_id)
 		return false
 	if is_instance_valid(frontier_network) and frontier_network.society_ready \
-			and not frontier_network.prepare_player_vehicle(vehicle_id, _canonical_vehicle_kind(vehicle_id), claimant_id):
+			and not frontier_network.prepare_player_vehicle(vehicle_id, kind, claimant_id):
+		var failure_reason := str(frontier_network.last_vehicle_error)
+		if failure_reason.is_empty():
+			failure_reason = "The shared vehicle registry is not ready."
+		_reply_vehicle_request(claimant_id, vehicle_id, false,
+			failure_reason, request_id)
 		return false
 	claimed_vehicles[vehicle_id] = claimant_id
 	# A claimed driver is no longer an on-foot proximity authority. Keeping the
@@ -2375,7 +2437,18 @@ func _host_claim_vehicle(vehicle_id: String, claimant_id: int) -> bool:
 	vehicle_rests.erase(vehicle_id)
 	vehicle_claimed.emit(vehicle_id, claimant_id)
 	rpc("cl_vehicle_claimed", vehicle_id, claimant_id)
+	_reply_vehicle_request(claimant_id, vehicle_id, true, "Seat ready.",
+		request_id)
 	return true
+
+
+func _reply_vehicle_request(peer_id: int, vehicle_id: String, accepted: bool,
+		reason: String, request_id: int) -> void:
+	if peer_id == local_id():
+		vehicle_request_finished.emit(vehicle_id, accepted, reason, request_id)
+	elif active and multiplayer.multiplayer_peer and _valid_vehicle_id(vehicle_id):
+		rpc_id(peer_id, "cl_vehicle_request_result", vehicle_id, accepted,
+			reason.left(160), request_id)
 
 
 func _host_release_vehicle(vehicle_id: String, releasing_id: int,
@@ -2440,6 +2513,8 @@ func _remember_authoritative_state_position(peer_id: int, position: Vector3,
 
 func _clear_peer_realm_position(peer_id: int) -> void:
 	_peer_on_foot_positions.erase(peer_id)
+	_melee_prime_eligible.erase(peer_id)
+	_clear_melee_prime(peer_id, is_host)
 
 
 func _peer_has_vehicle_claim(peer_id: int) -> bool:
@@ -2481,14 +2556,24 @@ func _remember_vehicle_release_handoff(peer_id: int, vehicle_id: String,
 		_peer_on_foot_positions[peer_id] = handoff_position
 
 
-@rpc("authority", "call_remote", "reliable", 0)
+@rpc("authority", "call_remote", "reliable", 2)
 func cl_vehicle_claimed(vehicle_id: String, claimant_id: int) -> void:
 	_apply_vehicle_claim(vehicle_id, claimant_id)
 
 
-@rpc("authority", "call_remote", "reliable", 0)
+@rpc("authority", "call_remote", "reliable", 2)
 func cl_vehicle_released(vehicle_id: String, rest: Array) -> void:
 	_apply_vehicle_release(vehicle_id, rest)
+
+
+@rpc("authority", "call_remote", "reliable", 2)
+func cl_vehicle_request_result(vehicle_id: String, accepted: bool,
+		reason: String, request_id: int) -> void:
+	if not active or is_host or multiplayer.get_remote_sender_id() != 1 \
+			or not _valid_vehicle_id(vehicle_id) or reason.length() > 160 \
+			or request_id < 0 or request_id > 0x7fffffff:
+		return
+	vehicle_request_finished.emit(vehicle_id, accepted, reason, request_id)
 
 
 func _apply_vehicle_claim(vehicle_id: String, claimant_id: int) -> void:
@@ -2497,6 +2582,7 @@ func _apply_vehicle_claim(vehicle_id: String, claimant_id: int) -> void:
 			or claimed_vehicles.size() >= MAX_VEHICLE_CLAIMS:
 		return
 	claimed_vehicles[vehicle_id] = claimant_id
+	_clear_melee_prime(claimant_id, is_host)
 	vehicle_rests.erase(vehicle_id)
 	vehicle_claimed.emit(vehicle_id, claimant_id)
 
@@ -2672,15 +2758,154 @@ func cl_fire_bullet(shooter_id: int, origin: Vector3, velocity: Vector3,
 		canonical.headshot, play_fx, weapon_kind)
 
 
-func melee_attack(origin: Vector3, direction: Vector3, combo: int) -> void:
-	if not active or not _valid_melee(origin, direction, combo):
+func set_melee_primed(primed: bool) -> void:
+	var changed := primed != _local_melee_prime_requested
+	_local_melee_prime_requested = primed
+	if changed:
+		_local_melee_prime_attempt_msec = -1000
+	_try_send_melee_prime()
+
+
+func is_melee_primed(peer_id: int) -> bool:
+	return bool(_melee_primed.get(peer_id, false))
+
+
+func _try_send_melee_prime() -> void:
+	if not active or not names.has(local_id()) \
+			or (_local_melee_prime_requested == _local_melee_prime_sent \
+				and _local_melee_prime_requested == is_melee_primed(local_id())) \
+			or (_local_melee_prime_requested and not _local_melee_prime_eligible) \
+			or Time.get_ticks_msec() - _local_melee_prime_attempt_msec < MELEE_PRIME_RETRY_MSEC:
 		return
-	var normalized := direction.normalized()
-	melee_swung.emit(local_id(), origin, normalized, combo)
+	_local_melee_prime_attempt_msec = Time.get_ticks_msec()
+	_local_melee_prime_sent = _local_melee_prime_requested
 	if is_host:
-		_relay_melee(local_id(), origin, normalized, combo)
+		_host_set_melee_primed(local_id(), _local_melee_prime_requested)
 	else:
-		rpc_id(1, "srv_melee_attack", origin, normalized, combo)
+		rpc_id(1, "srv_melee_primed", _local_melee_prime_requested)
+
+
+@rpc("any_peer", "call_remote", "reliable", 0)
+func srv_melee_primed(primed: bool) -> void:
+	var sender := multiplayer.get_remote_sender_id()
+	if not _registered_peer(sender):
+		return
+	# Releases always clear an accepted stance, even after a malicious burst.
+	# Repeated releases cannot refresh the one-strike grace period.
+	if _allow_rate(sender, "melee_prime", 12) \
+			or (not primed and is_melee_primed(sender)):
+		_host_set_melee_primed(sender, primed)
+
+
+func _host_set_melee_primed(peer_id: int, primed: bool) -> void:
+	if primed and not _can_prime_melee(peer_id):
+		_clear_melee_prime(peer_id, true)
+		if active and peer_id != local_id():
+			rpc_id(peer_id, "cl_melee_primed", peer_id, false)
+		return
+	if primed == is_melee_primed(peer_id):
+		return
+	if primed:
+		_melee_primed[peer_id] = true
+		_melee_prime_released_msec.erase(peer_id)
+	else:
+		_melee_primed.erase(peer_id)
+		_melee_prime_released_msec[peer_id] = Time.get_ticks_msec()
+	if active and is_host:
+		rpc("cl_melee_primed", peer_id, primed)
+
+
+@rpc("authority", "call_remote", "reliable", 0)
+func cl_melee_primed(peer_id: int, primed: bool) -> void:
+	if not names.has(peer_id):
+		return
+	if primed:
+		_melee_primed[peer_id] = true
+	else:
+		_melee_primed.erase(peer_id)
+
+
+func _melee_mode_eligible(anim: int, swinging: bool, weapon_stowed: bool,
+		melee_mode: bool, reloading: bool, healing: float, flying: bool,
+		vehicle_kind: int) -> bool:
+	return melee_mode and weapon_stowed and not swinging and not reloading \
+		and healing <= 0.0 and not flying and vehicle_kind == -1 \
+		and anim >= 0 and anim <= 15 and anim not in MELEE_INELIGIBLE_ANIMS
+
+
+func _remember_melee_mode(peer_id: int, anim: int, swinging: bool,
+		weapon_stowed: bool, melee_mode: bool, reloading: bool, healing: float,
+		flying: bool, vehicle_kind: int) -> void:
+	if not melee_mode:
+		_melee_defeated.erase(peer_id)
+	_melee_prime_eligible[peer_id] = _melee_mode_eligible(anim, swinging,
+		weapon_stowed, melee_mode, reloading, healing, flying, vehicle_kind)
+	if not _can_prime_melee(peer_id):
+		_clear_melee_prime(peer_id, is_host)
+
+
+func _can_prime_melee(peer_id: int) -> bool:
+	return names.has(peer_id) and bool(_melee_prime_eligible.get(peer_id, false)) \
+		and not _melee_defeated.has(peer_id) and not _peer_has_vehicle_claim(peer_id) \
+		and _peer_on_foot_position_in_realm(peer_id, player_realm(peer_id))
+
+
+func _clear_melee_prime(peer_id: int, broadcast := false) -> void:
+	var was_primed := is_melee_primed(peer_id)
+	_melee_primed.erase(peer_id)
+	_melee_prime_released_msec.erase(peer_id)
+	if was_primed and broadcast and active and is_host:
+		rpc("cl_melee_primed", peer_id, false)
+
+
+func _mark_melee_defeated(peer_id: int) -> void:
+	_melee_defeated[peer_id] = true
+	_melee_prime_eligible.erase(peer_id)
+	_clear_melee_prime(peer_id, is_host)
+	if peer_id == local_id():
+		_local_melee_prime_requested = false
+		_local_melee_prime_eligible = false
+
+
+func _reset_melee_state() -> void:
+	_melee_primed.clear()
+	_melee_prime_eligible.clear()
+	_melee_prime_released_msec.clear()
+	_melee_defeated.clear()
+	_local_melee_prime_requested = false
+	_local_melee_prime_sent = false
+	_local_melee_prime_eligible = false
+	_local_melee_prime_attempt_msec = -1000
+
+
+func _canonical_melee_combo(peer_id: int, combo: int) -> int:
+	if combo < 3:
+		return combo
+	var released: int = int(_melee_prime_released_msec.get(peer_id, -1000000))
+	var elapsed := Time.get_ticks_msec() - released
+	var recent_release := elapsed >= 0 and elapsed <= MELEE_PRIME_RELEASE_MSEC
+	if _can_prime_melee(peer_id) and (is_melee_primed(peer_id) or recent_release):
+		# A released stance only pays for the strike already winding up.
+		_melee_prime_released_msec.erase(peer_id)
+		return combo
+	return combo % 3
+
+
+func melee_attack(origin: Vector3, direction: Vector3, combo: int,
+		primed := false) -> void:
+	if not active or combo < 0 or combo > 2:
+		return
+	var encoded := combo + (3 if primed else 0)
+	if not _valid_melee(origin, direction, encoded):
+		return
+	if is_host:
+		encoded = _canonical_melee_combo(local_id(), encoded)
+	var normalized := direction.normalized()
+	melee_swung.emit(local_id(), origin, normalized, encoded)
+	if is_host:
+		_relay_melee(local_id(), origin, normalized, encoded)
+	else:
+		rpc_id(1, "srv_melee_attack", origin, normalized, encoded)
 
 
 @rpc("any_peer", "call_remote", "reliable", 0)
@@ -2691,9 +2916,10 @@ func srv_melee_attack(origin: Vector3, direction: Vector3, combo: int) -> void:
 			or not _valid_combat_origin(sender, origin):
 		return
 	var normalized := direction.normalized()
+	var canonical := _canonical_melee_combo(sender, combo)
 	if not is_dedicated and _can_relay_combat_between(sender, local_id()):
-		melee_swung.emit(sender, origin, normalized, combo)
-	_relay_melee(sender, origin, normalized, combo)
+		melee_swung.emit(sender, origin, normalized, canonical)
+	_relay_melee(sender, origin, normalized, canonical)
 
 
 func _relay_melee(sender: int, origin: Vector3, direction: Vector3,
@@ -2717,6 +2943,7 @@ func send_defeat(pos: Vector3, yaw: float, velocity: Vector3,
 		impulse: Vector3, headshot: bool) -> void:
 	if not active or not _valid_defeat(pos, yaw, velocity, impulse):
 		return
+	_mark_melee_defeated(local_id())
 	var presentation_velocity := _safe_defeat_velocity(velocity)
 	if is_host:
 		_relay_defeat(local_id(), pos, yaw, presentation_velocity, impulse,
@@ -2732,6 +2959,7 @@ func srv_defeat(pos: Vector3, yaw: float, velocity: Vector3,
 	if not _registered_peer(sender) or not _allow_rate(sender, "defeat", 4) \
 			or not _valid_defeat(pos, yaw, velocity, impulse):
 		return
+	_mark_melee_defeated(sender)
 	var presentation_velocity := _safe_defeat_velocity(velocity)
 	if not is_dedicated:
 		peer_defeated.emit(sender, pos, yaw, presentation_velocity, impulse,
@@ -2751,6 +2979,7 @@ func _relay_defeat(sender: int, pos: Vector3, yaw: float, velocity: Vector3,
 func cl_defeat(defeated_id: int, pos: Vector3, yaw: float, velocity: Vector3,
 		impulse: Vector3, headshot: bool) -> void:
 	if names.has(defeated_id) and _valid_defeat(pos, yaw, velocity, impulse):
+		_mark_melee_defeated(defeated_id)
 		peer_defeated.emit(defeated_id, pos, yaw,
 			_safe_defeat_velocity(velocity), impulse, headshot)
 
@@ -3461,7 +3690,7 @@ func _weapon_rules(weapon_kind: int) -> Dictionary:
 func _valid_melee(origin: Vector3, direction: Vector3, combo: int) -> bool:
 	return _finite_vec(origin) and _finite_vec(direction) \
 		and not _outside_world(origin) and direction.length_squared() > 0.25 \
-		and direction.length_squared() < 2.25 and combo >= 0 and combo <= 2
+		and direction.length_squared() < 2.25 and combo >= 0 and combo <= 5
 
 
 func _valid_defeat(pos: Vector3, yaw: float, velocity: Vector3,

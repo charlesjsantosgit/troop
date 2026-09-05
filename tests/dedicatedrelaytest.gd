@@ -35,6 +35,11 @@ var voice_ack_received_msec := -1
 var saw_banana := false
 var saw_chest := false
 var saw_sender_leave := false
+var melee_codes: Array[int] = []
+var saw_prime := false
+var saw_prime_release := false
+var saw_defeat_clear := false
+const EXPECTED_MELEE_CODES := [0, 5, 4, 1, 2, 0, 1]
 
 
 func _initialize() -> void:
@@ -89,6 +94,8 @@ func _run() -> void:
 	if role == "receiver":
 		net.peer_state.connect(_on_state)
 		net.bullet_fired.connect(_on_bullet)
+		net.melee_swung.connect(_on_melee)
+		net.peer_defeated.connect(_on_defeat)
 		net.voice_packet.connect(_on_voice)
 		net.banana_taken.connect(_on_banana)
 		net.supply_chest_claimed.connect(_on_chest)
@@ -183,10 +190,13 @@ func _send_checks() -> void:
 		_finish(false, "voice acknowledgment timeout retries=%d received=%d deadline=%d" % [
 			voice_retries, voice_ack_received_msec, voice_ack_deadline])
 		return
+	await _send_melee_checks()
+	if finished:
+		return
 	await create_timer(0.4).timeout
 	_finish(net.collected.has(TEST_BANANA) \
 		and int(net.claimed_supply_chests.get(TEST_CHEST, 0)) == net.local_id(),
-		"movement=%d chat=true bullet=true voice=true voice_ack=true claims_acknowledged=true" % STATE_PACKETS)
+		"movement=%d chat=true bullet=true voice=true voice_ack=true claims_acknowledged=true melee_prime=true" % STATE_PACKETS)
 
 
 func _on_roster() -> void:
@@ -194,7 +204,9 @@ func _on_roster() -> void:
 	if net.names.has(1):
 		_finish(false, "dedicated authority appeared as a player")
 	elif role == "server" and peak_players == 2 and net.names.is_empty():
-		_finish(true, "two_authenticated_clients=true disconnect_cleanup=true")
+		_finish(net._melee_primed.is_empty() and net._melee_prime_eligible.is_empty() \
+			and net._melee_prime_released_msec.is_empty() and net._melee_defeated.is_empty(),
+			"two_authenticated_clients=true disconnect_cleanup=true melee_cleanup=true")
 
 
 func _on_state(peer_id: int, position: Vector3, _yaw: float, _velocity: Vector3,
@@ -257,10 +269,12 @@ func _on_peer_left(peer_id: int) -> void:
 		saw_sender_leave = true
 		_finish(states >= 5 and saw_chat and saw_bullet and saw_voice \
 			and saw_banana and saw_chest and saw_sender_leave and peak_players == 2 \
+			and melee_codes == EXPECTED_MELEE_CODES and saw_prime and saw_prime_release \
+			and saw_defeat_clear and not net.is_melee_primed(peer_id) \
 			and int(net.claimed_supply_chests.get(TEST_CHEST, 0)) == sender_id,
-			"states=%d chat=%s bullet=%s voice=%s malformed_filtered=true banana=%s chest=%s disconnect=%s" % [
+			"states=%d chat=%s bullet=%s voice=%s malformed_filtered=true banana=%s chest=%s disconnect=%s melee_codes=%s stance=%s released=%s defeat_clear=%s" % [
 				states, saw_chat, saw_bullet, saw_voice, saw_banana,
-				saw_chest, saw_sender_leave])
+				saw_chest, saw_sender_leave, melee_codes, saw_prime, saw_prime_release, saw_defeat_clear])
 
 
 func _finish(ok: bool, detail: String) -> void:
@@ -280,3 +294,98 @@ func _finish(ok: bool, detail: String) -> void:
 					if FileAccess.file_exists(path):
 						DirAccess.remove_absolute(ProjectSettings.globalize_path(path))
 	quit(0 if ok else 1)
+
+
+func _send_melee_state(enabled := true, anim := 0) -> void:
+	net.send_state(TEST_POSITION, 0.0, Vector3.ZERO, anim, false, Vector3.ZERO,
+		0.0, PackedVector3Array(), net.WEAPON_REVOLVER, enabled, enabled, 6,
+		false, 0.0)
+
+
+func _wait_prime(expected: bool) -> bool:
+	var deadline := Time.get_ticks_msec() + 2000
+	while net.is_melee_primed(net.local_id()) != expected and Time.get_ticks_msec() < deadline:
+		_send_melee_state()
+		await create_timer(0.05).timeout
+	if net.is_melee_primed(net.local_id()) != expected:
+		_finish(false, "authority stance acknowledgment timed out expected=%s" % expected)
+		return false
+	return true
+
+
+func _send_melee_checks() -> void:
+	_send_melee_state()
+	await create_timer(0.16).timeout
+	# A primed marker without an accepted stance becomes an ordinary strike.
+	net.rpc_id(1, "srv_melee_attack", TEST_POSITION + Vector3.UP, Vector3.FORWARD, 3)
+	await create_timer(0.16).timeout
+	# Releasing before the true acknowledgment arrives must still reach authority.
+	net.set_melee_primed(true)
+	net.set_melee_primed(false)
+	await create_timer(0.16).timeout
+	if net.is_melee_primed(net.local_id()):
+		_finish(false, "quick RMB release left the authority stance stuck")
+		return
+	net.set_melee_primed(true)
+	if not await _wait_prime(true):
+		return
+	net.melee_attack(TEST_POSITION + Vector3.UP, Vector3.FORWARD, 2, true)
+	await create_timer(0.16).timeout
+	net.set_melee_primed(false)
+	# The player latched RMB during wind-up, then released before its hit frame.
+	net.melee_attack(TEST_POSITION + Vector3.UP, Vector3.FORWARD, 1, true)
+	await create_timer(0.16).timeout
+	net.rpc_id(1, "srv_melee_attack", TEST_POSITION + Vector3.UP, Vector3.FORWARD, 4)
+	await create_timer(0.16).timeout
+	net.set_melee_primed(true)
+	if not await _wait_prime(true):
+		return
+	net.set_melee_primed(false)
+	await create_timer(0.75).timeout
+	net.rpc_id(1, "srv_melee_attack", TEST_POSITION + Vector3.UP, Vector3.FORWARD, 5)
+	await create_timer(0.16).timeout
+	# All-fours sprint clears held stance and any release allowance.
+	net.set_melee_primed(true)
+	if not await _wait_prime(true):
+		return
+	_send_melee_state(true, 2)
+	await create_timer(0.16).timeout
+	net.rpc_id(1, "srv_melee_attack", TEST_POSITION + Vector3.UP, Vector3.FORWARD, 3)
+	await create_timer(0.16).timeout
+	_send_melee_state()
+	if not await _wait_prime(true):
+		return
+	net.send_defeat(TEST_POSITION, 0.0, Vector3.ZERO, Vector3.ZERO, false)
+	net.rpc_id(1, "srv_melee_attack", TEST_POSITION + Vector3.UP, Vector3.FORWARD, 4)
+	await create_timer(0.20).timeout
+	# Invalid code, aim and spatial payloads cannot add any receiver strike.
+	net.rpc_id(1, "srv_melee_attack", TEST_POSITION + Vector3.UP, Vector3.FORWARD, -1)
+	net.rpc_id(1, "srv_melee_attack", TEST_POSITION + Vector3.UP, Vector3.FORWARD, 6)
+	net.rpc_id(1, "srv_melee_attack", TEST_POSITION + Vector3(100, 0, 0), Vector3.FORWARD, 0)
+	net.rpc_id(1, "srv_melee_attack", TEST_POSITION + Vector3.UP, Vector3.ZERO, 0)
+	# Re-enter after respawn, then disconnect while primed to exercise cleanup.
+	_send_melee_state(false)
+	await create_timer(0.20).timeout
+	_send_melee_state()
+	net.set_melee_primed(true)
+	if not await _wait_prime(true):
+		return
+
+
+func _on_melee(peer_id: int, _origin: Vector3, _direction: Vector3, combo: int) -> void:
+	if peer_id == net.local_id():
+		return
+	melee_codes.append(combo)
+	if combo >= 3 and net.is_melee_primed(peer_id):
+		saw_prime = true
+	if combo == 4 and not net.is_melee_primed(peer_id):
+		saw_prime_release = true
+	if melee_codes.size() > EXPECTED_MELEE_CODES.size() \
+			or combo != EXPECTED_MELEE_CODES[melee_codes.size() - 1]:
+		_finish(false, "unexpected canonical melee sequence=%s" % [melee_codes])
+
+
+func _on_defeat(peer_id: int, _position: Vector3, _yaw: float, _velocity: Vector3,
+		_impulse: Vector3, _headshot: bool) -> void:
+	if peer_id != net.local_id():
+		saw_defeat_clear = not net.is_melee_primed(peer_id)

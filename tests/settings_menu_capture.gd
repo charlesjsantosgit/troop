@@ -79,12 +79,12 @@ func _run() -> void:
 	backpack.bind_inventory(inventory)
 	backpack.open_inventory()
 	backpack._buttons[0].pressed.emit()
-	_check(backpack._buttons[0].text.contains("Banana") and backpack._detail_body.text.contains("64") and backpack._capacity.text.contains("3 of 18"), "inventory shows item names, selected stack details and real capacity")
+	_check(backpack._buttons[0].item_name.contains("Banana") and backpack._detail_body.text.contains("64") and backpack._capacity.text.contains("3 / 18"), "inventory shows item names, selected stack details and real capacity")
 	for dimensions in [Vector2i(1280,720), Vector2i(960,540)]:
 		root.size = dimensions
 		root.content_scale_size = dimensions
 		await _settle()
-		_check(_fits(backpack._panel) and backpack._panel.size.x <= 581, "backpack fits %s" % dimensions)
+		_check(_fits(backpack._panel) and backpack._panel.size.x <= 741, "backpack fits %s" % dimensions)
 		await _capture("backpack-%dx%d" % [dimensions.x, dimensions.y])
 	backpack.queue_free()
 	await process_frame

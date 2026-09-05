@@ -1,5 +1,69 @@
 # TROOP changelog
 
+## 0.7.1 — RESPONSIVE TOWNS
+
+### Responsive shared actions
+
+- Separate small vehicle and town-action replies from large town updates. Stop
+  duplicate subscriptions and keep only one full view in flight per player,
+  coalescing live refreshes so slow links cannot build an endless stale queue.
+- Refresh open menus immediately when authoritative results arrive. Show seat
+  requests immediately, explain rejected requests, and release late seat grants
+  when the player walks away or the request expires.
+- Show ping beside FPS and connection details in Pause to help distinguish
+  connection delay from rendering performance. School Wi-Fi has not been measured.
+- Load all six towns when hosting locally, including retries after canceling
+  entry, without waiting for a network acknowledgment from the host itself.
+
+### Backpacks and interactive trading
+
+- Start every game wearing a canvas field backpack with pockets, shoulder straps,
+  buckles and a bedroll. It follows the torso through movement and vehicle poses;
+  the Moon pressure suit supplies the space backpack.
+- Press **I** to inspect the same finite goods used by trading, growing and jobs.
+  Capacity, quantities and item types are visible. Personal expedition pockets
+  remain accessible; Earth and Moon town supplies keep their existing freight
+  and persistence rules, with no duplicated inventory or lost saved goods.
+- See your backpack beside the merchant's stock in opaque item tiles. Select an
+  item, choose a quantity and buy or sell using the persistent footer. Search,
+  category filters, item icons and focus/hover/open/close animations support the
+  charcoal, ivory and amber game theme. No trade bypasses proximity or authority.
+
+### More room inside menus
+
+- Keep usable panel sizes while reducing internal text, controls and padding.
+  Remove redundant NPC headings; Nana's first Buy/Sell controls fit without
+  scrolling at 1280×720 and 960×540. Preserve focus, scroll and close controls.
+- Retain the muted sage title background and charcoal, ivory and amber palette.
+- Make town signs smaller and fade nearby lettering before it fills the camera;
+  the contextual E prompt keeps nearby workplaces easy to use.
+
+### Physical residents and six-foot players
+
+- Give town residents capsule collisions, separated work positions and pedestrian
+  avoidance. Workers move to their work and use poses specific to their jobs.
+- Let workers pass occupied route points and step out of crowded service bays.
+  Production and deliveries still wait for arrival at the actual workplace.
+- Set the player's actual standing mesh and body height to **6 feet (1.8288 m)**.
+  Camera eye level, remote avatars and seated limb poses use the same scale.
+  Individual adult NPC heights remain 5 feet 7 inches to 6 feet 2 inches.
+
+### Relaxed melee and stronger primed attacks
+
+- Let arms rest naturally in melee mode. Hold **RMB** to raise your fists into a
+  ready stance; **LMB** keeps the straight, hook and hammer combo.
+- Attacks started while primed deal **50% more damage**. The HUD shows the bonus,
+  other players see the ready stance, and releasing RMB lowers the arms after
+  the current strike. Switching modes clears the stance.
+
+### Updating together
+
+- Install the full **0.7.1** Mac or Windows package. The network channel change
+  uses **protocol 14** and requires matching clients and server. Bootstrap **3**
+  and Godot **4.7** are retained. Local saves and server town ownership remain.
+- Native validation covers Apple M4; Windows runtime and other Mac hardware
+  remain unverified. Existing renderer cleanup warnings remain under investigation.
+
 ## 0.7.0 — MENUS & BOARDING
 
 ### Menus with a clear purpose

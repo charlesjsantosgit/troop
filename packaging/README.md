@@ -76,12 +76,11 @@ either one.
 
 ## Publishing a release
 
-Version **0.7.0 — Menus & Boarding** uses protocol **13**, retains bootstrap
+Version **0.7.1 — Responsive Towns** uses protocol **14**, retains bootstrap
 **3** and Godot **4.7**, and declares `minimum_bootstrap=3` with
-`requires_installer=false`. The updater mounts the verified pack before Gen/Net
-load, so menus, contextual interactions and grounded boarding activate together.
-Run the native signed-update gate against the previous installed app before publishing.
-Installations older than 0.4.10 still require the full installer.
+`requires_installer=true`. Install the full package to activate the network
+channel configuration. Validate the published installer and its native launch
+against the prior installed app before updating the managed server.
 
 The public server now owns the six-town society save. Its Fly volume
 `troop_society_state` mounts at `/data`; `TROOP_STATE_DIR=/data` holds the atomic
@@ -91,7 +90,7 @@ provisioned in the deployment region before deployment; automatic snapshots
 retain five days. Never replace a corrupt save with a fresh economy: startup
 must recover the backup or fail while preserving both files.
 
-The server and every client must activate **0.7.0 / protocol 13** together.
+The server and every client must activate **0.7.1 / protocol 14** together.
 Source/editor launches remain isolated from installed updater state. Local
 career saves are never imported into the public wallet/ownership registry.
 
@@ -158,7 +157,7 @@ Run the preflight and one actual-export postflight manually with:
 ```bash
 python3 packaging/bake_metal_cache.py --verify packaging/metal_cache
 python3 packaging/verify_packed_metal_cache.py --godot godot \
-  --pack build/release-0.7.0/windows/TROOP.pck
+  --pack build/release-0.7.1/windows/TROOP.pck
 python3 -m unittest discover -s tests -p 'test_*metal*cache.py'
 ```
 
@@ -199,7 +198,7 @@ exist:
 
 ```bash
 python3 packaging/make_update_manifest.py \
-  --version 0.7.0 \
+  --version 0.7.1 \
   --repository OWNER/REPOSITORY \
   --private-key /Users/charlessantos/.config/troop/update-signing-private.pem
 

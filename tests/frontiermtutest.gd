@@ -86,7 +86,11 @@ func _run() -> void:
 		net.configure_transport(peer)
 	root.multiplayer.multiplayer_peer = peer
 	root.multiplayer.peer_connected.connect(_connected)
-	deadline = Time.get_ticks_msec() + (4000 if mode == 0 else 8000)
+	# The authority is ready before the client advances its independent 450s
+	# model fixture. Keep server lifetime outside that CPU warmup while retaining
+	# a bounded four/twelve-second network phase on the receiving client.
+	deadline = Time.get_ticks_msec() + (30000 if server \
+		else 5000 if mode == 0 else 12000)
 	print("FRONTIERMTU_READY role=%s views=%d minimum_view_bytes=%d" % [args[0], payloads.size(), minimum_view_bytes])
 
 func _connected(id: int) -> void:

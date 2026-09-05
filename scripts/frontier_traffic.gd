@@ -232,7 +232,9 @@ func _physics_process(dt: float) -> void:
 			if simulation.state.get("traffic",{}).has(id):
 				simulation.state.traffic[id].pose=_pose(car)
 			continue
-		if str(context.mode)=="walking": _start_boarding(id,car,worker,context)
+		if str(context.mode)=="walking":
+			_start_boarding(id,car,worker,context)
+			if str(context.mode)=="walking": continue
 		if str(context.mode)=="boarding":
 			_walk_to_car(id,car,worker,context,dt)
 			if str(context.mode)=="boarding": continue
@@ -253,7 +255,11 @@ func _park_worker(id: String, car: Vehicle, worker: Dictionary, context: Diction
 	simulation.report_physical_transport(id,[local.x,local.y],0.0 if boarding else car.speed(),false,"Parking before changing profession",int(worker.get("motion_epoch",0)))
 	if car.speed()>=STOP_SPEED: return
 	# Cancelling a return walk leaves the person where they actually walked.
-	var exit_point := local if boarding else _local(car._pick_exit_position())
+	var exit_world := _pedestrian_doorway(id,car)
+	if not boarding and not exit_world.is_finite():
+		context.blocker="Waiting for a clear doorway before disembarking"
+		return
+	var exit_point := local if boarding else _local(exit_world)
 	if not simulation.disable_physical_transport(id,[exit_point.x,exit_point.y]): return
 	if car.driver!=null: car.end_drive()
 	context.mode="walking"
@@ -263,8 +269,35 @@ func _park_worker(id: String, car: Vehicle, worker: Dictionary, context: Diction
 	context.blocker="Parked while its owner works on foot"
 
 
+func _pedestrian_doorway(id: String, car: Vehicle) -> Vector3:
+	var capsule := CapsuleShape3D.new()
+	capsule.radius = FrontierCitizen.BODY_RADIUS
+	capsule.height = MonkeyRig.npc_height(id)
+	var query := PhysicsShapeQueryParameters3D.new()
+	query.shape = capsule
+	query.collision_mask = 1
+	var excluded: Array[RID] = [car.get_rid()]
+	for body in get_tree().get_nodes_in_group("frontier_pedestrian_bodies"):
+		if body is CollisionObject3D and str(body.get("citizen_id")) == id: excluded.append(body.get_rid())
+	query.exclude = excluded
+	for offset: Vector3 in car.exit_offsets:
+		var local := _local(car.global_position + car.global_basis*offset)
+		var point := _point(local)
+		query.transform = Transform3D(Basis.IDENTITY,point+Vector3.UP*(capsule.height*0.5+0.03))
+		if not car.get_world_3d().direct_space_state.intersect_shape(query,1).is_empty(): continue
+		# Dedicated servers have no visual citizen bodies. The exact same
+		# doorway still checks every authoritative resident/player circle.
+		if not simulation._pedestrian_segment_clear(simulation.state.citizens[id],local,local): continue
+		return point
+	return Vector3.INF
+
+
 func _start_boarding(id: String, car: Vehicle, worker: Dictionary, context: Dictionary) -> void:
-	var entry := _local(car._pick_exit_position())
+	var door := _pedestrian_doorway(id,car)
+	if not door.is_finite():
+		context.blocker="Waiting for a clear doorway before boarding"
+		return
+	var entry := _local(door)
 	context.mode="boarding"
 	context.boarding_route=Routes.path(worker.position,[entry.x,entry.y],"earth")
 	if context.boarding_route.is_empty(): context.boarding_route=[[entry.x,entry.y]]
@@ -289,6 +322,10 @@ func _walk_to_car(id: String, car: Vehicle, worker: Dictionary, context: Diction
 			# driver. Test the real server physics, excluding only their own car
 			# so its doorway cannot be mistaken for a road-width obstruction.
 			var query: PhysicsRayQueryParameters3D=_boarding_queries[id]
+			var excluded: Array[RID] = [car.get_rid()]
+			for body in get_tree().get_nodes_in_group("frontier_pedestrian_bodies"):
+				if body is CollisionObject3D: excluded.append(body.get_rid())
+			query.exclude = excluded
 			var sideways := Vector2(-(target-position).y,(target-position).x).normalized()*0.28
 			var blocked := false
 			for offset: float in [-1.0,0.0,1.0]:
@@ -300,7 +337,7 @@ func _walk_to_car(id: String, car: Vehicle, worker: Dictionary, context: Diction
 					blocked=true
 					break
 			if blocked: context.blocker="Waiting for a clear walk to the parked vehicle"
-			else: position=position.move_toward(target,2.6*dt)
+			else: position=simulation.pedestrian_step(worker,position,target,dt)
 		else:
 			route.pop_front()
 		worker.route=route.duplicate(true)

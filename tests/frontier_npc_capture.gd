@@ -91,9 +91,9 @@ func _run() -> void:
 	metrics["tutorial_after_e"]=controller.tutorial.summary()
 	var failures: Array=[]
 	if prefix.begins_with("after"):
-		if absf(float(metrics.player_standing_height)-1.778)>0.0001: failures.append("Player stature is not 1.778 m")
+		if absf(float(metrics.player_standing_height)-1.8288)>0.0001: failures.append("Player stature is not 1.8288 m")
 		if float(metrics.nana_standing_height)<1.7017 or float(metrics.nana_standing_height)>1.8797: failures.append("Nana stature is outside the adult range")
-		if absf(float(metrics.player_rest_vertex_height)-1.778)>0.0001: failures.append("Player submitted mesh height is not 1.778 m")
+		if absf(float(metrics.player_rest_vertex_height)-1.8288)>0.0001: failures.append("Player submitted mesh height is not 1.8288 m")
 		if absf(float(metrics.nana_rest_vertex_height)-float(metrics.nana_standing_height))>0.0001: failures.append("Nana submitted mesh height disagrees with her stature")
 		if metrics.selected_id_after_e!="nana": failures.append("Actual E did not select Nana")
 		if metrics.labels_after_e.is_empty() or metrics.labels_after_e[0]!="Nana": failures.append("Resident panel heading is not Nana")

@@ -219,14 +219,22 @@ func update_pose(dt: float, weapon: Node3D, aiming: bool, speed: float,
 
 
 func update_melee_pose(dt: float, attack_active: bool, progress: float,
-		combo: int, speed: float, grounded: bool) -> void:
+		combo: int, speed: float, grounded: bool, primed := false) -> void:
 	_set_bandage_visible(false)
 	visible = true
 	_t += dt
 	var left_shoulder := Vector3(-0.32, -0.54, -0.40)
 	var right_shoulder := Vector3(0.32, -0.54, -0.40)
-	var left_target := Vector3(-0.13, -0.19, -0.48)
-	var right_target := Vector3(0.14, -0.21, -0.46)
+	# Entering melee mode keeps relaxed fists low and outside the sightline. RMB
+	# brings the existing guard up; attacks use that guard as their readable base
+	# even when LMB began without a held prime.
+	var left_relaxed := Vector3(-0.27, -0.41, -0.48)
+	var right_relaxed := Vector3(0.28, -0.42, -0.47)
+	var left_guard := Vector3(-0.13, -0.19, -0.48)
+	var right_guard := Vector3(0.14, -0.21, -0.46)
+	var guard_weight := 1.0 if primed or attack_active else 0.0
+	var left_target := left_relaxed.lerp(left_guard, guard_weight)
+	var right_target := right_relaxed.lerp(right_guard, guard_weight)
 	if attack_active:
 		var strike := _melee_pulse(progress, 0.10, 0.40, 0.80)
 		match posmod(combo, 3):
@@ -259,7 +267,8 @@ func update_melee_pose(dt: float, attack_active: bool, progress: float,
 	right_shoulder += bob
 	left_target += bob * 0.45
 	right_target += bob * 0.45
-	var w := 1.0 - exp(-22.0 * dt)
+	var transition_rate := 22.0 if attack_active else 13.0
+	var w := 1.0 - exp(-transition_rate * dt)
 	_left_hand = _left_hand.lerp(left_target, w)
 	_right_hand = _right_hand.lerp(right_target, w)
 	_left_elbow = left_shoulder.lerp(_left_hand, 0.48) \

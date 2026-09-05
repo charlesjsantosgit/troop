@@ -4,6 +4,8 @@ extends Node
 ## and physical workplaces. Online views are supplied by the shared authority;
 ## existing local saves remain a separate, explicit offline career.
 
+signal backpack_changed
+
 const SAVE_PATH := "user://frontier/roots_and_rockets.json"
 const INTERACTION_RANGE := 5.2
 const MANUAL_ACTIONS := ["plant", "harvest", "water", "fertilize", "repair", "clear_plot"]
@@ -47,6 +49,7 @@ var _pending_actions: Dictionary = {}
 var _pending_kind := ""
 var _pending_town := ""
 var _pending_retry_at := 0
+var _pending_started_at := 0
 
 
 func configure(main: Node, host: World, manager: ExpeditionManager,
@@ -159,6 +162,8 @@ func _build_ui() -> void:
 	tutorial = load("res://scripts/frontier_tutorial.gd").new()
 	add_child(tutorial)
 	tutorial.configure(self, _layer, _tutorial_save_path)
+	if expedition and expedition.inventory_ui:
+		expedition.inventory_ui.bind_frontier(self)
 
 
 func _overlay_label(size: int) -> Label:
@@ -193,6 +198,7 @@ func _process(delta: float) -> void:
 		world.set_time_of_day_override(fmod(float(simulation.state.time), 1200.0) / 50.0)
 		_update_sun()
 		_refresh_overlays()
+		backpack_changed.emit()
 	if _save_timer <= 0.0:
 		_save_timer = 20.0
 		save_progress()
@@ -203,6 +209,7 @@ func _sync_realm() -> void:
 	if realm == _last_realm:
 		return
 	_last_realm = realm
+	backpack_changed.emit()
 	if _online:
 		if is_instance_valid(ui) and ui.visible:
 			ui.close()
@@ -247,10 +254,25 @@ func _sync_climate() -> void:
 
 
 func _sync_obstructions() -> void:
+	var pedestrians: Array = []
+	if is_instance_valid(world.local_player) and not world.local_player.vehicle \
+			and not world.local_player.expedition_locked and not world.local_player.defeated:
+		var player_site := moon_site if current_planet() == "moon" else earth_site
+		if is_instance_valid(player_site) and Net.player_realm() != Net.PlayerRealm.TRANSIT:
+			var local := player_site.to_local(world.local_player.global_position)
+			if absf(local.y - player_site.surface_height(local.x, local.z)) < 2.5:
+				pedestrians.append({"position": Vector2(local.x, local.z), "radius": 0.42, "planet": current_planet()})
+	if simulation.has_method("set_pedestrian_obstacles"):
+		simulation.set_pedestrian_obstacles(pedestrians)
 	if not is_instance_valid(world.local_player):
 		return
 	var space := world.get_world_3d().direct_space_state
 	var exclude: Array[RID] = [world.local_player.get_rid()]
+	# Moving people yield through pedestrian avoidance, not a permanent static
+	# road-block flag. Physical body collisions still constrain their motion.
+	for body in get_tree().get_nodes_in_group("frontier_pedestrian_bodies"):
+		if body is CollisionObject3D:
+			exclude.append(body.get_rid())
 	for citizen: Dictionary in simulation.state.citizens.values():
 		citizen["route_blocked"] = ""
 		if citizen.get("_job", {}).is_empty():
@@ -287,7 +309,7 @@ func _refresh_overlays() -> void:
 	_prompt.visible = active and not ui.visible and physical_interaction.is_empty()
 	_waypoint_label.visible = false # The world-space marker already gives name and distance.
 	_waypoint_marker.visible = active and not ui.visible and not waypoint.is_empty()
-	_sky_credit.visible = Net.player_realm() == Net.PlayerRealm.MOON and not ui.visible
+	_sky_credit.visible = Net.player_realm() == Net.PlayerRealm.MOON and not ui.visible and not expedition.is_ui_open()
 	var credits := int(simulation.state.get("accounts", {}).get("player", 0))
 	_status.text = "%s  ·  %s credits  ·  B Journal" % [
 		str(current_town().get("name", "Town")).to_upper(), str(credits)]
@@ -324,6 +346,40 @@ func _refresh_overlays() -> void:
 
 func current_planet() -> String:
 	return "moon" if Net.player_realm() == Net.PlayerRealm.MOON else "earth"
+
+
+## The backpack reads the existing authoritative per-world inventory. There is
+## no second inventory to reconcile, duplicate, or lose on reconnect.
+func backpack_capacity() -> int:
+	if not simulation: return 0
+	return int(simulation.state.get("locations", {}).get("player_" + current_planet(), {}).get("capacity", 0))
+
+
+func backpack_used() -> int:
+	var used := 0
+	for row: Dictionary in backpack_items(): used += int(row.count)
+	return used
+
+
+func backpack_items() -> Array:
+	var result: Array = []
+	if not simulation: return result
+	var catalog: Dictionary = simulation.item_catalog()
+	var crops: Dictionary = simulation.crop_catalog()
+	var seeds := {}
+	for crop: Dictionary in crops.values(): seeds[str(crop.planting_item)] = true
+	var goods: Dictionary = simulation.state.get("inventories", {}).get("player_" + current_planet(), {})
+	for id: String in goods:
+		if int(goods[id]) <= 0: continue
+		var category := "Materials"
+		if crops.has(id): category = "Crops"
+		elif seeds.has(id): category = "Planting"
+		elif id in ["crude_oil", "gasoline", "diesel", "jet_fuel", "bitumen"]: category = "Fuel"
+		elif id in ["meal", "flour", "dried_food", "cooking_oil", "fish", "honey", "water"]: category = "Food"
+		result.append({"id": id, "name": str(catalog.get(id, {}).get("label", id.replace("_", " ").capitalize())),
+			"count": int(goods[id]), "category": category})
+	result.sort_custom(func(a: Dictionary, b: Dictionary): return str(a.name).naturalnocasecmp_to(str(b.name)) < 0)
+	return result
 
 
 func current_settlement() -> Node3D:
@@ -426,6 +482,7 @@ func open_workplace(id: String) -> bool:
 		selected_interaction = item.duplicate(true)
 		ui.open(item)
 		_refresh_overlays()
+		backpack_changed.emit()
 		if tutorial:
 			tutorial.observe_interaction(id)
 		return true
@@ -448,6 +505,7 @@ func request_action(kind: String, payload: Dictionary = {}) -> Dictionary:
 			_pending_actions[int(result.request)] = request
 			_pending_kind = kind
 			_pending_town = town_id
+			_pending_started_at = Time.get_ticks_msec()
 			_pending_retry_at = Time.get_ticks_msec() + 4000
 		elif tutorial:
 			tutorial.observe_action(kind, request, result)
@@ -706,6 +764,7 @@ func _process_online(delta: float) -> void:
 			if vehicle.frontier_simulation != simulation:
 				vehicle.configure_frontier_fuel(simulation)
 		_refresh_overlays()
+		backpack_changed.emit()
 		_update_sun()
 
 
@@ -716,6 +775,9 @@ func _on_shared_state(town_id: String) -> void:
 		_town_entries[town_id].settlement.town_info = _network.town_info(town_id)
 		if town_id == _active_town_id:
 			simulation = _town_entries[town_id].simulation
+			if is_instance_valid(ui) and ui.has_method("refresh_from_state"):
+				ui.refresh_from_state()
+			backpack_changed.emit()
 
 
 func _on_shared_traffic(town_id: String, rows: Array) -> void:
@@ -729,6 +791,16 @@ func _on_shared_result(request: int, kind: String, result: Dictionary) -> void:
 	if tutorial and _pending_actions.has(request):
 		tutorial.observe_action(kind, _pending_actions[request], result)
 	_pending_actions.erase(request)
+	if is_instance_valid(ui) and ui.has_method("refresh_from_state"):
+		ui.refresh_from_state()
+
+
+func action_pending() -> bool:
+	return not _pending_actions.is_empty()
+
+
+func action_elapsed_ms() -> int:
+	return maxi(0, Time.get_ticks_msec() - _pending_started_at) if action_pending() else 0
 
 
 func current_town() -> Dictionary:

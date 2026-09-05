@@ -10,6 +10,7 @@ signal action_finished(request: int, kind: String, result: Dictionary)
 const STATE_FILE := "frontier_societies.json"
 const MAX_VIEW_BYTES := 262144
 const MAX_TRAFFIC_BYTES := 32768
+const MAX_ACTION_PATCH_BYTES := 32768
 const ACTIONS := ["claim_town", "plant", "harvest", "water", "fertilize", "clear_plot",
 	"toggle_plot", "buy", "sell", "accept_quest", "deliver_quest", "cancel_quest",
 	"assign_job", "toggle_worker", "repair", "refill_habitat", "build_solar",
@@ -27,11 +28,28 @@ var society_ready := false
 var persistence_enabled := false
 var storage_path := ""
 var storage_error := ""
+var last_vehicle_error := ""
 var _watch: Dictionary = {}
 var _requests: Dictionary = {}
+## Full personalized views can exceed 64 KiB before transport compression. Keep
+## one reliable view in flight per client and replace queued live refreshes
+## with the newest state, so a constrained connection never grows a backlog.
+var _view_in_flight: Dictionary = {}
+var _pending_views: Dictionary = {}
+var _priority_views: Dictionary = {}
+var _bootstrap_views: Dictionary = {}
+var _bootstrap_control: Dictionary = {}
+var _client_watch := ""
+var _client_watch_requested := ""
+var _client_watch_retry_msec := 0
 var _serial := 0
 var _sequence := 0
-var _view_sequence := -1
+# Results use a different ENet lane from full views. A newer result in one
+# town must never invalidate another town's bootstrap snapshot.
+var _view_sequences: Dictionary = {}
+var _catalog_sequence := -1
+var _shared_sequences: Dictionary = {}
+var _shared_player: Dictionary = {}
 var _traffic_sequence := -1
 var _snapshot_remaining := 0.0
 var _save_remaining := 5.0
@@ -119,6 +137,7 @@ func stop() -> void:
 	society_ready = false
 	persistence_enabled = false
 	storage_error = ""
+	last_vehicle_error = ""
 	catalog.clear()
 	views.clear()
 	traffic_views.clear()
@@ -127,9 +146,20 @@ func stop() -> void:
 	_build_queue.clear()
 	_watch.clear()
 	_requests.clear()
+	_view_in_flight.clear()
+	_pending_views.clear()
+	_priority_views.clear()
+	_bootstrap_views.clear()
+	_bootstrap_control.clear()
+	_client_watch = ""
+	_client_watch_requested = ""
+	_client_watch_retry_msec = 0
 	_vehicle_motion.clear()
 	_serial = 0
-	_view_sequence = -1
+	_view_sequences.clear()
+	_catalog_sequence = -1
+	_shared_sequences.clear()
+	_shared_player.clear()
 	_traffic_sequence = -1
 
 
@@ -146,18 +176,36 @@ func register_peer(peer_id: int) -> void:
 		registration = _failure("Town storage is unavailable; your registration was not charged.")
 	if not registration.get("ok", false):
 		if peer_id != net.local_id():
-			rpc_id(peer_id, "cl_result", 0, "join", registration)
+			rpc_id(peer_id, "cl_result", 0, "join", registration, "", -1, {})
 		return
 	_watch[peer_id] = "canopy_earth"
+	if peer_id == net.local_id():
+		# A listen host applies its snapshots synchronously and sends no remote
+		# application ACK. Bootstrap its six towns directly, without recursive
+		# queue draining or leaving local work in the remote backpressure queue.
+		for town: Dictionary in catalog:
+			_send_view(peer_id, str(town.id), false)
+		return
 	# Bootstrap every town once for distant scenery and the personal map.
-	# Thereafter only the currently visited town gets live economy updates.
+	# Send these one at a time, then retain only the newest live refresh.
+	# The bootstrap RPC stays on channel 0 after cl_world so clients cannot see a
+	# town view before the authenticated world handshake enables the session.
+	var bootstrap: Array[String] = []
 	for town: Dictionary in catalog:
-		_send_view(peer_id, str(town.id))
+		bootstrap.append(str(town.id))
+	_bootstrap_views[peer_id] = bootstrap
+	_bootstrap_control[peer_id] = true
+	_send_next_view(peer_id)
 
 
 func unregister_peer(peer_id: int) -> void:
 	_watch.erase(peer_id)
 	_requests.erase(peer_id)
+	_view_in_flight.erase(peer_id)
+	_pending_views.erase(peer_id)
+	_priority_views.erase(peer_id)
+	_bootstrap_views.erase(peer_id)
+	_bootstrap_control.erase(peer_id)
 
 
 func _identity(peer_id: int) -> String:
@@ -177,7 +225,7 @@ func _process(delta: float) -> void:
 	if _snapshot_remaining <= 0:
 		_snapshot_remaining = 1.0
 		for peer_id in _watch.keys():
-			_send_view(int(peer_id))
+			_queue_view(int(peer_id))
 	if _traffic_remaining <= 0:
 		_traffic_remaining = 0.10
 		_update_traffic_obstacles()
@@ -198,24 +246,26 @@ func _exit_tree() -> void:
 
 
 func prepare_player_vehicle(vehicle_id: String, kind: int, peer_id: int) -> bool:
+	last_vehicle_error = ""
 	if not authoritative or not society_ready or not storage_error.is_empty():
+		last_vehicle_error = storage_error if not storage_error.is_empty() \
+			else "The shared vehicle registry is not ready."
 		return false
 	if not societies.state.vehicle_fuel.has(vehicle_id):
 		var checkpoint: Dictionary = societies.export_state() if persistence_enabled else {}
 		var tank: Dictionary = societies.register_vehicle(vehicle_id, kind)
 		if tank.is_empty():
-			var result := _failure("This server's vehicle registry is full. Choose a previously used vehicle.")
-			if peer_id != net.local_id():
-				rpc_id(peer_id, "cl_result", 0, "vehicle", result)
-			else:
-				action_finished.emit(0, "vehicle", result)
+			last_vehicle_error = "This server's vehicle registry is full. Choose a previously used vehicle."
 			return false
 		if persistence_enabled and not societies.save_game(storage_path):
 			societies.import_state(checkpoint)
 			storage_error = "Vehicle storage is unavailable. Please try again shortly."
+			last_vehicle_error = storage_error
 			return false
 	_vehicle_motion[vehicle_id] = net._vehicle_positions.get(vehicle_id, Vector3.ZERO)
-	_send_view(peer_id)
+	# The fuel ledger follows promptly on the bulk lane; the much smaller seat
+	# grant can overtake it on the responsive lane in Net.
+	_queue_view(peer_id, "", true)
 	return true
 
 
@@ -275,14 +325,33 @@ func _build_physics_town(town: Dictionary) -> void:
 
 func _update_traffic_obstacles() -> void:
 	var points: Array = []
-	for position in net._peer_on_foot_positions.values():
-		if position is Vector3:
-			points.append(position)
+	var pedestrians_by_society := {}
+	for society_id in societies.simulations:
+		pedestrians_by_society[society_id] = []
+	for peer_id in net._peer_on_foot_positions:
+		var position: Variant = net._peer_on_foot_positions[peer_id]
+		if not position is Vector3 or not net._registered_peer(int(peer_id)):
+			continue
+		points.append(position)
+		for town: Dictionary in catalog:
+			var expected_realm: int = net.PlayerRealm.MOON if town.planet == "moon" \
+				else net.PlayerRealm.EARTH
+			if net.player_realm(int(peer_id)) != expected_realm:
+				continue
+			var local: Vector3 = sites[town.id].to_local(position)
+			if Vector2(local.x, local.z).length_squared() <= 650.0 * 650.0:
+				pedestrians_by_society[town.society_id].append({
+					"position":Vector2(local.x, local.z), "radius":0.42,
+					"planet":str(town.planet),
+				})
 	for position in net._vehicle_positions.values():
 		if position is Vector3:
 			points.append(position)
 	for driver in traffic.values():
 		driver.set_obstacles(points)
+	for society_id in societies.simulations:
+		societies.simulations[society_id].set_pedestrian_obstacles(
+			pedestrians_by_society[society_id])
 
 
 func town_info(town_id: String) -> Dictionary:
@@ -319,13 +388,24 @@ func watch_town(town_id: String) -> void:
 	if not net.active or town_info(town_id).is_empty():
 		return
 	if authoritative:
+		if str(_watch.get(net.local_id(), "")) == town_id:
+			return
 		_watch[net.local_id()] = town_id
-		_send_view(net.local_id())
+		_queue_view(net.local_id(), town_id, true)
 	else:
+		if _client_watch == town_id \
+				and (_client_watch_requested.is_empty() \
+				or _client_watch_requested == town_id):
+			return
+		var now := Time.get_ticks_msec()
+		if _client_watch_requested == town_id and now < _client_watch_retry_msec:
+			return
+		_client_watch_requested = town_id
+		_client_watch_retry_msec = now + 1000
 		rpc_id(1, "sv_watch", town_id)
 
 
-@rpc("any_peer", "call_remote", "reliable", 0)
+@rpc("any_peer", "call_remote", "reliable", 3)
 func sv_watch(town_id: String) -> void:
 	var sender := multiplayer.get_remote_sender_id()
 	if not authoritative or not net._registered_peer(sender) \
@@ -334,15 +414,18 @@ func sv_watch(town_id: String) -> void:
 	var town := town_info(town_id)
 	if town.is_empty() or not _near_town(sender, town, 650.0, false):
 		return
-	_watch[sender] = town_id
-	_send_view(sender)
+	if str(_watch.get(sender, "")) != town_id:
+		_watch[sender] = town_id
+	# A repeated request means the client has not yet confirmed the view. Queue
+	# at most one replacement; successful receipt stops its bounded retries.
+	_queue_view(sender, town_id, true)
 
 
 func request_action(town_id: String, kind: String, payload: Dictionary) -> Dictionary:
 	_serial += 1
 	if authoritative:
 		var result := _handle_action(net.local_id(), _serial, town_id, kind, payload)
-		_send_view(net.local_id())
+		_queue_view(net.local_id())
 		return result
 	if not society_ready or not net.active:
 		return {"ok": false, "message": "Waiting for the shared town to connect."}
@@ -350,18 +433,22 @@ func request_action(town_id: String, kind: String, payload: Dictionary) -> Dicti
 	return {"ok": false, "pending": true, "message": "Waiting for the town…", "request": _serial}
 
 
-@rpc("any_peer", "call_remote", "reliable", 0)
+@rpc("any_peer", "call_remote", "reliable", 2)
 func sv_action(request: int, town_id: String, kind: String, payload: Dictionary) -> void:
 	var sender := multiplayer.get_remote_sender_id()
 	if not authoritative or not net._registered_peer(sender):
 		return
 	if not net._allow_rate(sender, "frontier_action", 6):
 		if net._allow_rate(sender, "frontier_busy", 2):
-			rpc_id(sender, "cl_result", request, kind.left(32), _failure("Please wait a moment before another town action."))
+			rpc_id(sender, "cl_result", request, kind.left(32),
+				_failure("Please wait a moment before another town action."),
+				town_id, -1, {})
 		return
 	var result := _handle_action(sender, request, town_id, kind, payload)
-	rpc_id(sender, "cl_result", request, kind, result)
-	_send_view(sender)
+	var patch_record := _action_patch(sender, town_id, kind, payload, result)
+	rpc_id(sender, "cl_result", request, kind, result, town_id,
+		int(patch_record.get("revision", -1)), patch_record.get("patch", {}))
+	_queue_view(sender, town_id, true)
 
 
 func _handle_action(sender: int, request: int, town_id: String,
@@ -390,7 +477,11 @@ func _apply_action(sender: int, town_id: String, kind: String, payload: Dictiona
 		return _failure("Visit this town on the correct world first.")
 	if not _workplace_in_range(sender, town, kind, payload):
 		return _failure("Walk to the relevant person or workplace first.")
-	var checkpoint: Dictionary = societies.export_state() if persistence_enabled or kind == "refuel" else {}
+	# Inspect is deliberately read-only in FrontierSim; avoid cloning and
+	# rewriting the complete durable society for a status/menu lookup.
+	var mutates := kind != "inspect"
+	var checkpoint: Dictionary = societies.export_state() \
+		if (persistence_enabled and mutates) or kind == "refuel" else {}
 	if kind == "refuel":
 		societies.register_vehicle(str(payload.vehicle), int(net._vehicle_kinds[payload.vehicle]))
 	var action_payload := payload.duplicate(true)
@@ -398,7 +489,7 @@ func _apply_action(sender: int, town_id: String, kind: String, payload: Dictiona
 	var result: Dictionary = societies.action(_identity(sender), town_id, kind, action_payload)
 	if not result.get("ok", false) and kind == "refuel":
 		societies.import_state(checkpoint)
-	if bool(result.get("ok", false)) and persistence_enabled:
+	if bool(result.get("ok", false)) and persistence_enabled and mutates:
 		if not societies.save_game(storage_path):
 			societies.import_state(checkpoint)
 			storage_error = "The town could not save this change; nothing was charged or transferred."
@@ -512,7 +603,108 @@ static func _failure(message: String) -> Dictionary:
 	return {"ok": false, "message": message}
 
 
-func _send_view(peer_id: int, requested_town := "") -> void:
+func _action_patch(peer_id: int, town_id: String, kind: String,
+		payload: Dictionary, result: Dictionary) -> Dictionary:
+	if not bool(result.get("ok", false)) or kind == "inspect":
+		return {}
+	var identity := _identity(peer_id)
+	var view: Dictionary = societies.view(identity, town_id)
+	if view.is_empty():
+		return {}
+	var planet := str(view.get("planet", "earth"))
+	var patch := {
+		"accounts":view.get("accounts", {}).duplicate(true),
+		"inventories":{}, "plots":{}, "citizens":{}, "facilities":{},
+		"quests":{}, "vehicle_fuel":{},
+	}
+	var inventory_ids: Array[String] = ["player_" + planet]
+	for key in ["market", "facility", "from", "to"]:
+		var inventory_id := str(payload.get(key, ""))
+		if not inventory_id.is_empty() and inventory_id not in inventory_ids:
+			inventory_ids.append(inventory_id)
+	match kind:
+		"process":
+			inventory_ids.append("refinery" if payload.get("recipe") == "refine" else "workshop")
+		"ship": inventory_ids.append("cargo" if planet == "moon" else "warehouse")
+		"deliver_quest":
+			var quest: Dictionary = view.get("quests", {}).get(str(payload.get("id", "")), {})
+			var destination := str(quest.get("destination", ""))
+			if not destination.is_empty(): inventory_ids.append(destination)
+	for inventory_id in inventory_ids:
+		if view.get("inventories", {}).has(inventory_id):
+			patch.inventories[inventory_id] = view.inventories[inventory_id].duplicate(true)
+	var record_keys := {
+		"plots":str(payload.get("plot", "")),
+		"citizens":str(payload.get("citizen", "")),
+		"facilities":str(payload.get("facility", "")),
+		"quests":str(payload.get("id", "")),
+		"vehicle_fuel":str(payload.get("vehicle", "")),
+	}
+	for section in record_keys:
+		var id: String = record_keys[section]
+		if not id.is_empty() and view.get(section, {}).has(id):
+			patch[section][id] = view[section][id].duplicate(true)
+	if kind in ["build_solar", "upgrade_battery", "refill_habitat"]:
+		for id in ["solar_array", "lunar_greenhouse"]:
+			if view.get("facilities", {}).has(id):
+				patch.facilities[id] = view.facilities[id].duplicate(true)
+	if kind == "claim_town":
+		patch["town"] = view.get("town", {}).duplicate(true)
+		patch["towns"] = view.get("towns", []).duplicate(true)
+		patch["permissions"] = view.get("permissions", {}).duplicate(true)
+		patch["claimed_town"] = str(view.get("claimed_town", ""))
+	if var_to_bytes(patch).size() > MAX_ACTION_PATCH_BYTES:
+		return {}
+	_sequence += 1
+	return {"revision":_sequence, "patch":patch}
+
+
+func _queue_view(peer_id: int, requested_town := "", priority := false) -> void:
+	var town_id := requested_town if not requested_town.is_empty() \
+		else str(_watch.get(peer_id, "canopy_earth"))
+	if town_id.is_empty() or town_info(town_id).is_empty():
+		return
+	if peer_id == net.local_id():
+		_send_view(peer_id, town_id, false)
+		return
+	# Replacing this value is intentional backpressure: every full view is a
+	# complete authoritative snapshot, so only the newest unsent one matters.
+	if priority:
+		_priority_views[peer_id] = town_id
+		_pending_views.erase(peer_id)
+	elif not _priority_views.has(peer_id):
+		_pending_views[peer_id] = town_id
+	_send_next_view(peer_id)
+
+
+func _send_next_view(peer_id: int) -> void:
+	if _view_in_flight.has(peer_id) or _identity(peer_id).is_empty():
+		return
+	var town_id := ""
+	var bootstrap := false
+	var initial: Array = _bootstrap_views.get(peer_id, [])
+	if _priority_views.has(peer_id):
+		town_id = str(_priority_views[peer_id])
+		_priority_views.erase(peer_id)
+	elif not initial.is_empty():
+		town_id = str(initial.pop_front())
+		# Only the first bootstrap view shares channel 0 with the preceding
+		# authenticated cl_world. Once its application ack returns, the client is
+		# active and the remaining large views can use the bounded bulk channel.
+		bootstrap = bool(_bootstrap_control.get(peer_id, false))
+		_bootstrap_control.erase(peer_id)
+		if initial.is_empty():
+			_bootstrap_views.erase(peer_id)
+		else:
+			_bootstrap_views[peer_id] = initial
+	elif _pending_views.has(peer_id):
+		town_id = str(_pending_views[peer_id])
+		_pending_views.erase(peer_id)
+	if not town_id.is_empty():
+		_send_view(peer_id, town_id, bootstrap)
+
+
+func _send_view(peer_id: int, requested_town := "", bootstrap := false) -> void:
 	var identity := _identity(peer_id)
 	if identity.is_empty():
 		return
@@ -526,7 +718,11 @@ func _send_view(peer_id: int, requested_town := "") -> void:
 	if peer_id == net.local_id():
 		_apply_view(town_id, _sequence, view, towns)
 	else:
-		rpc_id(peer_id, "cl_state", town_id, _sequence, view, towns)
+		_view_in_flight[peer_id] = {"sequence":_sequence, "town":town_id}
+		if bootstrap:
+			rpc_id(peer_id, "cl_bootstrap_state", town_id, _sequence, view, towns)
+		else:
+			rpc_id(peer_id, "cl_state", town_id, _sequence, view, towns)
 
 
 func _send_traffic(peer_id: int) -> void:
@@ -582,23 +778,172 @@ static func unpack_traffic(town_id: String, packet: Array) -> Array:
 
 
 @rpc("authority", "call_remote", "reliable", 0)
+func cl_bootstrap_state(town_id: String, sequence: int, view: Dictionary,
+		towns: Array) -> void:
+	_receive_view(town_id, sequence, view, towns)
+
+
+@rpc("authority", "call_remote", "reliable", 3)
 func cl_state(town_id: String, sequence: int, view: Dictionary, towns: Array) -> void:
+	_receive_view(town_id, sequence, view, towns)
+
+
+func _receive_view(town_id: String, sequence: int, view: Dictionary,
+		towns: Array) -> void:
 	if authoritative or not net.active or multiplayer.get_remote_sender_id() != 1:
 		return
 	if towns.size() > 6 or var_to_bytes(towns).size() > 16384 \
 			or var_to_bytes(view).size() > MAX_VIEW_BYTES:
 		return
 	_apply_view(town_id, sequence, view, towns)
+	if _client_watch_requested == town_id:
+		_client_watch = town_id
+		_client_watch_requested = ""
+		_client_watch_retry_msec = 0
+	elif _client_watch.is_empty() and town_id == "canopy_earth":
+		# The authority's initial live town is fixed before bootstrap starts.
+		_client_watch = town_id
+	rpc_id(1, "sv_view_applied", sequence)
+
+
+@rpc("any_peer", "call_remote", "reliable", 3)
+func sv_view_applied(sequence: int) -> void:
+	var sender := multiplayer.get_remote_sender_id()
+	if not authoritative or not net._registered_peer(sender) \
+			or not _view_in_flight.has(sender):
+		return
+	var in_flight: Dictionary = _view_in_flight[sender]
+	if int(in_flight.get("sequence", -1)) != sequence:
+		return
+	_view_in_flight.erase(sender)
+	_send_next_view(sender)
 
 
 func _apply_view(town_id: String, sequence: int, view: Dictionary, towns: Array) -> void:
-	if sequence <= _view_sequence or town_id.length() > 32 or view.is_empty():
+	if sequence < 0 or sequence <= int(_view_sequences.get(town_id, -1)) \
+			or town_id.is_empty() or town_id.length() > 32 or view.is_empty():
 		return
-	_view_sequence = sequence
-	catalog = towns
+	_view_sequences[town_id] = sequence
+	if sequence > _catalog_sequence:
+		_catalog_sequence = sequence
+		catalog = towns.duplicate(true)
+	_remember_shared_player(view, sequence)
 	views[town_id] = view
 	society_ready = true
-	state_changed.emit(town_id)
+	_refresh_cached_player(town_id)
+
+
+func _apply_action_patch(town_id: String, revision: int,
+		patch: Dictionary) -> void:
+	if revision < 0 or revision <= int(_view_sequences.get(town_id, -1)) \
+			or not views.has(town_id) or not _valid_action_patch(patch):
+		return
+	var view: Dictionary = views[town_id]
+	for section in ["accounts", "inventories", "plots", "citizens",
+			"facilities", "quests", "vehicle_fuel"]:
+		if not view.get(section) is Dictionary:
+			return
+	for section in ["inventories", "plots", "citizens", "facilities",
+			"quests", "vehicle_fuel"]:
+		for id in patch[section]:
+			view[section][id] = patch[section][id].duplicate(true)
+	view.accounts = patch.accounts.duplicate(true)
+	for scalar in ["town", "towns", "permissions", "claimed_town"]:
+		if patch.has(scalar):
+			view[scalar] = patch[scalar].duplicate(true) \
+				if patch[scalar] is Array or patch[scalar] is Dictionary \
+				else patch[scalar]
+	if patch.has("towns") and revision > _catalog_sequence:
+		_catalog_sequence = revision
+		catalog = patch.towns.duplicate(true)
+	_remember_shared_player(patch, revision)
+	_view_sequences[town_id] = revision
+	views[town_id] = view
+	_refresh_cached_player(town_id)
+
+
+static func _valid_action_patch(patch: Dictionary) -> bool:
+	if patch.is_empty() or var_to_bytes(patch).size() > MAX_ACTION_PATCH_BYTES:
+		return false
+	for section in ["accounts", "inventories", "plots", "citizens",
+			"facilities", "quests", "vehicle_fuel"]:
+		if not patch.get(section) is Dictionary:
+			return false
+		for id in patch[section]:
+			if not id is String or id.length() > 96:
+				return false
+			if section != "accounts" and not patch[section][id] is Dictionary:
+				return false
+	if patch.has("town") and not patch.town is Dictionary:
+		return false
+	if patch.has("towns") and (not patch.towns is Array or patch.towns.size() > 6):
+		return false
+	if patch.has("permissions") and not patch.permissions is Dictionary:
+		return false
+	if patch.has("claimed_town") and (not patch.claimed_town is String or patch.claimed_town.length() > 32):
+		return false
+	return true
+
+
+func _remember_shared_player(source: Dictionary, revision: int) -> void:
+	# Every personalized town snapshot contains the same wallet and both real
+	# planet bags. Track their revisions independently of municipal town data.
+	var shared := {}
+	if source.get("accounts") is Dictionary and source.accounts.has("player"):
+		shared["credits"] = source.accounts.player
+	for realm: String in ["earth", "moon"]:
+		var bag := "player_" + realm
+		if source.get("inventories") is Dictionary and source.inventories.get(bag) is Dictionary:
+			shared[bag] = source.inventories[bag]
+	if source.has("claimed_town"):
+		shared["claimed_town"] = source.claimed_town
+	for field in shared:
+		if revision > int(_shared_sequences.get(field, -1)):
+			_shared_sequences[field] = revision
+			_shared_player[field] = shared[field].duplicate(true) \
+				if shared[field] is Dictionary else shared[field]
+
+
+func _refresh_cached_player(primary_town: String) -> void:
+	var changed: Array[String] = []
+	for town_id: String in views:
+		var view: Dictionary = views[town_id]
+		var dirty := town_id == primary_town
+		if _shared_player.has("credits") and view.get("accounts") is Dictionary \
+				and view.accounts.get("player") != _shared_player.credits:
+			view.accounts.player = _shared_player.credits
+			dirty = true
+		for realm: String in ["earth", "moon"]:
+			var bag := "player_" + realm
+			if _shared_player.has(bag) and view.get("inventories") is Dictionary \
+					and view.inventories.get(bag) != _shared_player[bag]:
+				view.inventories[bag] = _shared_player[bag].duplicate(true)
+				dirty = true
+		if _shared_player.has("claimed_town") and view.get("claimed_town") != _shared_player.claimed_town:
+			view.claimed_town = _shared_player.claimed_town
+			dirty = true
+		var town := town_info(town_id)
+		if not town.is_empty():
+			for field in ["town", "town_info"]:
+				if view.get(field) != town:
+					view[field] = town.duplicate(true)
+					dirty = true
+			if view.get("towns") != catalog:
+				view.towns = catalog.duplicate(true)
+				dirty = true
+			if view.get("permissions") is Dictionary:
+				var permissions: Dictionary = view.permissions
+				var manage := bool(town.get("is_owner", false))
+				var claim := not bool(town.get("claimed", false)) and str(view.get("claimed_town", "")).is_empty()
+				if permissions.get("manage") != manage or permissions.get("claim") != claim:
+					permissions.manage = manage
+					permissions.claim = claim
+					dirty = true
+		if dirty:
+			changed.append(town_id)
+	# Reconcile every alias before observers copy a view into a visible town.
+	for town_id in changed:
+		state_changed.emit(town_id)
 
 
 @rpc("authority", "call_remote", "unreliable_ordered", 1)
@@ -615,11 +960,19 @@ func cl_traffic(town_id: String, sequence: int, packet: Array) -> void:
 	traffic_changed.emit(town_id, rows)
 
 
-@rpc("authority", "call_remote", "reliable", 0)
-func cl_result(_request: int, kind: String, result: Dictionary) -> void:
+@rpc("authority", "call_remote", "reliable", 2)
+func cl_result(_request: int, kind: String, result: Dictionary,
+		town_id: String, revision: int, patch: Dictionary) -> void:
 	if authoritative or not net.active or multiplayer.get_remote_sender_id() != 1 \
-			or var_to_bytes(result).size() > 4096:
+			or var_to_bytes(result).size() > 4096 \
+			or var_to_bytes(patch).size() > MAX_ACTION_PATCH_BYTES \
+			or town_id.length() > 32:
 		return
+	if revision >= 0:
+		# The action's scoped authoritative records arrive with its small result.
+		# An older full view for this town is ignored but still acked. Other
+		# towns still bootstrap, with their shared wallet/bags reconciled first.
+		_apply_action_patch(town_id, revision, patch)
 	if kind == "join" and not result.get("ok", false):
 		net.net_error.emit(str(result.get("message", "Town registration failed.")))
 	action_finished.emit(_request, kind, result)

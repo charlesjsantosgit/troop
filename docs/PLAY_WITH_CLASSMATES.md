@@ -6,21 +6,21 @@ Do not disable school security controls to install or connect.
 
 ## Get the same version
 
-1. Open the [TROOP 0.6.2 download page](https://github.com/charlesjsantosgit/troop/releases/tag/v0.6.2)
+1. Open the [TROOP 0.7.1 download page](https://github.com/charlesjsantosgit/troop/releases/tag/v0.7.1)
    or check the [latest release](https://github.com/charlesjsantosgit/troop/releases/latest).
 2. Download the **Windows x86_64 Setup.exe** or **macOS universal.dmg** for your
    computer. The content `.pck` is for the updater, not a standalone game.
-3. If you already have **0.4.10 or newer**, apply the signed in-game update when offered
-   and restart, or use the full 0.6.2 installer. **Versions older than 0.4.10
-   require the full installer** to obtain updater bootstrap **3**. Close every
-   running copy before installing. On a Mac, replace TROOP.app in Applications
-   and launch that copy. Windows Setup installs for your user.
-4. Check that the installed game's menu shows **0.6.2**. Installing a new copy
+3. **Install the full 0.7.1 package**, including when upgrading from 0.7.0.
+   This update changes the multiplayer channel configuration to protocol 14.
+   Close every running copy before installing. On a Mac, replace TROOP.app in
+   Applications and launch that copy. Windows Setup installs for your user.
+   Existing saves are preserved.
+4. Check that the installed game's menu shows **0.7.1**. Installing a new copy
    does not update a different old copy left in Downloads or another folder;
    launch the updated installation when joining friends.
 
-The server and all classmates must run **0.6.2**. Older clients cannot join the
-0.6.2 server. This release uses multiplayer protocol **13**.
+The server and all classmates must run **0.7.1**. Older clients cannot join the
+0.7.1 server. This release uses multiplayer protocol **14**.
 
 No Godot installation, GitHub account, home server, or router port forwarding is
 needed. Windows on ARM, Chromebooks, browsers, and phones are not verified targets.
@@ -54,13 +54,25 @@ The macOS build includes Apple Silicon and Intel executables.
   side activity retains its separate session-only online rules.
 
 
+## If actions feel delayed
+
+- Look at **Ping** beside FPS. Higher ping means requests take longer to make a
+  round trip to the server. **Unstable** means timing varies substantially or
+  reliable packets are being lost. Pause shows the connection details.
+- If ping stays low but animation looks choppy, lower graphics settings and
+  compare FPS. The network and rendering readouts measure different things.
+- Compare the same action on another permitted network. A large improvement
+  there points toward the original connection; the readout alone cannot prove
+  that school Wi-Fi is the cause.
+- Press E once for a vehicle and wait for its boarding notice. Walking away
+  cancels your interest; a delayed reply will not pull you back into that seat.
+
 ## If someone cannot connect
 
 - Check the menu version first. An update-required message means the client and
   server differ in game version or protocol. Apply the offered update and
-  confirm **0.6.2**; use the full installer if the update cannot apply. If your
-  installation predates 0.4.10, restarting an old content pack cannot upgrade
-  its bootstrap: close TROOP and replace it with the full 0.6.2 installation.
+  confirm **0.7.1**. This release requires the full installer; restarting an old
+  content pack does not activate its new multiplayer configuration.
 - The game needs outbound **UDP 30623**. Some school networks block game traffic;
   a successful browser download does not prove that multiplayer is allowed.
 - Ask school IT whether the game, its public host, and that outbound port are
@@ -80,3 +92,5 @@ bootstrap, or non-version project-setting changes instead ask you to open a full
 The game's cryptographic update signature is separate from operating-system
 publisher signing: current Windows installers are unsigned and Mac previews are
 ad-hoc signed, so first-install approval may still be required.
+
+Press **I** for your backpack. At a merchant, press **E**, select a stock or backpack tile, choose a quantity, then **Buy** or **Sell**. The two grids show the same finite inventory used for planting and jobs. Personal pockets remain available in the backpack; Earth and Moon town supplies move through the cargo terminal.

@@ -215,53 +215,53 @@ func _run() -> void:
 	sim.state.citizens.nana.trade_location = "earth_market"
 	sim.state.citizens.nana.can_manage = true
 	ui.open({"kind":"citizen","id":"nana","label":"Nana · Merchant","town_id":"earth_test"})
-	_check(_label(ui,"Banana")!=null and _buttons(ui,"Buy").size()==1
-		and _button(ui,"Browse all goods")!=null and _text(ui).contains("Work together"),
-		"merchant conversation puts one useful quick trade before work and secondary details")
-	var browse_all := _button(ui,"Browse all goods")
-	if browse_all: browse_all.pressed.emit()
-	_check(_buttons(ui,"Buy").size()==10 and _button(ui,"Search")!=null
-		and _button(ui,"Show quick trade")!=null,
-		"merchant can expand the same physical desk into searchable paged stock on demand")
+	_check(ui._merchant_mode and ui._trade_scrolls.size()==2 and ui._trade_tiles.has("market:banana")
+		and ui._trade_tiles.has("backpack:banana") and _button(ui,"About Nana")!=null,
+		"merchant pairs physical stock with the player's backpack and keeps resident details accessible")
+	_button(ui,"About Nana").pressed.emit()
+	_check(not ui._merchant_mode and _text(ui).contains("Work together") and _button(ui,"Back to trading")!=null,
+		"merchant About view preserves the resident's real job and work controls")
+	_button(ui,"Back to trading").pressed.emit()
+	_check(ui._merchant_mode and _action_buttons(ui).size()==2,
+		"returning to trade restores one fixed Buy/Sell action footer")
 	controller.actions.clear()
 	ui._market_search = ""
 	ui._market_category = "All"
-	ui._market_page = 0
 	ui.open({"kind":"market","id":"earth_market","label":"Canopy market","town_id":"earth_test"})
-	_check(_buttons(ui,"Buy").size()==10 and _button(ui,"Next page")!=null,
-		"large market stock is paged into ten concise rows instead of one endless card wall")
-	var search: LineEdit = ui._body.find_children("*","LineEdit",true,false)[0]
-	search.text = "banana"
-	_button(ui,"Search").pressed.emit()
-	_check(_label(ui,"Banana")!=null and _label(ui,"Banana Start")!=null and _label(ui,"Tomato")==null,
-		"market search narrows visible live goods by readable name")
-	var banana_label := _label(ui,"Banana")
-	var banana_buy: Button = _button(banana_label.get_parent(),"Buy") if banana_label else null
-	if banana_buy: banana_buy.pressed.emit()
-	_check(banana_buy!=null and controller.actions.back().kind=="buy"
-		and controller.actions.back().payload.item=="banana" and controller.actions.back().payload.quantity==1,
-		"filtered Buy keeps the exact market, item, quantity and town-scoped action")
-	search = ui._body.find_children("*","LineEdit",true,false)[0]
-	search.text = ""
-	_button(ui,"Search").pressed.emit()
-	var category: OptionButton = ui._body.find_children("*","OptionButton",true,false)[0]
-	category.select(2)
-	category.item_selected.emit(2)
-	await process_frame
-	_check(_label(ui,"Banana Start")!=null and _label(ui,"Bean Seed")!=null and _label(ui,"Banana")==null,
-		"Planting category separates seed and starter stock from harvested crops")
+	_check(ui._trade_tiles.size()>20 and ui._trade_grids.size()==2 and _button(ui,"Next page")==null,
+		"large stock uses compact item grids with a persistent selection footer")
+	ui._trade_search.text = "banana"
+	ui._trade_search.text_changed.emit("banana")
+	_check(ui._trade_tiles["market:banana"].visible and ui._trade_tiles["market:banana_start"].visible
+		and not ui._trade_tiles["market:tomato"].visible,
+		"typing immediately filters visible goods in both inventories")
+	ui._trade_tiles["market:banana"].pressed.emit()
+	ui._trade_buy.pressed.emit()
+	_check(controller.actions.back().kind=="buy" and controller.actions.back().payload.item=="banana"
+		and controller.actions.back().payload.quantity==1 and controller.actions.back().payload.town_id=="earth_test",
+		"selected-item Buy retains exact market, item, quantity and physical town scope")
+	ui._trade_search.text = ""
+	ui._trade_search.text_changed.emit("")
+	ui._trade_category.select(2)
+	ui._trade_category.item_selected.emit(2)
+	_check(ui._trade_tiles["market:banana_start"].visible and ui._trade_tiles["backpack:bean_seed"].visible
+		and not ui._trade_tiles["market:banana"].visible,
+		"Planting category separates seed/starter tiles from harvested crops")
 	ui._market_search = ""
 	ui._market_category = "All"
-	ui._market_page = 0
 	sim.state.permissions.trade = false
 	ui.open({"kind":"market","id":"earth_market","label":"Canopy market","town_id":"earth_test"})
-	_check(_text(ui).contains("Trading is unavailable for your current role")
-		and _buttons(ui,"Buy").all(func(button: Button): return button.disabled)
-		and _buttons(ui,"Sell").all(func(button: Button): return button.disabled),
-		"market explains local permission limits and disables unavailable orders")
+	_check(ui._trade_detail.text.contains("Trading is unavailable for your current role")
+		and ui._trade_buy.disabled and ui._trade_sell.disabled,
+		"market explains permission limits and disables both unavailable orders")
 	sim.state.permissions.trade = true
 	ui.open({"kind":"facility","id":"refinery","town_id":"earth_test"})
-	_check(_button(ui,"Buy")!=null and _button(ui,"Start processing batch")!=null and not _text(ui).contains("Dry bananas"),"refinery includes fuel trading and its recipe without unrelated processing")
+	_check(ui._merchant_mode and ui._trade_tiles.has("market:crude_oil"),
+		"refinery trading uses actual petroleum tiles")
+	_button(ui,"Requests & details").pressed.emit()
+	_check(not ui._merchant_mode and _button(ui,"Start processing batch")!=null and not _text(ui).contains("Dry bananas")
+		and _button(ui,"Back to trading")!=null,
+		"refinery details preserve its real recipe and provide a direct return to trading")
 	controller.actions.clear()
 	for page: String in ui_script.PAGES:
 		ui.open({})
@@ -291,6 +291,10 @@ func _run() -> void:
 	quit(1 if failed else 0)
 
 func _collision_signature(node: Node) -> Array:
+	# Moving visual citizens have their own capsule tests; this compares the
+	# shared static town geometry against the server collision-only scene.
+	if node.is_in_group("frontier_pedestrian_bodies"):
+		return []
 	var result: Array = []
 	for child in node.get_children():
 		if child is CollisionShape3D:

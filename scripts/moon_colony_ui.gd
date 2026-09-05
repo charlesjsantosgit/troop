@@ -34,7 +34,7 @@ var _order_details: Array[Label] = []
 
 
 func _ready() -> void:
-	theme = MenuTheme.build()
+	theme = MenuTheme.build(true)
 	set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	mouse_filter = Control.MOUSE_FILTER_STOP
 	visible = false
@@ -165,10 +165,10 @@ func _build() -> void:
 	add_child(scrim)
 	_panel = PanelContainer.new()
 	_panel.minimum_size_changed.connect(_resize_panel, CONNECT_DEFERRED)
-	_panel.add_theme_stylebox_override("panel", MenuTheme.panel())
+	_panel.add_theme_stylebox_override("panel", MenuTheme.panel(MenuTheme.PANEL, MenuTheme.BORDER, 16))
 	add_child(_panel)
 	var column := VBoxContainer.new()
-	column.add_theme_constant_override("separation", 14)
+	column.add_theme_constant_override("separation", 10)
 	_panel.add_child(column)
 	var header := HBoxContainer.new()
 	column.add_child(header)
@@ -186,7 +186,7 @@ func _build() -> void:
 	_cargo = _label(column, "Colony cargo", 16, CREAM)
 	_tabs = TabContainer.new()
 	_tabs.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	_tabs.add_theme_font_size_override("font_size", 16)
+	_tabs.add_theme_font_size_override("font_size", 14)
 	column.add_child(_tabs)
 	var market := _page("Market")
 	_market_notice = _label(market, "Visit Muenster to trade.", 16, GOLD)
@@ -214,7 +214,7 @@ func _build() -> void:
 	for i in range(6):
 		var card := PanelContainer.new()
 		card.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-		card.add_theme_stylebox_override("panel", MenuTheme.panel(MenuTheme.INSET, MenuTheme.BORDER, 12, 8))
+		card.add_theme_stylebox_override("panel", MenuTheme.panel(MenuTheme.INSET, MenuTheme.BORDER, 10, 8))
 		beds.add_child(card)
 		_plot_labels.append(_label(card, "Bed %02d" % (i + 1), 14, CREAM))
 	_waypoint(farm, "Find the cheese farm", "farm", 0, "CHEESE FARM")
@@ -232,7 +232,7 @@ func _build() -> void:
 	_label(contracts, "Grow and age your cheese, then visit Muenster to deliver these orders in sequence. Rewards go into your banana balance.", 15, MUTED)
 	for i in range(3):
 		var card := PanelContainer.new()
-		card.add_theme_stylebox_override("panel", MenuTheme.panel(MenuTheme.INSET, MenuTheme.BORDER, 16, 8))
+		card.add_theme_stylebox_override("panel", MenuTheme.panel(MenuTheme.INSET, MenuTheme.BORDER, 10, 8))
 		contracts.add_child(card)
 		var order := VBoxContainer.new()
 		card.add_child(order)
@@ -248,7 +248,7 @@ func _build() -> void:
 		"Record the mineral formations in this ancient crater."]
 	for i in range(3):
 		var card := PanelContainer.new()
-		card.add_theme_stylebox_override("panel", MenuTheme.panel(MenuTheme.INSET, MenuTheme.BORDER, 16, 8))
+		card.add_theme_stylebox_override("panel", MenuTheme.panel(MenuTheme.INSET, MenuTheme.BORDER, 10, 8))
 		explore.add_child(card)
 		var landmark := VBoxContainer.new()
 		card.add_child(landmark)
@@ -273,13 +273,13 @@ func _page(title: String) -> VBoxContainer:
 	_tabs.add_child(scroll)
 	var body := VBoxContainer.new()
 	body.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	body.add_theme_constant_override("separation", 12)
+	body.add_theme_constant_override("separation", 8)
 	scroll.add_child(body)
 	return body
 
 
 func _label(parent: Node, value: String, size: int, color: Color) -> Label:
-	var label := MenuTheme.label(value, size, color)
+	var label := MenuTheme.label(value, MenuTheme.content_font_size(size), color)
 	parent.add_child(label)
 	return label
 
@@ -289,7 +289,7 @@ func _button(parent: Node, value: String) -> Button:
 	button.text = value
 	button.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	button.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	MenuTheme.style_button(button)
+	MenuTheme.style_button(button, false, true)
 	parent.add_child(button)
 	return button
 

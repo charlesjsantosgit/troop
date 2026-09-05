@@ -20,7 +20,7 @@ const LEG_B := 0.26   # shin
 const REST_SOLE_Y := HIP_Y - LEG_A - LEG_B - 0.075 * 0.55
 const REST_CROWN_Y := HIP_Y + 0.05 + 0.54 + 0.18
 const REST_HEIGHT := REST_CROWN_Y - REST_SOLE_Y
-const PLAYER_HEIGHT := 1.778
+const PLAYER_HEIGHT := 1.8288 # 6 ft, sole to crown; camera and collider derive from this.
 const NPC_MIN_HEIGHT := 1.7018
 const NPC_MAX_HEIGHT := 1.8796
 const PLAYER_SCALE := PLAYER_HEIGHT / REST_HEIGHT
@@ -124,6 +124,8 @@ var _vehicle_pose = null
 var _melee_attack_active := false
 var _melee_attack_progress := 0.0
 var _melee_combo := 0
+var _melee_primed := false
+var _melee_pose_blend := 0.0
 var _healing_pose := false
 var _healing_progress := 0.0
 var _reload_pose := false
@@ -698,6 +700,8 @@ func reset_pose_state(preserve_yaw := false) -> void:
 	_reload_support_grip = null
 	_melee_mode = false
 	_melee_attack_active = false
+	_melee_primed = false
+	_melee_pose_blend = 0.0
 	_healing_pose = false
 	_rope_active = false
 	_rope_tail_points = PackedVector3Array()
@@ -713,11 +717,12 @@ func reset_pose_state(preserve_yaw := false) -> void:
 
 
 func set_melee_pose(active: bool, attack_active: bool, progress: float,
-		combo: int) -> void:
+		combo: int, primed := false) -> void:
 	_melee_mode = active
 	_melee_attack_active = attack_active
 	_melee_attack_progress = clampf(progress, 0.0, 1.0)
 	_melee_combo = posmod(combo, 3)
+	_melee_primed = active and primed
 
 
 func set_healing_pose(active: bool, progress: float) -> void:
@@ -888,6 +893,25 @@ func update_motion(dt: float, anim: int, vel: Vector3, on_floor: bool, anchor: V
 		1.0 - exp(-8.0 * dt))
 	if absf(_sniper_rope_blend - sniper_rope_target) < 0.0005:
 		_sniper_rope_blend = sniper_rope_target
+	# Melee mode alone leaves locomotion's ordinary relaxed arms untouched. RMB
+	# eases into a visible guard, while an immediate unprimed strike still reaches
+	# its authored attack path before the contact frame.
+	var melee_pose_allowed := _melee_mode and anim not in [
+		Anim.SPRINT, Anim.SWING, Anim.SWIM, Anim.RIDE, Anim.PILOT, Anim.CABIN,
+	] and not _gun_aim_active and not _healing_pose and not _reload_pose
+	var melee_pose_target := 1.0 \
+		if (melee_pose_allowed and (_melee_primed or _melee_attack_active)) else 0.0
+	var melee_pose_rate := 22.0 if _melee_attack_active else 11.0
+	_melee_pose_blend = lerpf(_melee_pose_blend, melee_pose_target,
+		1.0 - exp(-melee_pose_rate * dt))
+	if melee_pose_allowed and _melee_attack_active:
+		# Direct presentation snapshots may join a strike after wind-up. Respect
+		# their authored progress while ordinary frame-by-frame attacks still ease
+		# smoothly out of the relaxed pose.
+		_melee_pose_blend = maxf(_melee_pose_blend,
+			smoothstep(0.0, 0.18, _melee_attack_progress))
+	if absf(_melee_pose_blend - melee_pose_target) < 0.0005:
+		_melee_pose_blend = melee_pose_target
 	var surface_up := global_basis.y.normalized()
 	var vertical_speed := vel.dot(surface_up)
 	var h := vel.slide(surface_up).length()
@@ -1327,7 +1351,7 @@ func update_motion(dt: float, anim: int, vel: Vector3, on_floor: bool, anchor: V
 			p.tail_root_y = 0.48
 			p.tail_sway = sin(_t * 1.4) * 0.025
 
-	if _melee_mode and _melee_attack_active:
+	if melee_pose_allowed and _melee_attack_active:
 		var strike_twist := _melee_pulse(
 			_melee_attack_progress, 0.10, 0.42, 0.82)
 		if _melee_combo == 0:
@@ -1474,9 +1498,9 @@ func update_motion(dt: float, anim: int, vel: Vector3, on_floor: bool, anchor: V
 		_ik_limb(sh_l, el_l, ARM_A, ARM_B,
 			_reload_support_grip.global_position,
 			yaw_node.global_transform.basis * Vector3(-0.78, -0.22, 0.62))
-	if _melee_mode:
+	if melee_pose_allowed and _melee_pose_blend > 0.001:
 		_pose_melee_arms(_melee_attack_active, _melee_attack_progress,
-			_melee_combo)
+			_melee_combo, _melee_pose_blend)
 	elif _healing_pose:
 		_pose_healing_arms(_healing_progress)
 	if anim == Anim.RIDE or anim == Anim.PILOT:
@@ -2061,7 +2085,8 @@ func _update_bandage_props() -> void:
 		from.lerp(to, 0.5))
 
 
-func _pose_melee_arms(attack_active: bool, progress: float, combo: int) -> void:
+func _pose_melee_arms(attack_active: bool, progress: float, combo: int,
+		weight := 1.0) -> void:
 	var body_basis := yaw_node.global_transform.basis
 	var up := body_basis.y.normalized()
 	var forward := body_basis * Vector3.FORWARD
@@ -2115,10 +2140,10 @@ func _pose_melee_arms(attack_active: bool, progress: float, combo: int) -> void:
 				right_target = right_guard.lerp(
 					center + right * 0.055, maxf(lift, slam))
 
-	_ik_limb(sh_l, el_l, ARM_A, ARM_B, left_target,
-		-right * 0.85 - up * 0.35 + forward * 0.2)
-	_ik_limb(sh_r, el_r, ARM_A, ARM_B, right_target,
-		right * 0.85 - up * 0.35 + forward * 0.2)
+	_ik_limb_weighted(sh_l, el_l, ARM_A, ARM_B, left_target,
+		-right * 0.85 - up * 0.35 + forward * 0.2, weight)
+	_ik_limb_weighted(sh_r, el_r, ARM_A, ARM_B, right_target,
+		right * 0.85 - up * 0.35 + forward * 0.2, weight)
 
 
 static func _melee_pulse(progress: float, start: float, peak: float,

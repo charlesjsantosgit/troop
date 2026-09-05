@@ -8,6 +8,10 @@ extends RefCounted
 ## Saves are validated fully then atomically replace current state.
 const RoutesScript = preload("res://scripts/frontier_routes.gd")
 const VERSION := 1
+const PEDESTRIAN_RADIUS := 0.34
+const PEDESTRIAN_SPACING := 0.86
+const OCCUPIED_WAYPOINT_CAPTURE_RADIUS := 1.0
+const WALK_SPEED := 2.0
 const DAY_SECONDS := 1200.0
 const LUNAR_DAY_SECONDS := 4800.0
 const CROP_ROWS := {
@@ -88,6 +92,8 @@ var _accumulator := 0.0
 # Server domain supplies one shared player book; offline games keep it empty.
 var shared_players: Dictionary = {}
 var multiplayer_mode := false
+var _pedestrian_obstacles: Array = []
+var _pedestrian_layout_ready := false
 
 func _init() -> void:
 	for id in CROP_ROWS:
@@ -117,6 +123,7 @@ func recipe_catalog() -> Dictionary:
 	return RECIPES.duplicate(true)
 
 func new_game(world_seed: int = 2026) -> void:
+	_pedestrian_layout_ready = false
 	_accumulator = 0.0
 	state = {"schema_version":VERSION,"seed":world_seed,"time":400.0,"planet":"earth",
 		"solar_illumination":0.5,"lunar_phase":1.0/12.0,
@@ -235,6 +242,9 @@ func _add_citizen(row: Array) -> void:
 		"shift":[5,22],"skill":0.55+float(id.length()%4)*0.08,"needs":{"hunger":0.12,"fatigue":0.06},
 		"wage":2,"enabled":true,"completed":0,"work_remaining":0.0,"cooldown":0.0,
 		"memories":[],"observations":[],"route":[],"_job":{}}
+	var worker: Dictionary = state.citizens[id]
+	worker.position = _free_work_position(worker, worker.position, false)
+	worker.destination = worker.position.duplicate()
 
 func _add_quest(id: String, title: String, description: String, item: String, quantity: int, destination: String, reward: int, giver: String) -> void:
 	state.accounts["escrow_"+id] = 0
@@ -253,6 +263,12 @@ func tick(dt: float) -> void:
 		count += 1
 
 func _step(dt: float) -> void:
+	if not _pedestrian_layout_ready:
+		for id in _ids(state.citizens):
+			var person: Dictionary = state.citizens[id]
+			if not bool(person.get("physical_transport", false)):
+				person.position = _free_work_position(person, person.position, false)
+		_pedestrian_layout_ready = true
 	state.time += dt
 	_update_habitat(dt)
 	for id in _ids(state.plots):
@@ -682,6 +698,16 @@ func _update_citizen(worker: Dictionary, dt: float) -> void:
 	var position := Vector2(float(worker.position[0]),float(worker.position[1]))
 	var waypoint: Array = worker.route[0] if not worker.route.is_empty() else worker.destination
 	var destination := Vector2(float(waypoint[0]),float(waypoint[1]))
+	# Road junctions and service centers are shared navigation points, not work
+	# positions. If another body occupies an intermediate waypoint, capture it
+	# from just outside personal space so the route can continue around them.
+	# The final work/cargo destination remains strict and collision-reserved.
+	var arrival_radius := 0.1
+	var waypoint_distance := position.distance_to(destination)
+	if not bool(worker.get("physical_transport",false)) and worker.route.size()>1 \
+			and waypoint_distance<=OCCUPIED_WAYPOINT_CAPTURE_RADIUS \
+			and not _pedestrian_segment_clear(worker,destination,destination):
+		arrival_radius=OCCUPIED_WAYPOINT_CAPTURE_RADIUS
 	if bool(worker.get("physical_transport",false)):
 		var motion: Dictionary=state.get("traffic",{}).get(worker.id,{})
 		var ready := int(motion.get("epoch",-1))==int(worker.get("motion_epoch",0)) \
@@ -694,7 +720,7 @@ func _update_citizen(worker: Dictionary, dt: float) -> void:
 			return
 		worker.route.clear()
 		worker.blocker=""
-	elif position.distance_to(destination)>0.1:
+	elif waypoint_distance>arrival_radius:
 		var obstruction := str(worker.get("route_blocked",""))
 		if not obstruction.is_empty():
 			worker.blocker=obstruction
@@ -702,8 +728,9 @@ func _update_citizen(worker: Dictionary, dt: float) -> void:
 			worker.task=worker.activity
 			return
 		worker.blocker=""
-		var speed := 6.0 if worker.job in ["tanker_driver","hauler"] else 2.6
-		position=position.move_toward(destination,dt*speed)
+		var previous_position := position
+		position = pedestrian_step(worker, position, destination, dt)
+		worker["walking_speed"] = position.distance_to(previous_position) / maxf(dt, 0.001)
 		worker.position=[position.x,position.y]
 		worker.activity="Traveling: "+str(job.label)
 		worker.task=worker.activity
@@ -760,7 +787,7 @@ func _plan_job(worker: Dictionary) -> void:
 				elif plot.crop=="": op="plant"
 				if op!="":
 					_set_job(worker,op,"lunar_greenhouse" if worker.planet=="moon" else "cooperative",op.capitalize()+" "+id,{"plot":id,"source":store},7.0)
-					worker.destination=[plot.position[0],float(plot.position[1])+2.5]
+					worker.destination=_free_work_position(worker,[plot.position[0],float(plot.position[1])+2.5],true)
 					_route_to(worker,true)
 					return
 			_block(worker,"Crops are growing; no care is currently needed")
@@ -847,7 +874,7 @@ func _plan_job(worker: Dictionary) -> void:
 				var plot: Dictionary = state.plots[id]
 				if plot.planet==worker.planet and plot.owner==worker.employer and float(plot.disease)>=0.1:
 					_set_job(worker,"treat_crop","lunar_greenhouse" if worker.planet=="moon" else "cooperative","Diagnosing and treating crop stress",{"plot":id,"source":store},14.0)
-					worker.destination=[plot.position[0],float(plot.position[1])+2.5]
+					worker.destination=_free_work_position(worker,[plot.position[0],float(plot.position[1])+2.5],true)
 					_route_to(worker,true)
 					return
 			_set_job(worker,"inspect","lunar_greenhouse" if worker.planet=="moon" else "cooperative","Inspecting crop health and recording recommendations",{},15.0)
@@ -883,6 +910,8 @@ func _set_job(worker: Dictionary, op: String, target: String, label: String, pay
 	# The facility/service address remains unchanged for drivers and trading.
 	if target=="refinery" and not bool(worker.get("physical_transport",false)):
 		worker.destination=[91.0,7.0]
+	if not bool(worker.get("physical_transport",false)):
+		worker.destination=_free_work_position(worker,worker.destination,true)
 	worker.work_remaining=duration/(0.7+float(worker.skill)*0.5)
 	worker._job={"op":op,"target":target,"label":label,"payload":payload}
 	_route_to(worker,false)
@@ -1227,6 +1256,7 @@ func load_game(path: String) -> bool:
 	file.close()
 	if parsed!=OK or not validate_state(json.data): return false
 	state=json.data
+	_pedestrian_layout_ready=false
 	_accumulator=0.0
 	return true
 
@@ -1485,6 +1515,139 @@ func _ids(dictionary: Dictionary) -> Array:
 	var ids := dictionary.keys()
 	ids.sort()
 	return ids
+
+## Trusted authority inputs only. Clients consume the resulting model positions.
+func set_pedestrian_obstacles(rows: Array) -> void:
+	_pedestrian_obstacles = rows.slice(0, 128)
+
+
+func is_pedestrian(worker: Dictionary) -> bool:
+	return not bool(worker.get("physical_transport",false)) or str(state.get("traffic",{}).get(worker.id,{}).get("mode","driving")) == "boarding"
+
+
+func _free_work_position(worker: Dictionary, nominal: Array, reserve: bool) -> Array:
+	var center := Vector2(float(nominal[0]), float(nominal[1]))
+	for index in range(49):
+		var candidate := center
+		if index > 0:
+			var ring := 1 + (index - 1) / 12
+			var angle := float((index - 1) % 12) * TAU / 12.0
+			candidate += Vector2(cos(angle), sin(angle)) * float(ring) * PEDESTRIAN_SPACING * 1.15
+		var available := true
+		for id in state.citizens:
+			var other: Dictionary = state.citizens[id]
+			if id == worker.id or other.planet != worker.planet or not is_pedestrian(other):
+				continue
+			var point: Array = other.get("destination", other.position) if reserve and not other.get("_job", {}).is_empty() else other.position
+			if candidate.distance_to(Vector2(float(point[0]), float(point[1]))) < PEDESTRIAN_SPACING:
+				available = false
+				break
+		if available:
+			return [candidate.x, candidate.y]
+	return nominal.duplicate()
+
+
+## Small swept steps prevent opposite walkers tunnelling through each other
+## between the one-second economy ticks. Keep right when passing, then return
+## to the route; a stopped worker never acquires a permanent queue reservation.
+func pedestrian_step(worker: Dictionary, from: Vector2, target: Vector2, dt: float) -> Vector2:
+	var position := from
+	var remaining := minf(maxf(dt, 0.0), 2.0) * WALK_SPEED
+	var direct := from.move_toward(target,remaining)
+	# Every candidate in this call stays inside the remaining-travel disc. Cull
+	# the authority's current people/player positions once, then reuse the same
+	# numeric points for the fine steering sweeps. This keeps collision behavior
+	# exact without repeatedly walking the citizen dictionaries at every angle.
+	var nearby := _nearby_pedestrian_obstacles(worker, from, remaining)
+	# Most routes are empty. One complete sweep proves that straight segment
+	# safe; reserve fine steering steps for actual close encounters.
+	if _pedestrian_segment_clear_against(from,direct,nearby): return direct
+	while remaining > 0.0001 and position.distance_to(target) > 0.05:
+		var stride := minf(remaining, minf(0.14, position.distance_to(target)))
+		var forward := (target-position).normalized()
+		var best := position
+		var best_score := -INF
+		var retreated := false
+		for angle in [0.0, 0.52, -0.52, 1.05, -1.05, 1.57, -1.57]:
+			var step := forward.rotated(angle) * stride
+			var candidate := position + step
+			if not _pedestrian_segment_clear_against(position, candidate, nearby):
+				continue
+			var score := step.dot(forward) + (0.001 if angle > 0.0 else 0.0)
+			if score > best_score:
+				best = candidate
+				best_score = score
+			if angle == 0.0: break # An unobstructed forward stride is always best.
+		# A worker leaving a tightly occupied service bay may need one step away
+		# from the destination before a safe passing lane opens. Evaluate rearward
+		# arcs only when every forward/side option is blocked.
+		if best == position:
+			for angle in [2.09, -2.09, 2.62, -2.62, PI]:
+				var step := forward.rotated(angle) * stride
+				var candidate := position + step
+				if not _pedestrian_segment_clear_against(position, candidate, nearby):
+					continue
+				# Angles are ordered by forward progress, keeping right on ties.
+				best = candidate
+				retreated = true
+				break
+		if best == position:
+			break
+		position = best
+		remaining -= stride
+		# Replan after one deliberate retreat instead of spending the rest of this
+		# tick oscillating around the same packed group.
+		if retreated:
+			return position
+	return position
+
+
+func _pedestrian_segment_clear(worker: Dictionary, start: Vector2, finish: Vector2) -> bool:
+	var nearby := _nearby_pedestrian_obstacles(worker, start, start.distance_to(finish))
+	return _pedestrian_segment_clear_against(start, finish, nearby)
+
+
+func _nearby_pedestrian_obstacles(worker: Dictionary, origin: Vector2,
+		reach: float) -> PackedVector3Array:
+	var result := PackedVector3Array()
+	var planet := str(worker.planet)
+	var people_limit := reach + PEDESTRIAN_SPACING
+	var people_limit_squared := people_limit * people_limit
+	for id in state.citizens:
+		var other: Dictionary = state.citizens[id]
+		if id == worker.id or str(other.planet) != planet or not is_pedestrian(other):
+			continue
+		var point := Vector2(float(other.position[0]), float(other.position[1]))
+		if origin.distance_squared_to(point) <= people_limit_squared:
+			result.append(Vector3(point.x, point.y, PEDESTRIAN_SPACING))
+	for obstacle: Dictionary in _pedestrian_obstacles:
+		if str(obstacle.get("planet", "earth")) != planet:
+			continue
+		var point: Vector2 = obstacle.get("position", Vector2.INF)
+		var radius := PEDESTRIAN_RADIUS + float(obstacle.get("radius", 0.42)) + 0.12
+		var limit := reach + radius
+		if point.is_finite() and origin.distance_squared_to(point) <= limit * limit:
+			result.append(Vector3(point.x, point.y, radius))
+	return result
+
+
+static func _pedestrian_segment_clear_against(start: Vector2, finish: Vector2,
+		obstacles: PackedVector3Array) -> bool:
+	for obstacle in obstacles:
+		if not _clear_person_segment(start, finish,
+			Vector2(obstacle.x, obstacle.y), obstacle.z):
+			return false
+	return true
+
+
+static func _clear_person_segment(start: Vector2, finish: Vector2, point: Vector2, radius: float) -> bool:
+	var nearest := Geometry2D.get_closest_point_to_segment(point, start, finish)
+	if nearest.distance_to(point) >= radius - 0.0001:
+		return true
+	# A loaded save or a player can begin inside personal space. Allow only
+	# motion which increases separation, never deeper penetration.
+	return start.distance_to(point) < radius and finish.distance_to(point) > start.distance_to(point) + 0.0001
+
 
 func _route_to(worker: Dictionary, plot: bool) -> void:
 	worker["route"]=RoutesScript.path(worker.position,worker.destination,str(worker.planet),plot)

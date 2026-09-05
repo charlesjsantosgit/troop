@@ -1,8 +1,8 @@
 {
   "godot_compatibility": "4.7",
   "minimum_bootstrap": 3,
-  "network_protocol": 13,
-  "release_title": "TROOP 0.7.0 \u2014 MENUS & BOARDING",
-  "notes": "A muted sage title landscape surrounds charcoal panels with ivory text and amber actions. Organized menus put Play, your career, practice, controls and settings in clear sections. Compact in-game windows keep the world visible around NPC conversations, shops, inventory, the journal and map. Search and filter market goods, inspect cargo, and follow your next useful action. E uses the same nearby target as the prompt for rockets, vehicles and workplaces. The Earth rocket fits its actual landing feet to the final town terrain, with matching server boarding checks. Apply the signed update and restart, or install the full package. All clients and the public server use 0.7.0 / protocol 13. Bootstrap 3 is retained; versions older than 0.4.10 need the full installer. Existing saves are preserved.",
-  "requires_installer": false
+  "network_protocol": 14,
+  "release_title": "TROOP 0.7.1 \u2014 RESPONSIVE TOWNS",
+  "notes": "Visible field backpacks are standard gear, with an I-key inventory linked directly to finite town goods and personal pockets. Trading pairs your backpack with merchant stock in opaque animated tile grids, with quantity and Buy/Sell controls always visible. Shared actions and vehicle confirmations use separate network channels from bulk town updates; queued views stay bounded and ping appears beside FPS. Residents have physical collisions, separated work positions, realistic walking and job-specific work poses. Player anatomy, collision height and eye level measure six feet (1.8288 m). Install the full 0.7.1 package for multiplayer protocol 14; bootstrap 3 is retained. Existing local saves and server town ownership are preserved.",
+  "requires_installer": true
 }

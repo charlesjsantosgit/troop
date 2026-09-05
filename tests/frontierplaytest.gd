@@ -237,10 +237,10 @@ func _verify_citizen_conversation(player: MonkeyPlayer) -> void:
 		and str(_controller.selected_interaction.get("id", "")) == "ookbar" \
 		and _controller.ui._heading.text == "Ookbar" \
 		and not conversation_text.contains("Petra") \
-		and conversation_text.contains("Right now:") \
-		and conversation_text.contains("Hunger") \
+		and conversation_text.contains(str(_controller.simulation.state.citizens.ookbar.activity)) \
+		and _button_with_text(_controller.ui._body, "Show details") != null \
 		and conversation_text.contains("A welcome for the neighborhood"),
-		"E at Ookbar opens his live work, needs and personal quest conversation")
+		"E at Ookbar opens his live work and personal quest, with needs available in details")
 	var accept := _button_with_text(_controller.ui._body, "Accept request")
 	var state: Dictionary = _controller.simulation.state
 	var treasury_before := int(state.accounts.treasury)
@@ -269,8 +269,7 @@ func _verify_refinery_market(player: MonkeyPlayer) -> void:
 	_check(_controller.ui.visible and _controller.ui.context.get("id") == "petra" \
 		and _controller.ui.page == "Interaction" \
 		and _controller.ui._heading.text == "Petra" \
-		and _control_text(_controller.ui._body).contains("My trading desk") \
-		and _control_text(_controller.ui._body).contains("Crude Oil"),
+		and _controller.ui._merchant_mode and _controller.ui._trade_tiles.has("market:crude_oil"),
 		"gameplay E at the staffed refinery opens Petra and her actual petroleum stock")
 	var simulation = _controller.simulation
 	var amount := 10
@@ -281,13 +280,16 @@ func _verify_refinery_market(player: MonkeyPlayer) -> void:
 	var owner: String = simulation.state.locations.refinery.owner
 	var owner_before := int(simulation.state.accounts[owner])
 	var quote: int = simulation.quote("refinery", "crude_oil", amount, true)
-	var buy := _button_for_label(_controller.ui._body, "Crude Oil", "Buy")
+	_controller.ui._select_merchant_item("crude_oil", "market")
+	var buy: Button = _controller.ui._trade_buy
 	if buy: buy.pressed.emit()
 	_check(buy != null and int(simulation.state.inventories.refinery.crude_oil) == source_before - amount \
 		and int(simulation.state.inventories.player_earth.get("crude_oil", 0)) == pack_before + amount \
 		and int(simulation.state.accounts.player) == cash_before - quote \
 		and int(simulation.state.accounts[owner]) == owner_before + quote,
 		"Petra's purchase button moves finite crude and exact quoted credits to its owner")
+	var about := _button_with_text(_controller.ui, "About Petra")
+	if about: about.pressed.emit()
 	var workplace_button := _button_with_text(_controller.ui._body, "Use Refinery · fuels and maintenance")
 	var had_workplace := workplace_button != null
 	player.admin_teleport(standing + Vector3(30,0,0))
@@ -343,8 +345,12 @@ func _verify_refinery_market(player: MonkeyPlayer) -> void:
 	await _physics_frames(2)
 	_check(_controller.ui.visible and _controller.ui.context.get("id") == "refinery" \
 		and _button_with_text(_controller.ui._body,"Start processing batch") != null \
-		and _button_for_label(_controller.ui._body,"Crude Oil","Buy") != null,
-		"gameplay E opens the same functional refinery desk when Petra is away")
+		and _button_with_text(_controller.ui._body,"Back to trading") != null,
+		"gameplay E preserves the functional refinery service view when Petra is away")
+	var back_to_trade := _button_with_text(_controller.ui._body, "Back to trading")
+	if back_to_trade: back_to_trade.pressed.emit()
+	_check(_controller.ui._merchant_mode and _controller.ui._trade_tiles.has("market:crude_oil"),
+		"unstaffed refinery returns from service controls to the same petroleum stock")
 	petra_data.position = saved_position
 	petra._initialized = false
 	petra.update_citizen(0.0,Vector3.INF)

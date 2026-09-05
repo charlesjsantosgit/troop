@@ -5,6 +5,29 @@ var passed := 0
 var total := 0
 
 
+class MeleeDamageRecorder:
+	extends StaticBody3D
+	var damage_events: Array[float] = []
+	var impulse_events: Array[Vector3] = []
+
+	func setup(pos: Vector3) -> void:
+		global_position = pos
+		collision_layer = 1
+		collision_mask = 0
+		var collision := CollisionShape3D.new()
+		var shape := CapsuleShape3D.new()
+		shape.radius = 0.34
+		shape.height = 1.55
+		collision.shape = shape
+		collision.position = Vector3.UP * 0.775
+		add_child(collision)
+
+	func take_damage(amount: float, _source: Node3D,
+			impulse: Vector3) -> void:
+		damage_events.append(amount)
+		impulse_events.append(impulse)
+
+
 func run(main) -> void:
 	var world: World = main.world
 	var player: MonkeyPlayer = world.local_player
@@ -492,7 +515,124 @@ func run(main) -> void:
 		"third-person melee pose extends a paw through the strike")
 	player.set_melee_mode(false)
 	melee_target.queue_free()
-	await get_tree().process_frame
+	await get_tree().physics_frame
+
+	var damage_target := MeleeDamageRecorder.new()
+	world.add_child(damage_target)
+	damage_target.setup(player.global_position + Vector3(0, 0, -1.05))
+	await get_tree().physics_frame
+	player.state = MonkeyPlayer.S.GROUND
+	player.galloping = false
+	player.set_melee_mode(true)
+	_check(player._start_melee_attack() and not player.melee_attack_primed,
+		"an ordinary LMB strike snapshots an unprimed damage state")
+	player.set_melee_primed(true)
+	main.hud._process(0.0)
+	_check(player.melee_primed and not player.melee_attack_primed \
+		and "PRIMED" not in main.hud.ammo_label.text,
+		"pressing RMB after a strike starts cannot upgrade that committed hit")
+	player._update_melee(
+		MonkeyPlayer.MELEE_ATTACK_DURATION * MonkeyPlayer.MELEE_HIT_PROGRESS
+		+ 0.01)
+	_check(damage_target.damage_events.size() == 1 \
+		and is_equal_approx(damage_target.damage_events[0], World.MELEE_DAMAGE[0]),
+		"the physical unprimed strike applies the canonical base damage")
+	player._update_melee(MonkeyPlayer.MELEE_ATTACK_DURATION)
+	main.hud._process(0.0)
+	_check(player.melee_primed and "PRIMED" in main.hud.ammo_label.text,
+		"a held late RMB becomes the visible guard only after the old strike ends")
+	player.set_melee_mode(false)
+	player.set_melee_mode(true)
+	player.set_melee_primed(true)
+	_check(player._start_melee_attack() and player.melee_attack_primed,
+		"holding RMB before LMB snapshots a primed strike")
+	player.set_melee_primed(false)
+	main.hud._process(0.0)
+	_check(not player.melee_primed and player.melee_attack_primed \
+		and "PRIMED" in main.hud.ammo_label.text,
+		"releasing RMB mid-swing preserves the committed guard and HUD damage cue")
+	player._update_melee(
+		MonkeyPlayer.MELEE_ATTACK_DURATION * MonkeyPlayer.MELEE_HIT_PROGRESS
+		+ 0.01)
+	_check(damage_target.damage_events.size() == 2 \
+		and is_equal_approx(damage_target.damage_events[1],
+			World.MELEE_DAMAGE[0] * World.MELEE_PRIMED_DAMAGE_MULTIPLIER),
+		"the same physical strike deals exactly fifty percent more when primed")
+	player._update_melee(MonkeyPlayer.MELEE_ATTACK_DURATION)
+	main.hud._process(0.0)
+	_check(not player.melee_attack_primed \
+		and "PRIMED" not in main.hud.ammo_label.text \
+		and is_equal_approx(World.melee_damage_for_combo(4),
+			World.MELEE_DAMAGE[1] * 1.5) \
+		and is_equal_approx(World.melee_damage_for_combo(6),
+			World.MELEE_DAMAGE[0]),
+		"the boost expires with the strike and only canonical encoded combos gain it")
+
+	Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
+	var aim_press := InputEventMouseButton.new()
+	aim_press.button_index = MOUSE_BUTTON_RIGHT
+	aim_press.button_mask = MOUSE_BUTTON_MASK_RIGHT
+	aim_press.pressed = true
+	var aim_release := InputEventMouseButton.new()
+	aim_release.button_index = MOUSE_BUTTON_RIGHT
+	aim_release.button_mask = 0
+	aim_release.pressed = false
+	player.cam.set_aiming(false)
+	player.cam.set_first_person(false)
+	player.cam._input(aim_press)
+	player.ti.aim_held = true
+	player._combat(player._gather())
+	_check(player.melee_primed and not player.cam.aiming \
+		and not player.cam.first_person,
+		"melee RMB raises guard without replacing the chosen shoulder camera")
+	player.cam._input(aim_release)
+	player.ti.aim_held = false
+	player._combat(player._gather())
+	player.cam.set_first_person(true)
+	player.cam._input(aim_press)
+	player.ti.aim_held = true
+	player._combat(player._gather())
+	_check(player.melee_primed and not player.cam.aiming \
+		and player.cam.first_person,
+		"melee RMB also preserves a chosen first-person camera")
+	player.cam._input(aim_release)
+	player.ti.aim_held = false
+	player._combat(player._gather())
+	player.set_melee_mode(false)
+	player.cam.set_first_person(false)
+	player.cam._input(aim_press)
+	_check(player.cam.aiming and player.cam.first_person,
+		"right mouse still enters weapon ADS outside melee mode")
+	player.cam._input(aim_release)
+
+	player.set_melee_mode(true)
+	player.set_melee_primed(true)
+	player._start_melee_attack()
+	main._open_pause_menu()
+	_check(main.pause_menu != null and not player.melee_primed \
+		and not player.melee_attack_primed \
+		and player.melee_attack_remaining == 0.0,
+		"opening the actual pause menu cancels held and latched melee input")
+	main._close_pause_menu(false)
+	player.set_melee_primed(true)
+	player._start_melee_attack()
+	player.notification(NOTIFICATION_APPLICATION_FOCUS_OUT)
+	_check(not player.melee_primed and not player.melee_attack_primed \
+		and player.melee_attack_remaining == 0.0,
+		"losing application focus cannot leave an invisible primed strike")
+	player.galloping = true
+	player.set_melee_primed(true)
+	_check(not player.melee_primed and not player._start_melee_attack() \
+		and Net.MELEE_INELIGIBLE_ANIMS == [MonkeyRig.Anim.SPRINT,
+			MonkeyRig.Anim.SWING, MonkeyRig.Anim.SWIM, MonkeyRig.Anim.RIDE,
+			MonkeyRig.Anim.PILOT, MonkeyRig.Anim.CABIN] \
+		and is_equal_approx(MonkeyPlayer.MELEE_ATTACK_DURATION * 1000.0,
+			float(Net.MELEE_PRIME_RELEASE_MSEC)),
+		"all-fours movement blocks the guard and player timing matches server validation")
+	player.galloping = false
+	player.set_melee_mode(false)
+	damage_target.queue_free()
+	await get_tree().physics_frame
 	player.cam.set_first_person(true)
 	await get_tree().process_frame
 	await get_tree().process_frame

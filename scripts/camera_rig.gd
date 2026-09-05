@@ -310,6 +310,10 @@ func set_aiming(enabled: bool) -> void:
 	# replace the chase camera with an ADS cockpit.
 	if _vehicle_view and enabled:
 		return
+	# In melee mode RMB owns the primed stance. Do not let the same press force
+	# ADS or replace the player's chosen first/third-person camera.
+	if enabled and target and target.melee_mode:
+		return
 	if aiming == enabled:
 		return
 	aiming = enabled
@@ -719,8 +723,10 @@ func _input(e: InputEvent) -> void:
 	# by a Control that happens to sit under the centered cursor
 	if e is InputEventMouseMotion and Input.mouse_mode == Input.MOUSE_MODE_CAPTURED:
 		apply_look(e.relative)
-	elif not _vehicle_view and e.is_action_pressed("aim") \
-			and Input.mouse_mode == Input.MOUSE_MODE_CAPTURED:
+	elif not _vehicle_view and (not target or not target.melee_mode) \
+			and e.is_action_pressed("aim") \
+			and (Input.mouse_mode == Input.MOUSE_MODE_CAPTURED \
+				or (target and target.test_mode)):
 		set_aiming(true)
 	elif e.is_action_released("aim"):
 		set_aiming(false)
@@ -737,7 +743,11 @@ func render_frame(dt: float, physics_fraction: float = -1.0) -> void:
 		return
 	if _death_view and not is_instance_valid(_death_follow_target):
 		_death_follow_target = null
-	if aiming and Input.mouse_mode != Input.MOUSE_MODE_CAPTURED \
+	if aiming and target.melee_mode:
+		# Toggling Q while already in ADS returns to the stored camera preference;
+		# the held RMB can then raise the melee guard without owning the view mode.
+		set_aiming(false)
+	elif aiming and Input.mouse_mode != Input.MOUSE_MODE_CAPTURED \
 			and not (target and target.test_mode):
 		set_aiming(false)
 	_advance_recoil(dt)
@@ -884,7 +894,10 @@ func render_frame(dt: float, physics_fraction: float = -1.0) -> void:
 
 	_update_camera_shake(dt, sniper_scoped)
 	if _view_arms:
-		var melee_view: bool = target.melee_mode
+		var melee_view: bool = target.melee_mode and not _death_view \
+			and not _vehicle_view and not target.rocket_cabin_view \
+			and target.state not in [PLAYER_STATE_SWING, PLAYER_STATE_SWIM] \
+			and not target.galloping
 		var healing_view: bool = target.has_method("is_healing") \
 			and target.is_healing()
 		var weapon_visually_stowed: bool = target.is_weapon_stowed()
@@ -898,10 +911,13 @@ func render_frame(dt: float, physics_fraction: float = -1.0) -> void:
 			_view_arms.update_bandage_pose(dt, target.bandage_progress(), sp,
 				grounded)
 		elif first_person and melee_view:
+			var melee_attacking: bool = target.melee_attack_remaining > 0.0
+			var melee_primed: bool = target.melee_attack_primed \
+				if melee_attacking else target.melee_primed
 			_view_arms.update_melee_pose(dt,
-				target.melee_attack_remaining > 0.0,
+				melee_attacking,
 				target.melee_attack_progress(), target.melee_attack_combo,
-				sp, grounded)
+				sp, grounded, melee_primed)
 		elif show_weapon_arms:
 			_view_arms.update_pose(dt, target.active_weapon, aiming, sp, grounded)
 
