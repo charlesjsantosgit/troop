@@ -4,6 +4,7 @@ class Journal extends Control:
 	func close() -> void: hide()
 class Host extends Node:
 	var simulation: RefCounted
+	var owner_main: Node
 	var ui := Journal.new()
 	var waypoint := {}
 	var owns_town := false
@@ -27,9 +28,18 @@ func _run() -> void:
 	host.simulation.new_game(2026)
 	var guide = load("res://scripts/frontier_tutorial.gd").new()
 	host.add_child(guide)
-	guide.controller = host
-	guide.path = "user://frontier/tests/tutorial-%d.cfg" % OS.get_process_id()
-	guide.active = true
+	var canvas := CanvasLayer.new()
+	host.add_child(canvas)
+	host.ui.hide()
+	guide.configure(host, canvas, "user://frontier/tests/tutorial-%d.cfg" % OS.get_process_id())
+	guide._panel.hide()
+	guide._refresh_card()
+	check(guide._panel.visible and guide._title.text.contains("Meet Nana"),
+		"a host without optional city support refreshes the actual tutorial card")
+	host.ui.show()
+	guide._refresh_card()
+	check(not guide._panel.visible, "opening the journal still hides the optional tutorial card")
+	host.ui.hide()
 	var before: Dictionary = host.simulation.state.duplicate(true)
 	guide.observe_interaction("ookbar")
 	check(guide.step == 0, "unrelated NPC cannot complete the merchant lesson")

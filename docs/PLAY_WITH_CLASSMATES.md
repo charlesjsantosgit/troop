@@ -6,21 +6,21 @@ Do not disable school security controls to install or connect.
 
 ## Get the same version
 
-1. Open the [TROOP 0.7.1 download page](https://github.com/charlesjsantosgit/troop/releases/tag/v0.7.1)
+1. Open the [TROOP 0.8.0 download page](https://github.com/charlesjsantosgit/troop/releases/tag/v0.8.0)
    or check the [latest release](https://github.com/charlesjsantosgit/troop/releases/latest).
 2. Download the **Windows x86_64 Setup.exe** or **macOS universal.dmg** for your
    computer. The content `.pck` is for the updater, not a standalone game.
-3. **Install the full 0.7.1 package**, including when upgrading from 0.7.0.
-   This update changes the multiplayer channel configuration to protocol 14.
+3. **Install the full 0.8.0 package**, including when upgrading from 0.7.1.
+   This update changes the multiplayer city service protocol to 15.
    Close every running copy before installing. On a Mac, replace TROOP.app in
    Applications and launch that copy. Windows Setup installs for your user.
    Existing saves are preserved.
-4. Check that the installed game's menu shows **0.7.1**. Installing a new copy
+4. Check that the installed game's menu shows **0.8.0**. Installing a new copy
    does not update a different old copy left in Downloads or another folder;
    launch the updated installation when joining friends.
 
-The server and all classmates must run **0.7.1**. Older clients cannot join the
-0.7.1 server. This release uses multiplayer protocol **14**.
+The server and all classmates must run **0.8.0**. Older clients cannot join the
+0.8.0 server. This release uses multiplayer protocol **15**.
 
 No Godot installation, GitHub account, home server, or router port forwarding is
 needed. Windows on ARM, Chromebooks, browsers, and phones are not verified targets.
@@ -71,7 +71,7 @@ The macOS build includes Apple Silicon and Intel executables.
 
 - Check the menu version first. An update-required message means the client and
   server differ in game version or protocol. Apply the offered update and
-  confirm **0.7.1**. This release requires the full installer; restarting an old
+  confirm **0.8.0**. This release requires the full installer; restarting an old
   content pack does not activate its new multiplayer configuration.
 - The game needs outbound **UDP 30623**. Some school networks block game traffic;
   a successful browser download does not prove that multiplayer is allowed.
@@ -94,3 +94,11 @@ publisher signing: current Windows installers are unsigned and Mac previews are
 ad-hoc signed, so first-install approval may still be required.
 
 Press **I** for your backpack. At a merchant, press **E**, select a stock or backpack tile, choose a quantity, then **Buy** or **Sell**. The two grids show the same finite inventory used for planting and jobs. Personal pockets remain available in the backpack; Earth and Moon town supplies move through the cargo terminal.
+
+## Crownreach housing and jobs
+
+In the village, open **B → Places → Crownreach → Find transit** and follow the gold marker. Press **E** at the stop; a ticket costs **6 credits**. Choose **Lantern Square** or a district/workplace. In Crownreach, **B** opens the city guide.
+
+Press **E** at an entrance to inspect its property or jobs. A cottage costs **450 credits**. After buying, enter and use **E** at its cupboard for real backpack storage or at the bed to set your respawn home. Courier work starts at **Westgate Courier Depot**; a sealed parcel uses a separate job slot. Follow its destination, wait for the work timer and finish at the matching workplace to earn wages.
+
+Crownreach covers about 205 square miles. Its 400,000 residents are represented by district simulation with a bounded nearby crowd. Individual players own properties; claiming an existing town does not transfer ownership of the entire city.

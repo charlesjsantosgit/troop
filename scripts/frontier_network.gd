@@ -59,6 +59,7 @@ var _physics_viewport: SubViewport
 var _moon_sampler: MoonWorld
 var sites: Dictionary = {}
 var traffic: Dictionary = {}
+var city: Node
 var _build_queue: Array = []
 var _vehicle_motion: Dictionary = {}
 
@@ -66,6 +67,9 @@ var _vehicle_motion: Dictionary = {}
 func _ready() -> void:
 	net = get_parent()
 	process_mode = Node.PROCESS_MODE_ALWAYS
+	city = load("res://scripts/city_network.gd").new()
+	city.name = "CityNetwork"
+	add_child(city)
 
 
 func start_authority(seed_value: int, persist := false) -> Error:
@@ -123,6 +127,7 @@ func start_authority(seed_value: int, persist := false) -> Error:
 
 
 func stop() -> void:
+	if is_instance_valid(city): city.reset()
 	if authoritative and societies and persistence_enabled and society_ready:
 		if not societies.save_game(storage_path):
 			push_error("Shared society checkpoint could not be saved at shutdown.")
@@ -199,6 +204,7 @@ func register_peer(peer_id: int) -> void:
 
 
 func unregister_peer(peer_id: int) -> void:
+	if is_instance_valid(city): city.unregister_peer(peer_id)
 	_watch.erase(peer_id)
 	_requests.erase(peer_id)
 	_view_in_flight.erase(peer_id)

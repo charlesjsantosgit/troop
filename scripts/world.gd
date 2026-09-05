@@ -1421,6 +1421,12 @@ func respawn(p: MonkeyPlayer) -> void:
 			and is_instance_valid(expedition_manager) \
 			and expedition_manager.rescue_local_player_from_lunar_void(p):
 		return
+	if p == local_player and is_instance_valid(frontier) and is_instance_valid(frontier.city):
+		var home: Vector3 = frontier.city.prepare_respawn()
+		if home != Vector3.INF:
+			p.admin_teleport(home)
+			frontier.city.hold_arrival(home)
+			return
 	var pos := p.global_position
 	p.global_position = Vector3(pos.x, Gen.height(pos.x, pos.z) + 3.0, pos.z)
 	p.reset_physics_interpolation()
@@ -1428,6 +1434,9 @@ func respawn(p: MonkeyPlayer) -> void:
 
 
 func void_rescue_height(p: MonkeyPlayer) -> float:
+	if p == local_player and is_instance_valid(frontier) and is_instance_valid(frontier.city) \
+			and frontier.city.is_inside():
+		return -510.0
 	if p == local_player and expedition_manager \
 			and is_instance_valid(expedition_manager):
 		return expedition_manager.lunar_void_rescue_height(p)
@@ -1628,6 +1637,12 @@ func actor_defeated(actor: MonkeyPlayer, source: Node3D, hit_zone := "body",
 		return
 	var x := -4.0 if actor == local_player else 12.0
 	var z := 4.0 if actor == local_player else -14.0
+	if actor == local_player and is_instance_valid(frontier) and is_instance_valid(frontier.city):
+		var home: Vector3 = frontier.city.prepare_respawn()
+		if home != Vector3.INF:
+			actor.revive_at(home)
+			frontier.city.hold_arrival(home)
+			return
 	actor.revive_at(Vector3(x, Gen.height(x, z) + 2.2, z))
 
 
@@ -2208,7 +2223,9 @@ func _apply_day_night(update_sky: bool) -> void:
 	_environment.adjustment_brightness = lerpf(0.91, 0.98, daylight_amount)
 	if _particles:
 		_particles.emitting = season == SeasonalCycle.Season.SUMMER \
-			and daylight_amount < 0.52 and _earth_streaming_enabled
+			and daylight_amount < 0.52 and _earth_streaming_enabled \
+			and not (is_instance_valid(frontier) and is_instance_valid(frontier.city) \
+				and (frontier.city.is_in_city() or frontier.city.is_inside()))
 
 	if not update_sky or not _sky_material or not _celestial_sky:
 		return

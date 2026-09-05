@@ -108,13 +108,19 @@ func _ready() -> void:
 			var traffic_test = load("res://tests/frontiertraffictest.gd").new()
 			add_child(traffic_test)
 			traffic_test.call_deferred("run", self)
-		"frontiertest", "lunarskytest", "rocketgroundingtest":
+		"cityeconomytest", "cityplantest", "cityuitest", "frontiertest", "lunarskytest", "rocketgroundingtest":
 			mode = args[0]
 			var expansion_test = load("res://tests/%s.gd" % args[0]).new()
 			add_child(expansion_test)
 			expansion_test.call_deferred("run")
 		"frontier":
 			_start_frontier(_rand_name())
+		"cityplaytest", "citycapture", "citysoak":
+			mode = args[0]
+			_start_frontier("CrownreachTester", false)
+			var city_test = load("res://tests/cityplaytest.gd").new()
+			add_child(city_test)
+			city_test.call_deferred("run", self, args[0] == "citycapture")
 		"frontierplaytest", "frontierbench", "frontierroutetest", "frontierinteractiontest", "responsivenesstest", "backpacktest":
 			_start_frontier("SocietyTester", false)
 			var society_test = load("res://tests/%s.gd" % args[0]).new()
@@ -1867,6 +1873,12 @@ func _input(e: InputEvent) -> void:
 
 
 func _unhandled_input(e: InputEvent) -> void:
+	if is_instance_valid(frontier_controller) and is_instance_valid(frontier_controller.city) \
+			and frontier_controller.city.panel.visible:
+		if e.is_action_pressed("menu") or e.is_action_pressed("society"):
+			frontier_controller.city.close_panel()
+		get_viewport().set_input_as_handled()
+		return
 	if is_instance_valid(frontier_controller) and frontier_controller.ui.visible:
 		if e.is_action_pressed("menu") or e.is_action_pressed("society"):
 			frontier_controller.ui.close()

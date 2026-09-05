@@ -3,6 +3,7 @@ extends RefCounted
 ## Server-owned registry. Network authentication/proximity belongs to Net;
 ## accounts, ownership, finite transfers and durable state belong here.
 const SimScript = preload("res://scripts/frontier_sim.gd")
+const CityScript = preload("res://scripts/city_economy.gd")
 const Layout = preload("res://scripts/frontier_town_layout.gd")
 const VERSION := 1
 const MAX_PLAYERS := 64
@@ -19,10 +20,14 @@ const PUBLIC_ACTIONS := ["buy","sell","ship","accept_quest","deliver_quest","can
 var state: Dictionary = {}
 var simulations: Dictionary = {}
 var last_error := ""
+var _city_model = null
 
 func new_game(seed: int = 2026) -> void:
 	state={"schema_version":VERSION,"seed":seed,"time":400.0,"players":{},"claims":{},
 		"vehicle_fuel":{},"initial_money":STARTING_MONEY,"tick_remainder":0.0}
+	_city_model=CityScript.new()
+	_city_model.new_game(seed,float(state.time))
+	state.city=_city_model.state
 	simulations={}
 	for id in SOCIETIES:
 		var sim = SimScript.new()
@@ -161,12 +166,40 @@ func view(identity: String, town_id: String) -> Dictionary:
 	snapshot.claimed_town=member.claimed_town
 	return snapshot
 
+func city_view(identity: String, property_context: String = "") -> Dictionary:
+	var actor:=_actor(identity)
+	if not _valid_identity(identity) or not state.get("players",{}).has(actor): return {}
+	var city=_city()
+	if city==null: return {}
+	var result: Dictionary=city.view(actor,simulations.canopy,property_context)
+	var member: Dictionary=state.players[actor]
+	result.credits=int(member.credits)
+	result.backpack_counts=member.inventories.earth.duplicate(true)
+	result.backpack_capacity=350
+	result.time=float(state.time)
+	result.now=float(state.time)
+	return result
+
+func city_action(identity: String, kind: String, payload: Dictionary,
+		position: Vector3, time: float = -1.0) -> Dictionary:
+	var actor:=_actor(identity)
+	if not _valid_identity(identity) or not state.get("players",{}).has(actor):
+		return _result(false,"Register an authenticated resident first.")
+	var city=_city()
+	if city==null or not simulations.has("canopy"):
+		return _result(false,"Crownreach is unavailable.")
+	var authority_time:=float(state.time) if time<0.0 else time
+	var result: Dictionary=city.action(actor,kind,payload,simulations.canopy,position,authority_time)
+	state.city=city.state
+	return result
+
 func tick(dt: float) -> void:
 	if state.is_empty() or not is_finite(dt) or dt<=0.0: return
 	var before := int(float(state.time)/180.0)
 	for sim in simulations.values(): sim.tick(dt)
 	state.time=simulations.canopy.state.time
 	state.tick_remainder=simulations.canopy._accumulator
+	_advance_city(float(state.time))
 	# A shared bag ages once, regardless of how many societies expose it.
 	if int(float(state.time)/180.0)>before:
 		for actor in state.players:
@@ -218,6 +251,7 @@ func import_state(candidate: Variant) -> bool:
 		simulations[id].configure_shared_players(next.players)
 		simulations[id].state.vehicle_fuel=next.vehicle_fuel
 	state=next
+	_city_model=null
 	last_error=""
 	return true
 
@@ -267,6 +301,13 @@ func _validated(candidate: Variant) -> Dictionary:
 	if not candidate is Dictionary or not _bounded(candidate): return {}
 	var data: Dictionary=candidate.duplicate(true)
 	if data.get("schema_version")!=VERSION or not _integer(data.get("seed"),0,1000000000000) or not _number(data.get("time"),0,1000000000) or data.get("initial_money")!=STARTING_MONEY: return {}
+	if not data.has("city"):
+		var migrated=CityScript.new()
+		migrated.new_game(int(data.seed),float(data.time))
+		data.city=migrated.state
+	var city_check=CityScript.new()
+	if not city_check.import_state(data.city) or int(city_check.state.seed)!=int(data.seed) \
+			or float(city_check.state.last_time)>float(data.time)+0.0001: return {}
 	for key in ["players","claims","vehicle_fuel","simulations"]:
 		if not data.get(key) is Dictionary: return {}
 	if not _number(data.get("tick_remainder",0.0),0,16): return {}
@@ -282,6 +323,12 @@ func _validated(candidate: Variant) -> Dictionary:
 		var claim: Variant=member.get("claimed_town")
 		if not claim is String or (claim!="" and (not data.claims.has(claim) or data.claims[claim]!=actor)): return {}
 		money+=int(member.credits)
+	for property: Dictionary in city_check.state.properties.values():
+		if not data.players.has(str(property.owner)): return {}
+	for actor in city_check.state.homes:
+		if not data.players.has(actor): return {}
+	for actor in city_check.state.active_jobs:
+		if not data.players.has(actor): return {}
 	for town_id in data.claims:
 		var actor: Variant=data.claims[town_id]
 		if _town_parts(str(town_id)).is_empty() or not actor is String or not data.players.has(actor) or data.players[actor].claimed_town!=town_id: return {}
@@ -320,6 +367,19 @@ func _validated(candidate: Variant) -> Dictionary:
 			if quantity>350: return {}
 	data.erase("simulations")
 	return {"state":data,"simulations":tested}
+
+func _city():
+	if not state.get("city") is Dictionary: return null
+	if _city_model==null or _city_model.state!=state.city:
+		var candidate=CityScript.new()
+		if not candidate.import_state(state.city): return null
+		_city_model=candidate
+	return _city_model
+
+func _advance_city(to_time: float) -> void:
+	var city=_city()
+	if city==null: return
+	if city.advance(to_time): state.city=city.state
 
 func _count_reservation(location: String, quantity: int, sim, totals: Dictionary) -> void:
 	var record: Dictionary=sim.state.locations[location]
