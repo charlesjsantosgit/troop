@@ -470,12 +470,13 @@ func _journal() -> void:
 
 
 func _places() -> void:
-	if is_instance_valid(controller.city) and controller.current_planet() == "earth":
+	var city: Node = controller.get("city")
+	if is_instance_valid(city) and controller.current_planet() == "earth":
 		_section("Crownreach & housing", "Visit the transit stop for the city. Inspect any marked housing entrance with E.")
 		var city_card := _card(_body)
 		_line(city_card, "Crownreach · Lantern Square", 20, GOLD)
 		_line(city_card, "205 square miles · 400,000 census residents · homes, storage and practical jobs", 14, MUTED)
-		_button(city_card, "Find nearest transit stop", controller.city.locate_transit, true)
+		_button(city_card, "Find nearest transit stop", city.locate_transit, true)
 	_section("Towns", "Find a community board to visit or claim a settlement.")
 	if controller.has_method("known_towns"):
 		for town: Dictionary in controller.known_towns():

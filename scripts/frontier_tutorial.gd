@@ -212,10 +212,11 @@ func _show_waypoint() -> void:
 func _refresh_card() -> void:
 	if not is_instance_valid(_panel):
 		return
+	var city: Node = controller.get("city")
 	_panel.visible = active and not complete and not controller.ui.visible \
 		and Net.player_realm() != Net.PlayerRealm.TRANSIT \
-		and not (is_instance_valid(controller.city) \
-			and (controller.city.is_in_city() or controller.city.is_inside() or controller.city.panel.visible))
+		and not (is_instance_valid(city) \
+			and (city.is_in_city() or city.is_inside() or city.panel.visible))
 	var info := summary()
 	_title.text = "%s · %d / %d\n%s" % [chapter.capitalize(), info.step, info.total, info.title]
 	_text.text = str(info.text) + "\n\nB → Tutorial to pause, resume or choose a lesson."
